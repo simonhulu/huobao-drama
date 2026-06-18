@@ -137,6 +137,23 @@
               </label>
             </div>
           </div>
+
+          <div class="dialog-section">
+            <div class="dialog-section-head">
+              <span class="dialog-section-title">画面方向</span>
+              <span class="dialog-section-copy">决定视频输出的宽高比</span>
+            </div>
+            <div class="radio-group">
+              <label class="radio">
+                <input type="radio" v-model="newEpisodeAspect" value="16:9" />
+                <span>横屏 16:9</span>
+              </label>
+              <label class="radio">
+                <input type="radio" v-model="newEpisodeAspect" value="9:16" />
+                <span>竖屏 9:16</span>
+              </label>
+            </div>
+          </div>
         </div>
         <div class="dialog-foot">
           <div class="dialog-foot-copy">创建后，工作台中的图片、视频、音频生成入口都会锁定到当前集。</div>
@@ -165,6 +182,7 @@ const audioConfigs = ref([])
 const newEpisodeImageConfigId = ref(null)
 const newEpisodeVideoConfigId = ref(null)
 const newEpisodeAudioConfigId = ref(null)
+const newEpisodeAspect = ref('16:9')
 
 function hasScript(ep) { return !!(ep.script_content || ep.scriptContent) }
 
@@ -220,6 +238,7 @@ async function addEpisode() {
       image_config_id: newEpisodeImageConfigId.value,
       video_config_id: newEpisodeVideoConfigId.value,
       audio_config_id: newEpisodeAudioConfigId.value,
+      aspect_ratio: newEpisodeAspect.value,
     })
     toast.success('已添加新集')
     addDialog.value = false
@@ -477,7 +496,47 @@ onMounted(() => { load(); loadConfigs() })
 .field-label { font-size: 12px; font-weight: 600; color: var(--text-1); }
 .field-hint { font-size: 12px; color: var(--text-3); }
 
+.radio-group {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.radio {
+  flex: 1 1 120px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(244,248,255,0.96), rgba(255,255,255,0.78));
+  border: 1px solid rgba(27, 41, 64, 0.08);
+  color: var(--text-1);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.18s var(--ease-out);
+}
+.radio:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.radio input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.radio:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+
 @media (max-width: 860px) {
+  .radio {
+    flex: 1 1 100%;
+  }
+
   .dialog {
     width: 100%;
     max-height: calc(100vh - 24px);

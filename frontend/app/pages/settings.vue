@@ -91,7 +91,8 @@
                 <div class="section-subtitle">{{ serviceMeta[st.type].desc }}</div>
               </div>
               <span v-if="countActive(st.type)" class="tag tag-accent">{{ countActive(st.type) }} 已启用</span>
-              <button class="btn btn-ghost btn-sm ml-auto" @click="startAddCfg(st.type)"><Plus :size="13" /> 添加</button>
+              <button v-if="st.type === 'audio'" class="btn btn-ghost btn-sm ml-auto" :disabled="voiceSyncing" @click="syncVoices"><RefreshCw :size="13" /> {{ voiceSyncing ? '同步中…' : '同步音色' }}</button>
+              <button class="btn btn-ghost btn-sm" :class="{ 'ml-auto': st.type !== 'audio' }" @click="startAddCfg(st.type)"><Plus :size="13" /> 添加</button>
             </div>
             <div class="config-list">
               <div v-for="c in byType(st.type)" :key="c.id" class="card config-row">
@@ -391,10 +392,10 @@
 </template>
 
 <script setup>
-import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, RefreshCw } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
-import { aiConfigAPI, agentConfigAPI, skillsAPI } from '~/composables/useApi'
+import { aiConfigAPI, agentConfigAPI, skillsAPI, voicesAPI } from '~/composables/useApi'
 import brandLogo from '~/assets/huobao-logo.png'
 
 const showBrandImage = ref(true)
@@ -442,6 +443,7 @@ const providerPresets = {
   },
   video: {
     volcengine: { label: '火宝视频', baseUrl: 'https://api.chatfire.site/volcengine', models: ['doubao-seedance-1-5-pro-251215'] },
+    minimax: { label: 'MiniMax 视频', baseUrl: 'https://api.minimaxi.com', models: ['MiniMax-Hailuo-2.3'] },
     vidu: { label: 'Vidu 推荐', baseUrl: 'https://api.vidu.com', models: ['viduq3-turbo'] },
     ali: { label: '阿里推荐', baseUrl: 'https://dashscope.aliyuncs.com', models: ['wan2.6-i2v-flash'] },
   },
@@ -491,6 +493,20 @@ function applyProviderPreset(type, provider) {
 }
 
 async function loadCfgs() { try { cfgs.value = await aiConfigAPI.list() } catch (e) { toast.error(e.message) } }
+
+const voiceSyncing = ref(false)
+async function syncVoices() {
+  if (voiceSyncing.value) return
+  voiceSyncing.value = true
+  try {
+    const r = await voicesAPI.sync()
+    toast.success(r?.message || `已同步 ${r?.count ?? 0} 个音色`)
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    voiceSyncing.value = false
+  }
+}
 async function toggleCfg(c) { await aiConfigAPI.update(c.id, { is_active: !c.is_active }); loadCfgs() }
 async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'); loadCfgs() }
 function startAddCfg(t) {
