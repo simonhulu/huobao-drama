@@ -285,6 +285,10 @@
             <div class="toolbar-right">
               <span v-if="charsVoiced" class="char-count">{{ charsVoiced }}/{{ chars.length }} 已分配</span>
               <span v-if="voiceSampleCount" class="char-count">{{ voiceSampleCount }}/{{ charsVoiced }} 试听文件</span>
+              <button v-if="chars.length" class="btn btn-sm" @click="autoAssignVoices(false)" title="按角色性别/年龄/性格规则自动填未分配的音色，不调用大模型">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>
+                智能默认分配
+              </button>
               <button v-if="charsVoiced" class="btn btn-sm" @click="doVoice" :disabled="rn">
                 <Loader2 v-if="rn && rt === 'voice_assigner'" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
@@ -384,12 +388,13 @@
                 </div>
 
                 <div class="voice-actions-row">
-                  <button class="btn btn-sm" :disabled="!(c.voice_style || c.voiceStyle)" @click="genSample(c.id)">
+                  <button class="btn btn-sm" :disabled="!(c.voice_style || c.voiceStyle) || isPendingVoiceSample(c.id)" @click="genSample(c.id)">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-                    {{ (c.voice_sample_url || c.voiceSampleUrl) ? '重新试听' : '生成试听' }}
+                    {{ isPendingVoiceSample(c.id) ? '试听生成中' : ((c.voice_sample_url || c.voiceSampleUrl) ? '重新试听' : '生成试听') }}
                   </button>
-                  <span class="dim" style="font-size:11px">{{ (c.voice_sample_url || c.voiceSampleUrl) ? '已生成声音样本，可直接播放' : '生成后可快速确认角色声音' }}</span>
+                  <span class="dim" style="font-size:11px">{{ isPendingVoiceSample(c.id) ? '任务已加入队列，完成后会自动刷新' : ((c.voice_sample_url || c.voiceSampleUrl) ? '已生成声音样本，可直接播放' : '生成后可快速确认角色声音') }}</span>
                 </div>
+                <div v-if="voiceSampleError(c.id)" class="prod-error">{{ voiceSampleError(c.id) }}</div>
 
                 <div v-if="c.voice_sample_url || c.voiceSampleUrl" class="voice-player">
                   <audio :src="'/' + (c.voice_sample_url || c.voiceSampleUrl)" controls preload="none" />
@@ -421,6 +426,16 @@
                 <Loader2 v-if="rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
                 <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 {{ sbs.length ? '重新拆解' : 'AI 拆解分镜' }}
+              </button>
+              <button v-if="sbs.length" class="btn btn-sm" :disabled="rn" @click="doNarration">
+                <Loader2 v-if="rt === 'narrator'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 11v3a1 1 0 0 0 1 1h2l3.29 3.29A1 1 0 0 0 11 17.5v-11a1 1 0 0 0-1.71-.71L6 9H4a1 1 0 0 0-1 1z"/></svg>
+                AI 生成旁白
+              </button>
+              <button v-if="sbs.length" class="btn btn-sm" :disabled="rn" @click="doSplitShots" title="把旁白+对白过长的镜头细分为多个，避免画面停滞">
+                <Loader2 v-if="rt === 'storyboard_splitter'" :size="11" class="animate-spin" />
+                <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                细分超载镜头
               </button>
             </div>
           </div>
@@ -642,9 +657,14 @@
                     </label>
                   </div>
                   <label class="field">
-                    <span class="field-label">对白 / 旁白</span>
+                    <span class="field-label">对白</span>
                     <textarea :value="selectedSb.dialogue || ''" class="textarea" rows="3"
-                      @blur="updateField(selectedSb, 'dialogue', $event.target.value)" placeholder="角色名：台词内容 或 旁白：内容" />
+                      @blur="updateField(selectedSb, 'dialogue', $event.target.value)" placeholder="角色名：台词内容（角色原声，关键时刻点睛）" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">旁白 / 解说</span>
+                    <textarea :value="selectedSb.narration || ''" class="textarea" rows="3"
+                      @blur="updateField(selectedSb, 'narration', $event.target.value)" placeholder="第三人称解说词，作为主音轨讲述这个镜头（可用 AI 一键生成）" />
                   </label>
                 </div>
                 <div class="detail-section">
@@ -827,6 +847,10 @@
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
                   批量生成
                 </button>
+                <button v-if="ttsGeneratedCount" class="btn btn-sm" @click="regenAllTTS" title="用当前音色重新生成所有已配音镜头（改音色后用）">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  重新生成全部
+                </button>
               </div>
             </div>
 
@@ -848,7 +872,12 @@
                     </div>
                     <div class="dub-desc">{{ getDialogueText(sb) || '未填写文本' }}</div>
                     </div>
-                    <span class="tag" :class="hasTTS(sb) ? 'tag-success' : ''">{{ hasTTS(sb) ? '已生成' : '待生成' }}</span>
+                    <span
+                      class="tag"
+                      :class="isPendingShotTTS(sb.id) ? 'tag-warning' : hasTTS(sb) ? 'tag-success' : shotTTSError(sb.id) ? 'tag-error' : ''"
+                    >
+                      {{ isPendingShotTTS(sb.id) ? '生成中' : hasTTS(sb) ? '已生成' : shotTTSError(sb.id) ? '失败' : '待生成' }}
+                    </span>
                   </div>
                 <div class="dub-meta">
                   <span class="dim">{{ sb.shot_type || sb.shotType || '未设景别' }}</span>
@@ -857,9 +886,10 @@
                 </div>
                 <div class="dub-foot">
                   <audio v-if="hasTTS(sb)" :src="'/' + getTTSUrl(sb)" controls preload="none" class="dub-audio" />
-                  <div v-else class="dim" style="font-size:12px">尚未生成语音文件</div>
-                  <button class="btn btn-sm ml-auto" @click="genShotTTS(sb)">生成配音</button>
+                  <div v-else class="dim" style="font-size:12px">{{ isPendingShotTTS(sb.id) ? '配音任务已加入队列' : '尚未生成语音文件' }}</div>
+                  <button class="btn btn-sm ml-auto" :disabled="isPendingShotTTS(sb.id)" @click="genShotTTS(sb)">{{ isPendingShotTTS(sb.id) ? '生成中' : hasTTS(sb) ? '重新生成' : '生成配音' }}</button>
                 </div>
+                <div v-if="shotTTSError(sb.id)" class="prod-error">{{ shotTTSError(sb.id) }}</div>
               </div>
             </div>
           </div>
@@ -872,6 +902,10 @@
               <span class="tag">{{ lockedImageConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
                 <BaseSelect v-model="frameMode" :options="frameModeOptions" placeholder="帧模式" searchable style="width:100px" />
+                <button class="btn btn-sm" @click="batchShotFrames">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  批量生成
+                </button>
                 <button v-if="gridImagePath" class="btn btn-sm" @click="reopenGridPreview">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
                   查看当前宫格图
@@ -967,15 +1001,16 @@
                           class="previewable-image"
                           @click.stop="openImageViewer('/' + getFirstFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 首帧`)"
                         />
-                        <div v-else class="frame-thumb-empty">
+                        <div v-else class="frame-thumb-empty" :class="{ 'frame-thumb-failed': isFailedShotFrame(sb.id, 'first_frame') }" :title="shotFrameFailMessage(sb.id, 'first_frame')">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'first_frame')" :size="14" class="animate-spin" />
+                          <svg v-else-if="isFailedShotFrame(sb.id, 'first_frame')" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                           <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                         </div>
                         <span v-if="getFirstFrame(sb)" class="frame-re">
                           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                         </span>
                       </div>
-                      <span class="frame-thumb-label">{{ isPendingShotFrame(sb.id, 'first_frame') ? '首帧生成中' : '首帧' }}</span>
+                      <span class="frame-thumb-label" :class="{ 'label-failed': isFailedShotFrame(sb.id, 'first_frame') }">{{ isPendingShotFrame(sb.id, 'first_frame') ? '首帧生成中' : isFailedShotFrame(sb.id, 'first_frame') ? '失败 点击重试' : '首帧' }}</span>
                     </div>
                     <div v-if="frameMode === 'first_last'" class="frame-thumb-wrap">
                       <div class="frame-thumb" @click.stop="!isPendingShotFrame(sb.id, 'last_frame') && genShotFrame(sb, 'last_frame')">
@@ -985,15 +1020,16 @@
                           class="previewable-image"
                           @click.stop="openImageViewer('/' + getLastFrame(sb), `镜头 #${String(i + 1).padStart(2, '0')} 尾帧`)"
                         />
-                        <div v-else class="frame-thumb-empty">
+                        <div v-else class="frame-thumb-empty" :class="{ 'frame-thumb-failed': isFailedShotFrame(sb.id, 'last_frame') }" :title="shotFrameFailMessage(sb.id, 'last_frame')">
                           <Loader2 v-if="isPendingShotFrame(sb.id, 'last_frame')" :size="14" class="animate-spin" />
+                          <svg v-else-if="isFailedShotFrame(sb.id, 'last_frame')" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                           <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                         </div>
                         <span v-if="getLastFrame(sb)" class="frame-re">
                           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                         </span>
                       </div>
-                      <span class="frame-thumb-label">{{ isPendingShotFrame(sb.id, 'last_frame') ? '尾帧生成中' : '尾帧' }}</span>
+                      <span class="frame-thumb-label" :class="{ 'label-failed': isFailedShotFrame(sb.id, 'last_frame') }">{{ isPendingShotFrame(sb.id, 'last_frame') ? '尾帧生成中' : isFailedShotFrame(sb.id, 'last_frame') ? '失败 点击重试' : '尾帧' }}</span>
                     </div>
                   </div>
                 </div>
@@ -1180,8 +1216,9 @@
                 <!-- Step 4: Done -->
                 <div v-else-if="gridStep === 4" class="grid-tool-body" style="align-items:center;justify-content:center;min-height:200px">
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  <div style="font-size:17px;font-weight:700;font-family:var(--font-display);margin-top:8px">分配完成</div>
-                  <div class="dim" style="font-size:13px;margin-top:4px">{{ gridAssignedCount }} 格已分配</div>
+                  <div style="font-size:17px;font-weight:700;font-family:var(--font-display);margin-top:8px">{{ isGridSplitPending() ? '分配任务已提交' : gridSplitError() ? '分配失败' : '分配完成' }}</div>
+                  <div class="dim" style="font-size:13px;margin-top:4px">{{ isGridSplitPending() ? '后台正在切分图片并写回分镜' : `${gridAssignedCount} 格已分配` }}</div>
+                  <div v-if="gridSplitError()" class="prod-error">{{ gridSplitError() }}</div>
                   <button class="btn btn-primary" style="margin-top:16px" @click="gridDialog = false; refresh()">关闭</button>
                 </div>
               </div>
@@ -1248,9 +1285,13 @@
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ composedCount }}/{{ sbs.length }} 已合成</span>
               <div class="ml-auto flex gap-1">
-                <button class="btn btn-sm" @click="batchCompose">
+                <button class="btn btn-sm" @click="batchCompose(false)">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   批量合成
+                </button>
+                <button v-if="composedCount" class="btn btn-sm" @click="batchCompose(true)" title="忽略缓存、用当前配音重新合成全部（改音色后用）">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  重新合成全部
                 </button>
               </div>
             </div>
@@ -1296,7 +1337,7 @@
                   <div v-if="composeFailMessage(sb.id)" class="prod-error">{{ composeFailMessage(sb.id) }}</div>
                 </div>
                 <div class="prod-actions">
-                  <button class="btn btn-sm" :disabled="!hasVid(sb) || isPendingCompose(sb.id)" @click="doCompose(sb)">
+                  <button class="btn btn-sm" :disabled="!hasVid(sb) || isPendingCompose(sb.id)" @click="doCompose(sb, hasComposed(sb))">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                     {{ isPendingCompose(sb.id) ? '合成中' : (hasComposed(sb) ? '重新合成' : '开始合成') }}
                   </button>
@@ -1326,10 +1367,24 @@
               <div class="export-bar">
                 <span class="tag tag-success">拼接完成</span>
                 <span class="dim" style="font-size:12px">{{ sbs.length }} 镜头 · {{ totalDuration }}s</span>
-                <a :href="'/' + mergeUrl" download class="btn btn-primary ml-auto">
+                <button class="btn ml-auto" :disabled="composedCount === 0 || isMerging" @click="doMerge">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  重新拼接
+                </button>
+                <a :href="'/' + mergeUrl" download class="btn btn-primary">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                   下载视频
                 </a>
+              </div>
+            </template>
+            <template v-else-if="isMerging">
+              <div class="step-empty">
+                <div class="empty-visual">
+                  <Loader2 :size="32" class="animate-spin" />
+                </div>
+                <div class="empty-title">正在拼接全集视频…</div>
+                <div class="empty-desc">正在合成 {{ composedCount }} 个镜头，请勿关闭页面。完成后会自动显示成片。</div>
+                <div class="merge-progress-track"><div class="merge-progress-fill" /></div>
               </div>
             </template>
             <template v-else>
@@ -1337,11 +1392,12 @@
                 <div class="empty-visual">
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                 </div>
-                <div class="empty-title">拼接全集视频</div>
-                <div class="empty-desc">将 {{ composedCount }} 个已合成镜头拼接为完整视频</div>
+                <div class="empty-title">{{ mergeFailed ? '拼接失败' : '拼接全集视频' }}</div>
+                <div v-if="mergeFailed" class="empty-desc merge-error-text">{{ mergeFailMessage || '拼接过程中出错，请重试' }}</div>
+                <div v-else class="empty-desc">将 {{ composedCount }} 个已合成镜头拼接为完整视频</div>
                 <button class="btn btn-primary" :disabled="composedCount === 0" @click="doMerge" style="margin-top:12px">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-                  开始拼接
+                  {{ mergeFailed ? '重新拼接' : '开始拼接' }}
                 </button>
               </div>
             </template>
@@ -1442,6 +1498,7 @@ import {
 } from 'lucide-vue-next'
 import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
+import { useTasks } from '~/composables/useTasks'
 import BaseSelect from '~/components/BaseSelect.vue'
 
 definePageMeta({ layout: 'studio' })
@@ -1452,18 +1509,31 @@ const episodeNumber = Number(route.params.episodeNumber)
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), sbs = ref([]), mergeData = ref(null)
 const panel = ref('script')
-const { running: rn, runningType: rt, run: runAgent } = useAgent()
+const { running: rn, runningType: rt, run: runAgent, loadTasks: loadAgentTasks } = useAgent()
 
 const localRaw = ref(''), localScript = ref('')
 const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
 const epId = computed(() => episode.value?.id || 0)
+const {
+  tasks: mediaTasks,
+  loading: tasksLoading,
+  error: tasksError,
+  lastLoadedAt: tasksLastLoadedAt,
+  loadTasks: loadCreationTasks,
+  startPolling: startTaskPolling,
+} = useTasks({ dramaId, episodeId: epId, pollMs: 3000 })
 const rawLen = computed(() => localRaw.value.replace(/\s/g, '').length || 0)
 const scriptLen = computed(() => localScript.value.replace(/\s/g, '').length || 0)
 const charsVoiced = computed(() => chars.value.filter(c => c.voice_style || c.voiceStyle).length)
 const voiceSampleCount = computed(() => chars.value.filter(c => c.voice_sample_url || c.voiceSampleUrl).length)
 const composedCount = computed(() => sbs.value.filter(s => s.composed_video_url || s.composedVideoUrl).length)
 const mergeUrl = computed(() => mergeData.value?.merged_url || mergeData.value?.mergedUrl || null)
+const merging = ref(false)
+const mergeStatus = computed(() => mergeData.value?.status || '')
+const isMerging = computed(() => merging.value || mergeStatus.value === 'processing' || mergeStatus.value === 'pending' || isMergeTaskRunning())
+const mergeFailed = computed(() => !merging.value && mergeStatus.value === 'failed')
+const mergeFailMessage = computed(() => mergeData.value?.error_msg || mergeData.value?.errorMsg || '')
 
 const scriptStep = ref(0)
 const prodTab = ref('chars')
@@ -1498,14 +1568,73 @@ const gridLayoutOptions = [
 const imageConfigs = ref([])
 const videoConfigs = ref([])
 const audioConfigs = ref([])
-const pendingCharImageIds = ref([])
-const pendingSceneImageIds = ref([])
-const pendingShotFrameKeys = ref([])
-const pendingVideoIds = ref([])
-const pendingComposeIds = ref([])
 const failedVideoMessages = ref({})
 const failedComposeMessages = ref({})
+const failedShotFrameMessages = ref({})
 const imageViewer = ref({ open: false, src: '', title: '' })
+
+const ACTIVE_TASK_STATUSES = new Set(['queued', 'running'])
+const FAILED_TASK_STATUSES = new Set(['failed', 'stale'])
+
+function isActiveTask(task) {
+  return !!task && ACTIVE_TASK_STATUSES.has(String(task.status || ''))
+}
+
+function isFailedTask(task) {
+  return !!task && FAILED_TASK_STATUSES.has(String(task.status || ''))
+}
+
+function taskScopeId(task) {
+  return Number(task?.scope_id ?? task?.scopeId ?? 0)
+}
+
+function taskPayloadValue(task, snakeKey, camelKey) {
+  const payload = task?.payload || {}
+  return payload[snakeKey] ?? payload[camelKey]
+}
+
+function latestMediaTask(type, matcher) {
+  return [...mediaTasks.value]
+    .filter(task => task?.type === type && matcher(task))
+    .sort((a, b) => Number(b?.id || 0) - Number(a?.id || 0))[0] || null
+}
+
+function taskFailureMessage(task) {
+  if (!task) return ''
+  return task.error_message || task.errorMessage || (task.status === 'stale' ? '任务已中断，请重试' : '任务失败')
+}
+
+function shotTTSTask(storyboardId) {
+  const id = Number(storyboardId)
+  return latestMediaTask('tts.storyboard', task =>
+    taskScopeId(task) === id || Number(taskPayloadValue(task, 'storyboard_id', 'storyboardId')) === id,
+  )
+}
+
+function isPendingShotTTS(storyboardId) {
+  return isActiveTask(shotTTSTask(storyboardId))
+}
+
+function shotTTSError(storyboardId) {
+  const task = shotTTSTask(storyboardId)
+  return isFailedTask(task) ? taskFailureMessage(task) : ''
+}
+
+function voiceSampleTask(characterId) {
+  const id = Number(characterId)
+  return latestMediaTask('tts.character_sample', task =>
+    taskScopeId(task) === id || Number(taskPayloadValue(task, 'character_id', 'characterId')) === id,
+  )
+}
+
+function isPendingVoiceSample(characterId) {
+  return isActiveTask(voiceSampleTask(characterId))
+}
+
+function voiceSampleError(characterId) {
+  const task = voiceSampleTask(characterId)
+  return isFailedTask(task) ? taskFailureMessage(task) : ''
+}
 
 function configLabel(config) {
   if (!config) return '未配置'
@@ -1515,7 +1644,9 @@ function configLabel(config) {
 }
 
 function isPendingCharImage(id) {
-  return pendingCharImageIds.value.includes(id)
+  return isActiveTask(latestMediaTask('image.generate', task =>
+    (task.scope_type || task.scopeType) === 'character' && taskScopeId(task) === Number(id),
+  ))
 }
 
 function openImageViewer(src, title = '') {
@@ -1540,31 +1671,67 @@ onBeforeUnmount(() => {
 })
 
 function isPendingSceneImage(id) {
-  return pendingSceneImageIds.value.includes(id)
+  return isActiveTask(latestMediaTask('image.generate', task =>
+    (task.scope_type || task.scopeType) === 'scene' && taskScopeId(task) === Number(id),
+  ))
 }
 
 function framePendingKey(id, frameType) {
   return `${id}:${frameType}`
 }
 
+function shotFrameTask(id, frameType) {
+  const storyboardId = Number(id)
+  return latestMediaTask('image.generate', task =>
+    (task.scope_type || task.scopeType) === 'storyboard'
+    && taskScopeId(task) === storyboardId
+    && String(taskPayloadValue(task, 'frame_type', 'frameType') || '') === frameType,
+  )
+}
+
 function isPendingShotFrame(id, frameType) {
-  return pendingShotFrameKeys.value.includes(framePendingKey(id, frameType))
+  return isActiveTask(shotFrameTask(id, frameType))
+}
+
+function isFailedShotFrame(id, frameType) {
+  return !!failedShotFrameMessages.value[framePendingKey(id, frameType)] || isFailedTask(shotFrameTask(id, frameType))
+}
+
+function shotFrameFailMessage(id, frameType) {
+  const task = shotFrameTask(id, frameType)
+  return failedShotFrameMessages.value[framePendingKey(id, frameType)] || (isFailedTask(task) ? taskFailureMessage(task) : '')
 }
 
 function isPendingVideo(id) {
-  return pendingVideoIds.value.includes(id)
+  return isActiveTask(latestMediaTask('video.generate', task =>
+    (task.scope_type || task.scopeType) === 'storyboard' && taskScopeId(task) === Number(id),
+  ))
 }
 
 function videoFailMessage(id) {
-  return failedVideoMessages.value[id] || ''
+  const task = latestMediaTask('video.generate', item =>
+    (item.scope_type || item.scopeType) === 'storyboard' && taskScopeId(item) === Number(id),
+  )
+  return failedVideoMessages.value[id] || (isFailedTask(task) ? taskFailureMessage(task) : '')
 }
 
 function isPendingCompose(id) {
-  return pendingComposeIds.value.includes(id)
+  return isActiveTask(latestMediaTask('compose.storyboard', task =>
+    (task.scope_type || task.scopeType) === 'storyboard' && taskScopeId(task) === Number(id),
+  ))
 }
 
 function composeFailMessage(id) {
-  return failedComposeMessages.value[id] || ''
+  const task = latestMediaTask('compose.storyboard', item =>
+    (item.scope_type || item.scopeType) === 'storyboard' && taskScopeId(item) === Number(id),
+  )
+  return failedComposeMessages.value[id] || (isFailedTask(task) ? taskFailureMessage(task) : '')
+}
+
+function isMergeTaskRunning() {
+  return isActiveTask(latestMediaTask('merge.episode', task =>
+    (task.scope_type || task.scopeType) === 'episode' && taskScopeId(task) === Number(epId.value),
+  ))
 }
 
 function isNarratorCharacter(char) {
@@ -1603,6 +1770,7 @@ const gridPromptStatus = ref('')
 const gridAssignmentsState = ref([])
 const gridActiveShotIds = ref([])
 const gridHistory = ref([])
+const gridSplitTaskId = ref(null)
 const showAllGridHistory = ref(false)
 const activeGridCell = ref(0)
 const gridAssignmentPage = ref(0)
@@ -1963,14 +2131,17 @@ async function startGridGen() {
     const res = await gridAPI.generate({
       storyboard_ids: ids,
       drama_id: dramaId,
+      episode_id: epId.value,
       rows,
       cols,
       mode: gridMode.value,
       custom_prompt: gridPromptText.value || undefined,
+      aspect_ratio: episode.value?.aspect_ratio || '16:9',
     })
     gridGenId.value = res.image_generation_id
     gridActualLayout.value = res.grid || { rows, cols }
     gridStatusText.value = '等待图片生成...'
+    await loadCreationTasks()
     pollGridStatus()
   } catch (e) {
     toast.error(e.message)
@@ -1999,6 +2170,32 @@ async function pollGridStatus() {
     } catch {}
   }
   toast.error('生成超时'); gridStep.value = 0
+}
+
+async function hydrateShotFrameFailures() {
+  // 从图片生成记录里恢复历史失败态：某镜头某帧最新记录为 failed 且当前无图 → 标记失败
+  try {
+    const rows = await imageAPI.list({ drama_id: dramaId })
+    const list = Array.isArray(rows) ? rows : []
+    const sbIds = new Set(sbs.value.map(s => s.id))
+    const latestByKey = new Map()
+    for (const row of list) {
+      const sid = row?.storyboard_id ?? row?.storyboardId
+      const ft = String(row?.frame_type || row?.frameType || '')
+      if (!sbIds.has(sid) || (ft !== 'first_frame' && ft !== 'last_frame')) continue
+      const key = framePendingKey(sid, ft)
+      const prev = latestByKey.get(key)
+      if (!prev || Number(row?.id || 0) > Number(prev?.id || 0)) latestByKey.set(key, row)
+    }
+    const next = {}
+    for (const [key, row] of latestByKey) {
+      const [sid, ft] = key.split(':')
+      if (row?.status === 'failed' && !hasShotFrame(Number(sid), ft)) {
+        next[key] = row?.error_msg || row?.errorMsg || '生成失败'
+      }
+    }
+    failedShotFrameMessages.value = next
+  } catch {}
 }
 
 async function loadLatestGridImage() {
@@ -2063,10 +2260,17 @@ async function doGridSplit() {
       toast.warning('请至少分配一个格子')
       return
     }
-    await gridAPI.split({ image_generation_id: gridGenId.value, rows, cols, assignments })
+    const res = await gridAPI.split({ image_generation_id: gridGenId.value, rows, cols, assignments })
+    gridSplitTaskId.value = res?.task_id || null
     persistGridImagePath(gridImagePath.value)
     gridStep.value = 4
-    toast.success('切分分配完成')
+    toast.success('切图分配任务已加入队列')
+    await refresh()
+    watchAsyncResult(() => {
+      const task = currentGridSplitTask()
+      if (!task && gridSplitTaskId.value) return false
+      return !gridSplitTaskId.value || task?.status === 'succeeded' || isFailedTask(task)
+    }, 24)
   } catch (e) {
     toast.error(e.message)
   }
@@ -2409,7 +2613,23 @@ const scriptSteps = computed(() => {
 watch(rawContent, v => { localRaw.value = v }, { immediate: true })
 watch(scriptContent, v => { localScript.value = v }, { immediate: true })
 
-async function refresh() {
+function currentGridSplitTask() {
+  if (!gridSplitTaskId.value) return null
+  return mediaTasks.value.find(task => Number(task?.id || 0) === Number(gridSplitTaskId.value)) || null
+}
+
+function isGridSplitPending() {
+  if (!gridSplitTaskId.value) return false
+  const task = currentGridSplitTask()
+  return !task || isActiveTask(task)
+}
+
+function gridSplitError() {
+  const task = currentGridSplitTask()
+  return isFailedTask(task) ? taskFailureMessage(task) : ''
+}
+
+async function refresh(options = {}) {
   try {
     drama.value = await dramaAPI.get(dramaId)
     const ep = drama.value.episodes?.find(e => (e.episode_number || e.episodeNumber) === episodeNumber)
@@ -2418,7 +2638,15 @@ async function refresh() {
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
       try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
       sbs.value = await episodeAPI.storyboards(ep.id)
-      if (sbs.value.length && !selectedSb.value) selectedSb.value = sbs.value[0]
+      // sbs 已替换为全新对象，重新把 selectedSb 指到对应的新对象，避免渲染旧数据(如旁白)
+      if (sbs.value.length) {
+        const prevId = selectedSb.value?.id
+        selectedSb.value = sbs.value.find(s => s.id === prevId) || sbs.value[0]
+      } else {
+        selectedSb.value = null
+      }
+      await loadAgentTasks(dramaId, ep.id, refresh)
+      if (!options.skipTasks) await loadCreationTasks()
 
       const epHasContent = !!(episode.value?.content)
       const epHasScript = !!(episode.value?.script_content || episode.value?.scriptContent)
@@ -2451,27 +2679,79 @@ function skipRewrite() {
   toast.success('已跳过 AI 改写，当前将直接使用原始内容')
   scriptStep.value = 2
 }
-function doExtract() { saveScr(); runAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', dramaId, epId.value, refresh) }
+function doExtract() { saveScr(); runAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', dramaId, epId.value, afterExtract) }
+async function afterExtract() {
+  await refresh()
+  // 提取完成后，自动用 LLM（配音导演）按性别/年龄/职业/定位分配音色，再错开同音色音调；
+  // LLM 不可用时回退规则分配（规则分配自带音调去重）
+  try {
+    await runAgent('voice_assigner', '请为所有角色分配合适的音色', dramaId, epId.value, async () => {
+      await voicesAPI.dedupePitches(epId.value)
+      toast.success('已自动分配角色音色')
+      await refresh()
+    })
+    return
+  } catch (e) {
+    try {
+      const r = await voicesAPI.autoAssign(epId.value, false)
+      if (r?.assigned?.length) toast.success(`已为 ${r.assigned.length} 个角色分配默认音色`)
+    } catch (_) { /* 分配失败不阻断提取流程 */ }
+  }
+  await refresh()
+}
+async function autoAssignVoices(overwrite = false) {
+  try {
+    const r = await voicesAPI.autoAssign(epId.value, overwrite)
+    toast.success(r?.assigned?.length ? `已分配 ${r.assigned.length} 个角色音色` : '没有需要分配的角色')
+    await refresh()
+  } catch (e) { toast.error(e.message) }
+}
 function doVoice() { runAgent('voice_assigner', '请为所有角色分配合适的音色', dramaId, epId.value, refresh) }
 async function batchGenSamples() {
-  const pending = chars.value.filter(c => (c.voice_style || c.voiceStyle) && !(c.voice_sample_url || c.voiceSampleUrl))
+  const pending = chars.value.filter(c => (c.voice_style || c.voiceStyle) && !(c.voice_sample_url || c.voiceSampleUrl) && !isPendingVoiceSample(c.id))
   if (!pending.length) {
-    toast.info(charsVoiced.value ? '所有角色的试听文件已生成' : '请先分配音色')
+    const activeCount = chars.value.filter(c => isPendingVoiceSample(c.id)).length
+    toast.info(activeCount ? '试听任务已在队列中' : (charsVoiced.value ? '所有角色的试听文件已生成' : '请先分配音色'))
     return
   }
   const results = await Promise.allSettled(pending.map(c => characterAPI.voiceSample(c.id, epId.value)))
   const okCount = results.filter(r => r.status === 'fulfilled').length
   const failCount = results.length - okCount
-  if (okCount) toast.success(`已生成 ${okCount} 份试听文件`)
-  if (failCount) toast.error(`${failCount} 份试听文件生成失败`)
+  if (okCount) toast.success(`已加入队列 ${okCount} 份试听文件`)
+  if (failCount) toast.error(`${failCount} 份试听文件入队失败`)
   await refresh()
+  if (okCount) {
+    const ids = pending.map(c => c.id)
+    watchAsyncResult(() => ids.every(id => {
+      const char = chars.value.find(c => c.id === id)
+      return !!(char?.voice_sample_url || char?.voiceSampleUrl) || !!voiceSampleError(id)
+    }), 36)
+  }
 }
 function doBreakdown() {
   const cfg = videoConfigs.value.find(c => c.id === lockedVideoConfigId.value)
   const label = cfg ? `${cfg.name} (${cfg.provider})` : '默认'
   runAgent('storyboard_breaker', `请拆解分镜并生成视频提示词。视频模型：${label}，请根据该模型的特性和时长限制生成合适的视频提示词。`, dramaId, epId.value, refresh)
 }
-async function genSample(id) { try { await characterAPI.voiceSample(id, epId.value); toast.success('试听已生成'); refresh() } catch (e) { toast.error(e.message) } }
+function doNarration() {
+  runAgent('narrator', '请根据原始故事和每个镜头的画面，为本集所有镜头生成旁白解说词。', dramaId, epId.value, refresh)
+}
+function doSplitShots() {
+  runAgent('storyboard_splitter', '请检查本集所有镜头，把旁白+对白总字数超载（画面承载内容过多）的镜头细分为多个紧凑镜头。', dramaId, epId.value, refresh)
+}
+async function genSample(id) {
+  try {
+    await characterAPI.voiceSample(id, epId.value)
+    toast.success('试听任务已加入队列')
+    await refresh()
+    watchAsyncResult(() => {
+      const char = chars.value.find(c => c.id === id)
+      return !!(char?.voice_sample_url || char?.voiceSampleUrl) || !!voiceSampleError(id)
+    }, 36)
+  } catch (e) {
+    toast.error(e.message)
+  }
+}
 async function addShot() { await storyboardAPI.create({ episode_id: epId.value, storyboard_number: sbs.value.length + 1, title: `镜头${sbs.value.length + 1}`, duration: 10 }); refresh() }
 
 function sleep(ms) {
@@ -2490,67 +2770,52 @@ function watchAsyncResult(check, attempts = 24, delay = 2500) {
 
 async function genCharImg(id) {
   try {
-    if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
     await characterAPI.generateImage(id, epId.value)
     toast.success('角色图片生成中')
     await refresh()
     watchAsyncResult(() => {
       const char = chars.value.find(c => c.id === id)
-      const done = !!(char?.image_url || char?.imageUrl)
-      if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-      return done
+      return !!(char?.image_url || char?.imageUrl)
     })
   } catch (e) {
-    pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
     toast.error(e.message)
   }
 }
 function batchCharImages() {
   const ids = visualChars.value.filter(c => !(c.image_url || c.imageUrl)).map(c => c.id)
   if (!ids.length) { toast.info('所有角色图片已生成'); return }
-  pendingCharImageIds.value = [...new Set([...pendingCharImageIds.value, ...ids])]
   characterAPI.batchImages(ids, epId.value).then(async () => {
     toast.success('角色图片批量生成中')
     await refresh()
     watchAsyncResult(() => ids.every(id => {
       const char = chars.value.find(c => c.id === id)
-      const done = !!(char?.image_url || char?.imageUrl)
-      if (done) pendingCharImageIds.value = pendingCharImageIds.value.filter(item => item !== id)
-      return done
+      return !!(char?.image_url || char?.imageUrl)
     }), 36)
   }).catch(e => {
-    pendingCharImageIds.value = pendingCharImageIds.value.filter(item => !ids.includes(item))
     toast.error(e.message)
   })
 }
 async function genSceneImg(id) {
   try {
-    if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
     await sceneAPI.generateImage(id, epId.value)
     toast.success('场景图片生成中')
     await refresh()
     watchAsyncResult(() => {
       const scene = scenes.value.find(s => s.id === id)
-      const done = !!(scene?.image_url || scene?.imageUrl)
-      if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
-      return done
+      return !!(scene?.image_url || scene?.imageUrl)
     })
   } catch (e) {
-    pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
     toast.error(e.message)
   }
 }
 function batchSceneImages() {
   const ids = scenes.value.filter(s => !(s.image_url || s.imageUrl)).map(s => s.id)
   if (!ids.length) { toast.info('所有场景图片已生成'); return }
-  pendingSceneImageIds.value = [...new Set([...pendingSceneImageIds.value, ...ids])]
   ids.forEach(id => { sceneAPI.generateImage(id, epId.value).then(() => refresh()).catch(e => toast.error(e.message)) })
   toast.success('场景图片批量生成中')
   watchAsyncResult(() => ids.every(id => {
     const scene = scenes.value.find(s => s.id === id)
-    const done = !!(scene?.image_url || scene?.imageUrl)
-    if (done) pendingSceneImageIds.value = pendingSceneImageIds.value.filter(item => item !== id)
-    return done
+    return !!(scene?.image_url || scene?.imageUrl)
   }), 36)
 }
 
@@ -2589,22 +2854,57 @@ function getDialogueSpeaker(sb) {
 async function genShotTTS(sb) {
   try {
     await storyboardAPI.generateTTS(sb.id)
-    toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音已生成`)
+    toast.success(`镜头 #${sb.storyboard_number || sb.storyboardNumber || sb.id} 配音任务已加入队列`)
     await refresh()
+    watchAsyncResult(() => {
+      const target = sbs.value.find(item => item.id === sb.id)
+      return !!(target && hasTTS(target)) || !!shotTTSError(sb.id)
+    }, 36)
   } catch (e) { toast.error(e.message) }
 }
 async function batchShotTTS() {
-  const pending = sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb))
+  const pending = sbs.value.filter(sb => hasDialogue(sb) && !hasTTS(sb) && !isPendingShotTTS(sb.id))
   if (!pending.length) {
-    toast.info(ttsEligibleCount.value ? '所有镜头配音已生成' : '当前没有可生成的对白或旁白')
+    const activeCount = sbs.value.filter(sb => hasDialogue(sb) && isPendingShotTTS(sb.id)).length
+    toast.info(activeCount ? '配音任务已在队列中' : (ttsEligibleCount.value ? '所有镜头配音已生成' : '当前没有可生成的对白或旁白'))
     return
   }
   const results = await Promise.allSettled(pending.map(sb => storyboardAPI.generateTTS(sb.id)))
   const okCount = results.filter(r => r.status === 'fulfilled').length
   const failCount = results.length - okCount
-  if (okCount) toast.success(`已生成 ${okCount} 条镜头配音`)
-  if (failCount) toast.error(`${failCount} 条镜头配音生成失败`)
+  if (okCount) toast.success(`已加入队列 ${okCount} 条镜头配音`)
+  if (failCount) toast.error(`${failCount} 条镜头配音入队失败`)
   await refresh()
+  if (okCount) {
+    const ids = pending.map(sb => sb.id)
+    watchAsyncResult(() => ids.every(id => {
+      const target = sbs.value.find(sb => sb.id === id)
+      return !!(target && hasTTS(target)) || !!shotTTSError(id)
+    }), 48)
+  }
+}
+async function regenAllTTS() {
+  // 重新生成所有可配音镜头（含已生成的），用于改音色后批量刷新
+  const targets = sbs.value.filter(sb => hasDialogue(sb) && !isPendingShotTTS(sb.id))
+  if (!targets.length) {
+    const activeCount = sbs.value.filter(sb => hasDialogue(sb) && isPendingShotTTS(sb.id)).length
+    toast.info(activeCount ? '配音任务已在队列中' : '当前没有可生成的对白或旁白')
+    return
+  }
+  if (!confirm(`将用当前音色重新生成 ${targets.length} 个镜头的配音，覆盖旧配音。继续？`)) return
+  const results = await Promise.allSettled(targets.map(sb => storyboardAPI.generateTTS(sb.id)))
+  const okCount = results.filter(r => r.status === 'fulfilled').length
+  const failCount = results.length - okCount
+  if (okCount) toast.success(`已加入队列 ${okCount} 条重新配音任务`)
+  if (failCount) toast.error(`${failCount} 条重新配音入队失败`)
+  await refresh()
+  if (okCount) {
+    const ids = targets.map(sb => sb.id)
+    watchAsyncResult(() => ids.every(id => {
+      const target = sbs.value.find(sb => sb.id === id)
+      return !!(target && hasTTS(target)) || !!shotTTSError(id)
+    }), 48)
+  }
 }
 
 function getFirstFrame(s) { return s?.first_frame_image || s?.firstFrameImage || null }
@@ -2674,27 +2974,83 @@ async function genShotFrame(sb, frameType) {
   const referenceImages = getShotReferenceImages(sb)
   const key = framePendingKey(sb.id, frameType)
   try {
-    if (!pendingShotFrameKeys.value.includes(key)) pendingShotFrameKeys.value.push(key)
+    // 重试前清掉旧的失败态
+    if (failedShotFrameMessages.value[key]) {
+      const next = { ...failedShotFrameMessages.value }
+      delete next[key]
+      failedShotFrameMessages.value = next
+    }
     const body = {
       storyboard_id: sb.id,
       drama_id: dramaId,
       prompt,
       frame_type: frameType,
+      aspect_ratio: episode.value?.aspect_ratio,
       reference_images: referenceImages.length ? referenceImages : undefined,
     }
-    await imageAPI.generate(body)
+    const generation = await imageAPI.generate(body)
     toast.success(frameType === 'first_frame' ? '首帧生成中' : '尾帧生成中')
     await refresh()
-    watchAsyncResult(() => {
-      const target = sbs.value.find(s => s.id === sb.id)
-      const done = frameType === 'first_frame' ? !!getFirstFrame(target) : !!getLastFrame(target)
-      if (done) pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
-      return done
-    })
+    pollShotFrame(generation?.id, sb.id, frameType)
   } catch (e) {
-    pendingShotFrameKeys.value = pendingShotFrameKeys.value.filter(item => item !== key)
+    markShotFrameFailed(key, e.message)
     toast.error(e.message)
   }
+}
+
+function markShotFrameFailed(key, message) {
+  failedShotFrameMessages.value = { ...failedShotFrameMessages.value, [key]: message || '生成失败' }
+}
+
+function hasShotFrame(sbId, frameType) {
+  const target = sbs.value.find(s => s.id === sbId)
+  return frameType === 'first_frame' ? !!getFirstFrame(target) : !!getLastFrame(target)
+}
+
+async function pollShotFrame(generationId, sbId, frameType) {
+  const key = framePendingKey(sbId, frameType)
+  const clearPending = () => {}
+  // 无生成 id：退回到只看结果有没有出图(超时则判失败)
+  if (!generationId) {
+    for (let i = 0; i < 60; i++) {
+      await sleep(4000)
+      await refresh()
+      if (hasShotFrame(sbId, frameType)) { clearPending(); return }
+    }
+    clearPending(); markShotFrameFailed(key, '生成超时'); return
+  }
+  for (let i = 0; i < 90; i++) {
+    await sleep(4000)
+    try {
+      const res = await imageAPI.get(generationId)
+      await refresh()
+      const status = res?.status
+      if (status === 'completed' || hasShotFrame(sbId, frameType)) { clearPending(); return }
+      if (status === 'failed') {
+        clearPending()
+        markShotFrameFailed(key, res?.error_msg || res?.errorMsg || '生成失败')
+        toast.error(`镜头 #${sbId} ${frameType === 'first_frame' ? '首帧' : '尾帧'}生成失败`)
+        return
+      }
+    } catch {}
+  }
+  clearPending(); markShotFrameFailed(key, '生成超时'); toast.error('镜头图片生成超时')
+}
+
+async function batchShotFrames() {
+  const needLast = frameMode.value === 'first_last'
+  // 收集所有缺图的帧任务：首帧必生，first_last 模式下尾帧也补
+  const jobs = []
+  for (const sb of sbs.value) {
+    if (!getFirstFrame(sb) && !isPendingShotFrame(sb.id, 'first_frame')) jobs.push({ sb, frameType: 'first_frame' })
+    if (needLast && !getLastFrame(sb) && !isPendingShotFrame(sb.id, 'last_frame')) jobs.push({ sb, frameType: 'last_frame' })
+  }
+  if (!jobs.length) {
+    toast.info('所有镜头图片已生成')
+    return
+  }
+  toast.success(`开始批量生成 ${jobs.length} 张镜头图片`)
+  await Promise.allSettled(jobs.map(job => genShotFrame(job.sb, job.frameType)))
 }
 
 async function genVid(sb) {
@@ -2703,6 +3059,7 @@ async function genVid(sb) {
     drama_id: dramaId,
     prompt: sb.video_prompt || sb.videoPrompt || '',
     duration: Number(sb.duration || 5),
+    aspect_ratio: episode.value?.aspect_ratio,
   }
   const first = getFirstFrame(sb)
   const last = getLastFrame(sb)
@@ -2712,13 +3069,11 @@ async function genVid(sb) {
   else if (first) { Object.assign(params, { reference_mode: 'single', image_url: first }) }
   try {
     delete failedVideoMessages.value[sb.id]
-    if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
     const generation = await videoAPI.generate(params)
     toast.success('视频生成中')
     await refresh()
     pollVideoGeneration(generation?.id, sb.id)
   } catch (e) {
-    pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== sb.id)
     toast.error(e.message)
   }
 }
@@ -2726,9 +3081,7 @@ async function pollVideoGeneration(generationId, storyboardId) {
   if (!generationId) {
     watchAsyncResult(() => {
       const target = sbs.value.find(s => s.id === storyboardId)
-      const done = !!(target?.video_url || target?.videoUrl)
-      if (done) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
-      return done
+      return !!(target?.video_url || target?.videoUrl)
     }, 60, 4000)
     return
   }
@@ -2738,13 +3091,11 @@ async function pollVideoGeneration(generationId, storyboardId) {
       const res = await videoAPI.get(generationId)
       await refresh()
       if (res?.status === 'completed') {
-        pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
         delete failedVideoMessages.value[storyboardId]
         toast.success('视频生成完成')
         return
       }
       if (res?.status === 'failed') {
-        pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
         failedVideoMessages.value = {
           ...failedVideoMessages.value,
           [storyboardId]: res?.error_msg || res?.errorMsg || '视频生成失败',
@@ -2754,23 +3105,20 @@ async function pollVideoGeneration(generationId, storyboardId) {
       }
     } catch {}
   }
-  pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
   failedVideoMessages.value = {
     ...failedVideoMessages.value,
     [storyboardId]: '视频生成超时',
   }
   toast.error('视频生成超时')
 }
-async function doCompose(sb) {
+async function doCompose(sb, force = false) {
   try {
     delete failedComposeMessages.value[sb.id]
-    if (!isPendingCompose(sb.id)) pendingComposeIds.value.push(sb.id)
-    await composeAPI.shot(sb.id)
-    toast.success('合成完成')
-    pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
-    refresh()
+    await composeAPI.shot(sb.id, force)
+    toast.success(force ? '重新合成任务已加入队列' : '合成任务已加入队列')
+    await refresh()
+    pollComposeStatus()
   } catch (e) {
-    pendingComposeIds.value = pendingComposeIds.value.filter(item => item !== sb.id)
     failedComposeMessages.value = {
       ...failedComposeMessages.value,
       [sb.id]: e.message,
@@ -2785,30 +3133,62 @@ function batchVideos() {
     if (sb) genVid(sb)
   })
   if (pendingIds.length) {
-    pendingVideoIds.value = [...new Set([...pendingVideoIds.value, ...pendingIds])]
     watchAsyncResult(() => pendingIds.every(id => {
       const target = sbs.value.find(s => s.id === id)
-      const done = !!(target?.video_url || target?.videoUrl)
-      if (done) pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== id)
-      return done
+      return !!(target?.video_url || target?.videoUrl)
     }), 80, 4000)
   }
 }
-async function batchCompose() {
-  await composeAPI.all(epId.value)
-  pendingComposeIds.value = [...new Set(sbs.value.filter(sb => !!sb.video_url || !!sb.videoUrl).map(sb => sb.id))]
-  toast.success('批量合成已开始')
+async function batchCompose(force = false) {
+  if (force && !confirm(`将忽略缓存、用当前配音重新合成 ${sbs.value.length} 个镜头。继续？`)) return
+  await composeAPI.all(epId.value, force)
+  toast.success(force ? '重新合成已开始' : '批量合成已开始')
+  await refresh()
   pollComposeStatus()
 }
 async function doMerge() {
-  await mergeAPI.merge(epId.value); toast.success('拼接中...')
+  try {
+    merging.value = true
+    mergeData.value = null
+    await mergeAPI.merge(epId.value)
+    toast.success('拼接中...')
+    await loadCreationTasks()
+  } catch (e) {
+    merging.value = false
+    toast.error(e.message || '拼接启动失败')
+    return
+  }
   const poll = setInterval(async () => {
     try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
     if (mergeData.value?.status === 'completed' || mergeData.value?.status === 'failed') {
       clearInterval(poll)
-      mergeData.value.status === 'completed' ? toast.success('拼接完成') : toast.error('拼接失败')
+      merging.value = false
+      mergeData.value.status === 'completed' ? toast.success('拼接完成') : toast.error(mergeFailMessage.value || '拼接失败')
     }
   }, 3000)
+}
+
+function pollMergeStatus() {
+  const poll = setInterval(async () => {
+    try { mergeData.value = await mergeAPI.status(epId.value) } catch {}
+    if (mergeData.value?.status === 'completed' || mergeData.value?.status === 'failed') {
+      clearInterval(poll)
+      merging.value = false
+    }
+  }, 3000)
+}
+
+// 页面加载时若拼接仍在进行，恢复轮询，避免刷新后卡在“拼接中”不更新
+function resumeMergeIfRunning() {
+  if (mergeStatus.value === 'processing' || mergeStatus.value === 'pending') pollMergeStatus()
+}
+
+// 刷新页面后，若后台仍有镜头在合成（status 持久化在数据库），恢复进度轮询
+function resumeComposeIfRunning() {
+  const processing = sbs.value.filter(sb => (sb.status || '') === 'compose_processing')
+  if (processing.length) {
+    pollComposeStatus()
+  }
 }
 
 async function pollComposeStatus() {
@@ -2819,7 +3199,6 @@ async function pollComposeStatus() {
       await refresh()
       const items = Array.isArray(res?.items) ? res.items : []
       const processingIds = items.filter(item => item.status === 'compose_processing').map(item => item.id)
-      pendingComposeIds.value = processingIds
 
       const failedItems = items.filter(item => item.status === 'compose_failed')
       if (failedItems.length) {
@@ -2887,7 +3266,14 @@ async function loadVoices() {
 }
 
 watch([lockedAudioConfigId, audioConfigs], () => { loadVoices() }, { deep: true })
-onMounted(() => { refresh(); loadConfigs(); loadVoices() })
+onMounted(() => {
+  startTaskPolling(async () => {
+    await refresh({ skipTasks: true })
+  })
+  refresh().then(() => { hydrateShotFrameFailures(); resumeMergeIfRunning(); resumeComposeIfRunning() })
+  loadConfigs()
+  loadVoices()
+})
 </script>
 
 <style scoped>
@@ -3704,6 +4090,8 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .frame-thumb:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
 .frame-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .frame-thumb-empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+.frame-thumb-failed { color: var(--error); background: rgba(220, 53, 69, 0.08); }
+.frame-thumb-label.label-failed { color: var(--error); }
 .frame-re {
   position: absolute; top: 3px; right: 3px; width: 18px; height: 18px;
   border-radius: 50%; background: rgba(0,0,0,0.5); color: #fff;
@@ -4140,6 +4528,10 @@ onMounted(() => { refresh(); loadConfigs(); loadVoices() })
 .export-split { flex: 1; display: flex; min-height: 0; }
 .export-main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; }
 .export-video { max-width: 720px; width: 100%; border-radius: var(--radius-lg); background: #000; }
+.merge-progress-track { width: 220px; height: 5px; border-radius: 3px; background: var(--bg-3, rgba(0,0,0,0.08)); overflow: hidden; margin-top: 14px; }
+.merge-progress-fill { width: 40%; height: 100%; border-radius: 3px; background: var(--primary); animation: merge-indeterminate 1.3s ease-in-out infinite; }
+@keyframes merge-indeterminate { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+.merge-error-text { color: var(--error); }
 .export-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; width: 100%; max-width: 720px; }
 .export-list { width: 240px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
 .export-list-head { padding: 11px 14px; font-size: 11px; font-weight: 700; color: var(--text-3); border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.06em; }
