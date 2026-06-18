@@ -44,11 +44,13 @@
     <main class="content">
       <slot />
     </main>
+    <GlobalTaskCenter />
   </div>
 </template>
 
 <script setup>
 import brandLogo from '~/assets/huobao-logo.png'
+import GlobalTaskCenter from '~/components/GlobalTaskCenter.vue'
 
 const route = useRoute()
 const showBrandImage = ref(true)
