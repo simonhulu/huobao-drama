@@ -72,6 +72,7 @@ export const sceneAPI = {
 
 export const imageAPI = {
   generate: (d: any) => api.post('/images', d),
+  get: (id: number) => api.get(`/images/${id}`),
   list: (params?: { drama_id?: number; storyboard_id?: number }) => {
     const query = new URLSearchParams()
     if (params?.drama_id) query.set('drama_id', String(params.drama_id))
@@ -90,13 +91,27 @@ export const videoAPI = {
   get: (id: number) => api.get(`/videos/${id}`),
 }
 export const composeAPI = {
-  shot: (id: number) => api.post(`/compose/storyboards/${id}/compose`),
-  all: (epId: number) => api.post(`/compose/episodes/${epId}/compose-all`),
+  shot: (id: number, force = false) => api.post(`/compose/storyboards/${id}/compose${force ? '?force=1' : ''}`),
+  all: (epId: number, force = false) => api.post(`/compose/episodes/${epId}/compose-all${force ? '?force=1' : ''}`),
   status: (epId: number) => api.get(`/compose/episodes/${epId}/compose-status`),
 }
 export const mergeAPI = {
   merge: (epId: number) => api.post(`/merge/episodes/${epId}/merge`),
   status: (epId: number) => api.get(`/merge/episodes/${epId}/merge`),
+}
+export const taskAPI = {
+  create: (d: any) => api.post('/tasks', d),
+  list: (params?: { drama_id?: number; episode_id?: number; status?: string; type?: string }) => {
+    const query = new URLSearchParams()
+    if (params?.drama_id) query.set('drama_id', String(params.drama_id))
+    if (params?.episode_id) query.set('episode_id', String(params.episode_id))
+    if (params?.status) query.set('status', params.status)
+    if (params?.type) query.set('type', params.type)
+    return api.get(`/tasks${query.size ? `?${query.toString()}` : ''}`)
+  },
+  get: (id: number) => api.get(`/tasks/${id}`),
+  events: (id: number) => api.get(`/tasks/${id}/events`),
+  cancel: (id: number) => api.post(`/tasks/${id}/cancel`),
 }
 export const aiConfigAPI = {
   list: (t?: string) => api.get(`/ai-configs${t ? `?service_type=${t}` : ''}`),
@@ -126,4 +141,8 @@ export const skillsAPI = {
 export const voicesAPI = {
   list: (provider?: string) => api.get(`/ai-voices${provider ? `?provider=${provider}` : ''}`),
   sync: () => api.post('/ai-voices/sync', {}),
+  autoAssign: (episodeId: number, overwrite = false) =>
+    api.post('/characters/auto-assign-voices', { episode_id: episodeId, overwrite }),
+  dedupePitches: (episodeId: number) =>
+    api.post('/characters/dedupe-voice-pitches', { episode_id: episodeId }),
 }
