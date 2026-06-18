@@ -1,0 +1,38 @@
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+
+[agents.explorer]
+config_file = "./agents/explorer.toml"
+
+[agents.lazycodex-clone-fidelity-reviewer]
+config_file = "./agents/lazycodex-clone-fidelity-reviewer.toml"
+
+[agents.lazycodex-code-reviewer]
+config_file = "./agents/lazycodex-code-reviewer.toml"
+
+[agents.lazycodex-executor]
+config_file = "./agents/lazycodex-executor.toml"
+
+[agents.lazycodex-gate-reviewer]
+config_file = "./agents/lazycodex-gate-reviewer.toml"
+
+[agents.lazycodex-qa-executor]
+config_file = "./agents/lazycodex-qa-executor.toml"
+
+[agents.librarian]
+config_file = "./agents/librarian.toml"
+
+[agents.metis]
+config_file = "./agents/metis.toml"
+
+[agents.momus]
+config_file = "./agents/momus.toml"
+
+[agents.plan]
+config_file = "./agents/plan.toml"
+
+# Managed by LazyCodex: multi_agent_v2 is re-disabled on every Codex session start
+# because enabling it fails every turn with HTTP 400 (openai/codex#26753).
+# Opt out: LAZYCODEX_CONFIG_MIGRATION_DISABLED=1 (or OMO_CODEX_CONFIG_MIGRATION_DISABLED=1).
+[features.multi_agent_v2]
+enabled = false
