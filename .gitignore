@@ -58,3 +58,4 @@ polished-zhangjuzheng-script*
 backend/data.db
 backend/dev.db
 backend/src/db/*.db
+.worktrees/
