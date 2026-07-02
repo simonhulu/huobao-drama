@@ -49,6 +49,7 @@ temp/
 .agents/
 .codex/
 .opencode/
+opencode.json
 .logs/
 .AGENTS.md.bkup
 polished-zhangjuzheng-script*
