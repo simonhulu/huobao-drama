@@ -28,6 +28,7 @@ import health from './routes/health.js'
 import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
 import library from './routes/library.js'
+import introTemplates from './routes/introTemplates.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { startTaskWorkerLoop } from './services/tasks/worker.js'
 import { registerAgentRunHandler } from './services/tasks/handlers/agent-run.js'
@@ -84,6 +85,7 @@ api.route('/task-audit', taskAudit)
 api.route('/health', health)
 api.route('/ai-voices', aiVoices)
 api.route('/library', library)
+api.route('/intro-templates', introTemplates)
 
 app.route('/api/v1', api)
 
