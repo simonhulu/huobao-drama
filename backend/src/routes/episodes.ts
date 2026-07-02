@@ -82,7 +82,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'render_mode', 'auto_mode', 'enable_ai_rewrite', 'narration_voice_id', 'narration_speed', 'pacing_mode', 'dialogue_mode', 'narration_mode', 'subtitle_enabled', 'subtitle_font', 'subtitle_color', 'subtitle_size', 'subtitle_position', 'subtitle_margin', 'subtitle_margin_v', 'subtitle_background_color', 'subtitle_stroke_color', 'subtitle_stroke_width']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'render_mode', 'auto_mode', 'enable_ai_rewrite', 'narration_voice_id', 'narration_speed', 'pacing_mode', 'dialogue_mode', 'narration_mode', 'subtitle_enabled', 'subtitle_font', 'subtitle_color', 'subtitle_size', 'subtitle_position', 'subtitle_margin', 'subtitle_margin_v', 'subtitle_background_color', 'subtitle_stroke_color', 'subtitle_stroke_width', 'opening_hook', 'cliffhanger_hook', 'recap_script', 'series_hook']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -117,6 +117,10 @@ app.put('/:id', async (c) => {
   if ('subtitle_background_color' in updates) drizzleUpdates.subtitleBackgroundColor = updates.subtitle_background_color || null
   if ('subtitle_stroke_color' in updates) drizzleUpdates.subtitleStrokeColor = updates.subtitle_stroke_color || '#000000'
   if ('subtitle_stroke_width' in updates) drizzleUpdates.subtitleStrokeWidth = Number(updates.subtitle_stroke_width) || 2
+  if ('opening_hook' in updates) drizzleUpdates.openingHook = updates.opening_hook || null
+  if ('cliffhanger_hook' in updates) drizzleUpdates.cliffhanger = updates.cliffhanger_hook || null
+  if ('recap_script' in updates) drizzleUpdates.recapScript = updates.recap_script || null
+  if ('series_hook' in updates) drizzleUpdates.seriesHook = updates.series_hook || null
 
   const [epBefore] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))

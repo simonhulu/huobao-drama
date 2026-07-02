@@ -610,6 +610,7 @@ app.put('/:id', async (c) => {
   if (body.status !== undefined) updates.status = body.status
   if (body.tags !== undefined) updates.tags = JSON.stringify(body.tags)
   if (body.metadata !== undefined) updates.metadata = body.metadata
+  if (body.intro_template_id !== undefined) updates.introTemplateId = body.intro_template_id || null
   db.update(schema.dramas).set(updates).where(eq(schema.dramas.id, id)).run()
   return success(c)
 })
