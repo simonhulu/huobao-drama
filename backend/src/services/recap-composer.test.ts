@@ -96,9 +96,9 @@ describe('recap composer', () => {
         captured.args = args
       },
     })
-    assert.strictEqual(result, 'static/recaps/2-recap.mp4')
+    assert.strictEqual(result, `static/recaps/${testEpisode2Id}-recap.mp4`)
     assert.ok(captured.audioPath)
     assert.ok(captured.args)
-    assert.ok(captured.args!.some(a => a.includes('2-recap.mp4')))
+    assert.ok(captured.args!.some(a => a.includes(`${testEpisode2Id}-recap.mp4`)))
   })
 })
