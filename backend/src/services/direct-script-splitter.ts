@@ -9,6 +9,7 @@ import {
   getSmartSplitDurationPreset,
   type SmartSplitDurationPreset,
   type MaterializedSmartSplitEpisode,
+  type PlotProgressionBeat,
 } from './episode-splitter.js'
 
 export interface SmartSplitDirectScriptOptions {
@@ -23,6 +24,13 @@ export interface DirectScriptSegment {
   content: string
   summary: string
   estimatedDurationSeconds: number
+  coveredBeatIds: string[]
+}
+
+export interface DirectScriptSplitResult {
+  segments: DirectScriptSegment[]
+  plotProgressionChain: PlotProgressionBeat[]
+  seriesHook: string
 }
 
 function escapeRegExp(value: string): string {
@@ -45,13 +53,14 @@ export function splitDirectScriptByMarkers(sourceText: string, markers: string[]
       content,
       summary: '',
       estimatedDurationSeconds: 0,
+      coveredBeatIds: [],
     }))
 }
 
 export async function smartSplitDirectScript(
   sourceText: string,
   options: SmartSplitDirectScriptOptions,
-): Promise<DirectScriptSegment[]> {
+): Promise<DirectScriptSplitResult> {
   const durationPreset = getSmartSplitDurationPreset(options.durationPresetId)
   if (!durationPreset) {
     throw new Error(`Unknown duration preset: ${options.durationPresetId}`)
@@ -65,12 +74,17 @@ export async function smartSplitDirectScript(
     pacingMode: options.pacingMode ?? 'standard',
   })
 
-  return result.episodes.map((ep: MaterializedSmartSplitEpisode) => ({
-    title: ep.title,
-    content: ep.content,
-    summary: ep.summary,
-    estimatedDurationSeconds: ep.estimatedDurationSeconds,
-  }))
+  return {
+    segments: result.episodes.map((ep: MaterializedSmartSplitEpisode) => ({
+      title: ep.title,
+      content: ep.content,
+      summary: ep.summary,
+      estimatedDurationSeconds: ep.estimatedDurationSeconds,
+      coveredBeatIds: ep.coveredBeatIds,
+    })),
+    plotProgressionChain: result.plotProgressionChain,
+    seriesHook: result.hook,
+  }
 }
 
 export { getSmartSplitDurationPreset, type SmartSplitDurationPreset }

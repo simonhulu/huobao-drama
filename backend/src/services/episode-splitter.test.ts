@@ -15,6 +15,7 @@ const {
   SMART_SPLIT_TOOL_NAME,
   materializeEpisodeContents,
   splitStoryIntoEpisodes,
+  buildEpisodeSplitMetadata,
 } = await import('./episode-splitter.js')
 
 const originalFetch = global.fetch
@@ -249,4 +250,24 @@ test('materializeEpisodeContents tolerates quote style and whitespace difference
 
   assert.equal(result.length, 1)
   assert.equal(result[0].content, '她冷冷地说：“放心。”\n“我不会再打扰你们。”然后转身离开。')
+})
+
+test('buildEpisodeSplitMetadata serializes coveredBeatIds and plot chain', () => {
+  const metadata = buildEpisodeSplitMetadata(
+    { coveredBeatIds: ['beat_1', 'beat_2'] },
+    [
+      {
+        beatId: 'beat_1',
+        phase: 'setup',
+        summary: '葬礼上的钥匙',
+        dramaticFunction: '设置悬念',
+        suspenseValue: '钥匙的秘密',
+        mustKeepContext: '林晚孤立无援',
+      },
+    ],
+  )
+  const parsed = JSON.parse(metadata)
+  assert.deepEqual(parsed.coveredBeatIds, ['beat_1', 'beat_2'])
+  assert.equal(parsed.plotProgressionChain.length, 1)
+  assert.equal(parsed.plotProgressionChain[0].beatId, 'beat_1')
 })

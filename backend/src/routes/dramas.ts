@@ -4,11 +4,11 @@ import { db, schema } from '../db/index.js'
 import { success, badRequest, notFound, created, now, serverError } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
 import { scheduleAutoStartForEpisode, scheduleExtractAfterRewrite, resetDramaEpisodes, scheduleDirectScriptPipeline } from '../services/tasks/auto-pipeline.js'
-import { getSmartSplitDurationPreset, splitStoryIntoEpisodes } from '../services/episode-splitter.js'
+import { getSmartSplitDurationPreset, splitStoryIntoEpisodes, buildEpisodeSplitMetadata } from '../services/episode-splitter.js'
 import { generateRetentionTitles } from '../services/title-generator.js'
 import { cleanDirectScript, type HookStyle, type RetentionMode } from '../services/direct-script-cleaner.js'
 import { buildRetentionStructureFromScript, optimizeScriptForRetention, type RetentionStructure } from '../services/retention-script-optimizer.js'
-import { smartSplitDirectScript, splitDirectScriptByMarkers, type DirectScriptSegment } from '../services/direct-script-splitter.js'
+import { smartSplitDirectScript, splitDirectScriptByMarkers, type DirectScriptSegment, type DirectScriptSplitResult } from '../services/direct-script-splitter.js'
 import { createTask, addTaskDependency } from '../services/tasks/store.js'
 
 const app = new Hono()
@@ -214,12 +214,15 @@ app.post('/:id/smart-split', async (c) => {
         const description = episode.summary
         let episodeId: number
 
+        const metadata = buildEpisodeSplitMetadata(episode, splitResult.plotProgressionChain)
+
         if (reusableEpisode) {
           tx.update(schema.episodes).set({
             title: episode.title || `第${episodeNumber}集`,
             content: episode.content,
             description,
             duration: episode.estimatedDurationSeconds,
+            metadata,
             imageConfigId,
             videoConfigId,
             audioConfigId,
@@ -242,6 +245,7 @@ app.post('/:id/smart-split', async (c) => {
             content: episode.content,
             description,
             duration: episode.estimatedDurationSeconds,
+            metadata,
             imageConfigId,
             videoConfigId,
             audioConfigId,
@@ -359,6 +363,7 @@ app.post('/:id/import-script', async (c) => {
 
   // 分集：支持 AI 智能分集；不传 duration_preset 时整篇作为 1 集
   let segments: DirectScriptSegment[]
+  let directSplitResult: DirectScriptSplitResult | null = null
   const segmentMarkers = Array.isArray(body.segment_markers)
     ? body.segment_markers.map((marker: unknown) => String(marker || '').trim()).filter(Boolean)
     : []
@@ -370,12 +375,13 @@ app.post('/:id/import-script', async (c) => {
     }
   } else if (durationPresetId) {
     try {
-      segments = await smartSplitDirectScript(scriptContent, {
+      directSplitResult = await smartSplitDirectScript(scriptContent, {
         dramaTitle: drama.title,
         durationPresetId,
         style: body.split_style === 'ai_manga_drama' ? 'ai_manga_drama' : 'default',
         pacingMode: body.pacing_mode || 'standard',
       })
+      segments = directSplitResult.segments
     } catch (err) {
       const message = err instanceof Error ? err.message : '智能分集失败'
       return serverError(c, message)
@@ -386,6 +392,7 @@ app.post('/:id/import-script', async (c) => {
       content: scriptContent,
       summary: body.description || '',
       estimatedDurationSeconds: 0,
+      coveredBeatIds: [],
     }]
   }
 
@@ -450,6 +457,7 @@ app.post('/:id/import-script', async (c) => {
       openingHook: openingHook || null,
       cliffhanger: cliffhanger || null,
       retentionBeats: retentionBeats ? JSON.stringify(retentionBeats) : null,
+      metadata: buildEpisodeSplitMetadata(segment, directSplitResult?.plotProgressionChain ?? []),
       imageConfigId: body.image_config_id ?? null,
       videoConfigId: body.video_config_id ?? null,
       audioConfigId: body.audio_config_id ?? null,

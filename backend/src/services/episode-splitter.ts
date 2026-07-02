@@ -192,6 +192,22 @@ export interface SmartSplitResult {
   episodes: MaterializedSmartSplitEpisode[]
 }
 
+export interface EpisodeSplitMetadata {
+  coveredBeatIds: string[]
+  plotProgressionChain: PlotProgressionBeat[]
+}
+
+export function buildEpisodeSplitMetadata(
+  episode: { coveredBeatIds: string[] },
+  plotChain: PlotProgressionBeat[],
+): string {
+  const payload: EpisodeSplitMetadata = {
+    coveredBeatIds: episode.coveredBeatIds,
+    plotProgressionChain: plotChain,
+  }
+  return JSON.stringify(payload)
+}
+
 function isDeepSeekHost(baseUrl: string) {
   try {
     return new URL(baseUrl).hostname === 'api.deepseek.com'
