@@ -10,6 +10,7 @@ describe('recap + intro schema', () => {
     assert.ok(episodes.openingHook)
     assert.ok(episodes.cliffhanger)
     assert.ok(episodes.seriesHook)
+    assert.ok(episodes.metadata)
   })
 
   it('has intro_template_id on dramas', () => {

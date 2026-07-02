@@ -73,6 +73,7 @@ export const episodes = sqliteTable('episodes', {
   narrationMode: text('narration_mode').default('rewrite'),
   openingHook: text('opening_hook'),
   cliffhanger: text('cliffhanger'),
+  metadata: text('metadata'),
   recapScript: text('recap_script'),
   recapVideoUrl: text('recap_video_url'),
   introVideoUrl: text('intro_video_url'),

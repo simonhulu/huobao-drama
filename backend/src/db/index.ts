@@ -78,6 +78,7 @@ sqlite.exec(`
     narration_mode TEXT DEFAULT 'rewrite',
     opening_hook TEXT,
     cliffhanger TEXT,
+    metadata TEXT,
     recap_script TEXT,
     recap_video_url TEXT,
     intro_video_url TEXT,
@@ -542,6 +543,7 @@ ensureColumn('episodes', 'recap_script', 'TEXT')
 ensureColumn('episodes', 'recap_video_url', 'TEXT')
 ensureColumn('episodes', 'intro_video_url', 'TEXT')
 ensureColumn('episodes', 'series_hook', 'TEXT')
+ensureColumn('episodes', 'metadata', 'TEXT')
 
 ensureColumn('image_generations', 'attempts', 'INTEGER DEFAULT 0')
 ensureColumn('image_generations', 'last_error_code', 'TEXT')
