@@ -41,6 +41,7 @@ import { registerMergeEpisodeHandler } from './services/tasks/handlers/merge-epi
 import { registerMediaEpisodeHandlers } from './services/tasks/handlers/media-episode.js'
 import { registerDramaPreProductionHandler } from './services/tasks/handlers/drama-pre-production.js'
 import { registerHookDesignHandler } from './services/tasks/handlers/hook-design.js'
+import { registerIntroComposeHandler } from './services/tasks/handlers/intro-compose.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -96,6 +97,7 @@ registerMergeEpisodeHandler()
 registerMediaEpisodeHandlers()
 registerDramaPreProductionHandler()
 registerHookDesignHandler()
+registerIntroComposeHandler()
 
 let worker: ReturnType<typeof startTaskWorkerLoop> | undefined
 if (process.env.TASK_WORKER_DISABLED !== '1') {
