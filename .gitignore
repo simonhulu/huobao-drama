@@ -44,3 +44,7 @@ temp/
 /CLAUDE.md
 /AGENTS.md
 .gstack/
+.omx/
+.omo/
+.agents/
+.codex/
