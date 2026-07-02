@@ -3,7 +3,8 @@
  * API 文档: https://help.aliyun.com/zh/model-studio/text-to-image-v2-api-reference
  */
 import type { ImageProviderAdapter, ImageGenerationRecord } from './types'
-import { joinProviderUrl } from './url'
+import { joinProviderUrl } from './url.js'
+import { normalizePrompt } from './prompt-utils.js'
 
 export class AliImageAdapter implements ImageProviderAdapter {
   readonly provider = 'ali'
@@ -34,7 +35,7 @@ export class AliImageAdapter implements ImageProviderAdapter {
         messages: [
           {
             role: 'user',
-            content: [{ text: record.prompt }],
+            content: [{ text: normalizePrompt(record.prompt, this.provider) }],
           },
         ],
       },

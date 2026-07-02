@@ -1,6 +1,6 @@
 <template>
   <template v-if="!compact">
-    <button class="task-center-fab" :class="{ 'has-failed': failedCount > 0, 'is-dragging': isDragging }"
+    <button class="task-center-fab" :class="{ 'is-dragging': isDragging }"
       :style="{ right: fabRight + 'px', bottom: fabBottom + 'px' }"
       @pointerdown="onPointerDown"
       @click="onFabClick">
@@ -11,16 +11,16 @@
         <strong>任务中心</strong>
         <small>{{ fabSubtitle }}</small>
       </span>
-      <span v-if="visibleCount" class="task-center-count">{{ visibleCount }}</span>
+      <span v-if="activeCount" class="task-center-count">{{ activeCount }}</span>
     </button>
   </template>
 
-  <button v-else class="task-center-fab is-compact" :class="{ 'has-failed': failedCount > 0 }" @click="panelOpen = true">
+  <button v-else class="task-center-fab is-compact" @click="panelOpen = true">
     <span class="task-center-fab-mark">
       <span v-if="activeCount" class="task-center-pulse" />
     </span>
     <strong>任务中心</strong>
-    <span v-if="visibleCount" class="task-center-count">{{ visibleCount }}</span>
+    <span v-if="activeCount" class="task-center-count">{{ activeCount }}</span>
   </button>
 
   <Transition name="task-center-fade">
@@ -29,10 +29,14 @@
         <header class="task-center-head">
           <div>
             <div class="task-center-kicker">Task Center</div>
-            <h2>后台任务</h2>
-            <p>{{ activeCount ? `${activeCount} 个任务正在执行` : '当前没有进行中的任务' }}</p>
+            <h2>正在运行</h2>
+            <p>{{ activeCount ? `${activeCount} 个批量任务执行中` : '当前没有运行中的批量任务' }}</p>
           </div>
           <div class="task-center-head-actions">
+            <span :class="['task-center-worker-badge', isWorkerHealthy ? 'is-online' : 'is-offline']">
+              <span class="task-center-worker-dot" />
+              {{ isWorkerHealthy ? 'Worker 在线' : 'Worker 离线' }}
+            </span>
             <button class="btn btn-sm" :disabled="loading" @click="$emit('refresh')">
               {{ loading ? '刷新中' : '刷新' }}
             </button>
@@ -44,71 +48,67 @@
 
         <div v-if="error" class="task-center-error">{{ error }}</div>
 
-        <div v-if="!visibleCount && !loading" class="task-center-empty">
+        <div v-if="!activeCount && !loading" class="task-center-empty">
           <div class="task-center-empty-mark">✓</div>
-          <div class="task-center-empty-title">暂无后台任务</div>
-          <div class="task-center-empty-desc">新发起的图片、视频、配音、合成和拼接任务会出现在这里。</div>
+          <div class="task-center-empty-title">暂无运行中任务</div>
+          <div class="task-center-empty-desc">批量合成、拼接等带有进度的任务会在这里实时显示。</div>
         </div>
 
         <div v-else class="task-center-body">
-          <article v-for="group in episodeGroups" :key="group.key" class="task-card">
-            <div class="task-card-main">
-              <div class="task-card-title-row">
-                <span class="task-card-title">{{ group.title }}</span>
-                <span :class="['tag', statusTagClass(group)]">{{ statusLabel(group) }}</span>
-              </div>
+          <div class="batch-tree">
+            <!-- Level 1: Drama -->
+            <article v-for="drama in dramaGroups" :key="drama.dramaId" class="batch-drama">
+              <button class="batch-level-header batch-level-drama" @click="toggleDrama(drama.dramaId)">
+                <span class="task-card-chevron" aria-hidden="true">
+                  {{ isDramaExpanded(drama.dramaId) ? '▾' : '▸' }}
+                </span>
+                <span class="batch-level-title">{{ drama.title }}</span>
+                <span class="batch-level-count">{{ drama.episodes.length }} 个剧集</span>
+              </button>
 
-              <div v-if="group.progress.total" class="task-progress">
-                <div class="task-progress-top">
-                  <span>总进度</span>
-                  <span>{{ groupPercent(group) }}%</span>
-                </div>
-                <div class="task-progress-track">
-                  <div class="task-progress-fill" :style="{ width: groupPercent(group) + '%' }" />
-                </div>
-              </div>
+              <!-- Level 2: Episode -->
+              <div v-if="isDramaExpanded(drama.dramaId)" class="batch-drama-children">
+                <article v-for="ep in drama.episodes" :key="episodeKey(ep)" class="batch-episode"
+                  :class="{ 'is-expanded': isEpisodeExpanded(episodeKey(ep)) }">
+                  <button class="batch-level-header batch-level-episode" @click="toggleEpisode(episodeKey(ep))">
+                    <span class="task-card-chevron" aria-hidden="true">
+                      {{ isEpisodeExpanded(episodeKey(ep)) ? '▾' : '▸' }}
+                    </span>
+                    <span class="batch-level-title">{{ ep.title }}</span>
+                    <span class="batch-level-count">{{ ep.tasks.length }} 个任务</span>
+                  </button>
 
-              <div v-if="!isExpanded(group.key) && failedChildren(group).length" class="task-card-failures">
-                <div v-for="task in failedChildren(group)" :key="'collapsed-fail-' + taskId(task)" class="task-card-failure">
-                  <div class="task-card-failure-title">{{ taskTitle(task) }}</div>
-                  <div class="task-card-failure-msg">{{ taskFailure(task) }}</div>
-                  <div class="task-card-failure-actions">
-                    <button v-if="canCancel(task)" class="btn btn-sm" @click="$emit('cancel', task)">取消</button>
-                    <button v-if="canRetry(task)" class="btn btn-sm btn-primary" @click="$emit('retry', task)">重试</button>
+                  <!-- Level 3: Task Type with progress -->
+                  <div v-if="isEpisodeExpanded(episodeKey(ep))" class="batch-episode-children">
+                    <article v-for="item in ep.tasks" :key="taskId(item.task)" class="batch-task-card"
+                      :class="{ 'is-running': taskStatus(item.task) === 'running' }">
+                      <div class="batch-task-head">
+                        <span class="task-center-status-dot" :class="'is-' + taskStatus(item.task)" />
+                        <span class="batch-task-title">{{ item.label }}</span>
+                        <span class="batch-task-status">{{ statusLabel(item.task) }}</span>
+                        <button v-if="canCancel(item.task)" class="btn btn-sm" @click="$emit('cancel', item.task)">取消</button>
+                      </div>
+
+                      <div class="batch-task-progress">
+                        <div class="batch-progress-top">
+                          <span class="batch-progress-count">{{ item.progress.current }} / {{ item.progress.total }}</span>
+                          <span class="batch-progress-percent">{{ item.progress.percent }}%</span>
+                        </div>
+                        <div class="task-progress-track">
+                          <div class="task-progress-fill" :style="{ width: item.progress.percent + '%' }" />
+                        </div>
+                      </div>
+
+                      <div v-if="taskStatusDetail(item.task) || item.progress.message" class="batch-task-meta">
+                        <span v-if="taskStatusDetail(item.task)">{{ taskStatusDetail(item.task) }}</span>
+                        <span v-if="item.progress.message">· {{ item.progress.message }}</span>
+                      </div>
+                    </article>
                   </div>
-                </div>
+                </article>
               </div>
-            </div>
-
-            <div v-if="isExpanded(group.key) && group.grouped.roots.length" class="task-children">
-              <div class="task-children-title">执行步骤</div>
-              <div v-for="task in group.grouped.roots" :key="taskId(task)" class="task-child-row">
-                <span :class="['task-center-status-dot', `is-${taskStatus(task)}`]" />
-                <span class="task-child-title">{{ taskTitle(task) }}</span>
-                <span class="task-child-status">{{ statusLabel(task) }}</span>
-                <button v-if="canCancel(task)" class="btn btn-sm" @click="$emit('cancel', task)">取消</button>
-                <button v-if="canRetry(task)" class="btn btn-sm btn-primary" @click="$emit('retry', task)">重试</button>
-              </div>
-
-              <template v-for="task in group.grouped.roots" :key="'children-of-' + taskId(task)">
-                <div v-if="childrenForGroup(group, task).length" v-for="child in childrenForGroup(group, task)" :key="taskId(child)" class="task-child-row is-nested">
-                  <span :class="['task-center-status-dot', `is-${taskStatus(child)}`]" />
-                  <span class="task-child-title">{{ taskTitle(child) }}</span>
-                  <span class="task-child-status">{{ statusLabel(child) }}</span>
-                  <button v-if="canCancel(child)" class="btn btn-sm" @click="$emit('cancel', child)">取消</button>
-                  <button v-if="canRetry(child)" class="btn btn-sm btn-primary" @click="$emit('retry', child)">重试</button>
-                </div>
-              </template>
-
-              <div v-for="task in group.grouped.roots" :key="'failure-' + taskId(task)">
-                <div v-if="taskFailure(task)" class="task-card-failure">{{ taskFailure(task) }}</div>
-              </div>
-            </div>
-
-            <button class="task-card-toggle" @click="toggleGroup(group.key)">
-              {{ isExpanded(group.key) ? '收起详情' : '查看详情' }}
-            </button>
-          </article>
+            </article>
+          </div>
         </div>
 
         <footer class="task-center-foot">
@@ -123,16 +123,15 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
-  deriveEpisodeTaskGroups,
+  deriveBatchTaskGroups,
   isActiveTask,
-  isFailedTask,
-  taskFailureMessage,
   taskId,
   taskStatus,
+  taskStatusDetail,
   taskTitle,
   taskValue,
+  type BatchEpisodeGroup,
   type CreationTask,
-  type EpisodeTaskGroup,
   type TaskStatus,
 } from '~/composables/taskState'
 
@@ -144,18 +143,92 @@ const fabBottom = ref(70)
 const isDragging = ref(false)
 const hasMoved = ref(false)
 const dragStart = ref({ x: 0, y: 0, right: 0, bottom: 0 })
-const expandedKeys = ref(new Set<string>())
+const expandedDramaKeys = ref(new Set<string>())
+const expandedEpisodeKeys = ref(new Set<string>())
 
-function isExpanded(key: string) {
-  return expandedKeys.value.has(key)
+const props = withDefaults(defineProps<{
+  tasks: CreationTask[]
+  open?: boolean
+  loading?: boolean
+  error?: string
+  lastLoadedAt?: Date | string | null
+  compact?: boolean
+  workerHealth?: { healthy_count: number; total_count: number; timeout_ms: number; workers: any[] } | null
+  isWorkerHealthy?: boolean
+}>(), {
+  compact: false,
+})
+
+const emit = defineEmits<{
+  'update:open': [value: boolean]
+  refresh: []
+  cancel: [task: any]
+  retry: [task: any]
+}>()
+
+const panelOpen = computed({
+  get: () => !!props.open,
+  set: value => emit('update:open', value),
+})
+
+const dramaGroups = computed(() => deriveBatchTaskGroups(props.tasks || []))
+const activeCount = computed(() => dramaGroups.value.reduce((sum, d) => sum + d.episodes.reduce((eSum, ep) => eSum + ep.tasks.length, 0), 0))
+const fabSubtitle = computed(() => {
+  if (!activeCount.value) return '暂无运行中任务'
+  return `${activeCount.value} 个批量任务执行中`
+})
+
+function episodeKey(ep: BatchEpisodeGroup) {
+  return `${ep.dramaId}:${ep.episodeId || 'project'}`
 }
 
-function toggleGroup(key: string) {
-  if (expandedKeys.value.has(key)) {
-    expandedKeys.value.delete(key)
+function isDramaExpanded(dramaId: string) {
+  return expandedDramaKeys.value.has(dramaId)
+}
+
+function toggleDrama(dramaId: string) {
+  if (expandedDramaKeys.value.has(dramaId)) {
+    expandedDramaKeys.value.delete(dramaId)
   } else {
-    expandedKeys.value.add(key)
+    expandedDramaKeys.value.add(dramaId)
   }
+}
+
+function isEpisodeExpanded(key: string) {
+  return expandedEpisodeKeys.value.has(key)
+}
+
+function toggleEpisode(key: string) {
+  if (expandedEpisodeKeys.value.has(key)) {
+    expandedEpisodeKeys.value.delete(key)
+  } else {
+    expandedEpisodeKeys.value.add(key)
+  }
+}
+
+function statusLabel(taskOrGroup: { status: TaskStatus } | CreationTask | undefined | null) {
+  const status = ('status' in (taskOrGroup || {})
+    ? taskOrGroup?.status
+    : taskStatus(taskOrGroup as CreationTask | undefined | null)) as TaskStatus | string
+  return {
+    queued: '队列中',
+    running: '运行中',
+    succeeded: '已完成',
+    failed: '失败',
+    canceled: '已取消',
+    stale: '已中断',
+  }[status] || status
+}
+
+function canCancel(task: CreationTask | undefined | null) {
+  return isActiveTask(task) && !taskValue(task, 'cancel_requested')
+}
+
+function formatTime(value: Date | string | null | undefined) {
+  if (!value) return ''
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
 function clampPosition() {
@@ -232,102 +305,6 @@ function onFabClick(e: MouseEvent) {
   }
   panelOpen.value = true
 }
-
-const props = withDefaults(defineProps<{
-  tasks: CreationTask[]
-  open?: boolean
-  loading?: boolean
-  error?: string
-  lastLoadedAt?: Date | string | null
-  compact?: boolean
-}>(), {
-  compact: false,
-})
-
-const emit = defineEmits<{
-  'update:open': [value: boolean]
-  refresh: []
-  cancel: [task: any]
-  retry: [task: any]
-}>()
-
-const panelOpen = computed({
-  get: () => !!props.open,
-  set: value => emit('update:open', value),
-})
-
-const episodeGroups = computed(() => deriveEpisodeTaskGroups(props.tasks || []))
-const activeCount = computed(() => episodeGroups.value.filter(g => g.status === 'running' || g.status === 'queued').length)
-const failedCount = computed(() => episodeGroups.value.filter(g => g.status === 'failed' || g.status === 'stale').length)
-const visibleCount = computed(() => episodeGroups.value.length)
-const fabSubtitle = computed(() => {
-  if (failedCount.value) return `${failedCount.value} 个失败待处理`
-  if (activeCount.value) return `${activeCount.value} 个执行中`
-  return visibleCount.value ? `${visibleCount.value} 个历史任务` : '查看后台状态'
-})
-
-function statusLabel(taskOrGroup: { status: TaskStatus } | CreationTask | undefined | null) {
-  const status = ('status' in (taskOrGroup || {})
-    ? taskOrGroup?.status
-    : taskStatus(taskOrGroup as CreationTask | undefined | null)) as TaskStatus | string
-  return {
-    queued: '队列中',
-    running: '运行中',
-    succeeded: '已完成',
-    failed: '失败',
-    canceled: '已取消',
-    stale: '已中断',
-  }[status] || status
-}
-
-function statusTagClass(taskOrGroup: { status: TaskStatus } | CreationTask | undefined | null) {
-  const status = ('status' in (taskOrGroup || {})
-    ? taskOrGroup?.status
-    : taskStatus(taskOrGroup as CreationTask | undefined | null)) as TaskStatus | string
-  if (status === 'succeeded') return 'tag-success'
-  if (status === 'failed' || status === 'stale') return 'tag-error'
-  if (status === 'running' || status === 'queued') return 'tag-info'
-  return ''
-}
-
-function taskFailure(task: CreationTask | undefined | null) {
-  return isFailedTask(task) ? taskFailureMessage(task) : ''
-}
-
-function childrenForGroup(group: EpisodeTaskGroup, task: CreationTask | undefined | null) {
-  return group.grouped.childrenByParent[String(taskId(task))] || []
-}
-
-function failedChildren(group: EpisodeTaskGroup): CreationTask[] {
-  const failed: CreationTask[] = []
-  for (const root of group.grouped.roots) {
-    if (isFailedTask(root)) failed.push(root)
-    for (const child of childrenForGroup(group, root)) {
-      if (isFailedTask(child)) failed.push(child)
-    }
-  }
-  return failed
-}
-
-function groupPercent(group: EpisodeTaskGroup) {
-  if (!group.progress.total) return 0
-  return Math.max(0, Math.min(100, Math.round((group.progress.terminal / group.progress.total) * 100)))
-}
-
-function canCancel(task: CreationTask | undefined | null) {
-  return isActiveTask(task) && !taskValue(task, 'cancel_requested')
-}
-
-function canRetry(task: CreationTask | undefined | null) {
-  return ['failed', 'stale'].includes(taskStatus(task))
-}
-
-function formatTime(value: Date | string | null | undefined) {
-  if (!value) return ''
-  const date = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-}
 </script>
 
 <style scoped>
@@ -357,10 +334,6 @@ function formatTime(value: Date | string | null | undefined) {
   box-shadow: 0 12px 32px rgba(20, 32, 54, 0.18);
   cursor: grabbing;
   user-select: none;
-}
-
-.task-center-fab.has-failed {
-  border-color: rgba(210,79,102,0.35);
 }
 
 .task-center-fab.is-compact {
@@ -464,7 +437,7 @@ function formatTime(value: Date | string | null | undefined) {
 }
 
 .task-center-panel {
-  width: min(440px, calc(100vw - 28px));
+  width: min(480px, calc(100vw - 28px));
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -561,21 +534,6 @@ function formatTime(value: Date | string | null | undefined) {
   padding: 12px 2px 12px 0;
 }
 
-.task-center-section + .task-center-section {
-  margin-top: 14px;
-}
-
-.task-center-section-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-  padding: 0 2px;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-1);
-}
-
 .task-center-status-dot {
   width: 8px;
   height: 8px;
@@ -602,65 +560,151 @@ function formatTime(value: Date | string | null | undefined) {
   background: var(--warning);
 }
 
-.task-center-list {
+.batch-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.batch-drama {
+  border: 1px solid rgba(86,108,150,0.14);
+  border-radius: 16px;
+  background: rgba(255,255,255,0.78);
+  box-shadow: var(--shadow-xs);
+  overflow: hidden;
+}
+
+.batch-level-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+}
+
+.batch-level-drama {
+  font-weight: 700;
+  color: var(--text-0);
+}
+
+.batch-level-episode {
+  padding: 10px 14px;
+  color: var(--text-1);
+}
+
+.batch-level-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-level-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.task-card-chevron {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.batch-drama-children {
+  padding: 0 8px 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.task-card {
-  padding: 12px;
-  border: 1px solid rgba(86,108,150,0.14);
-  border-radius: 16px;
-  background: rgba(255,255,255,0.78);
-  box-shadow: var(--shadow-xs);
+.batch-episode {
+  border: 1px solid rgba(86,108,150,0.10);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.62);
+  overflow: hidden;
 }
 
-.task-card-main {
-  min-width: 0;
-}
-
-.task-card-title-row {
+.batch-episode-children {
+  padding: 0 8px 8px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
   gap: 8px;
 }
 
-.task-card-title {
+.batch-task-card {
+  padding: 12px;
+  border: 1px solid rgba(86,108,150,0.10);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.90);
+}
+
+.batch-task-card.is-running {
+  border-color: rgba(76,125,255,0.22);
+  box-shadow: 0 0 0 3px rgba(76,125,255,0.06);
+}
+
+.batch-task-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.batch-task-title {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-0);
   font-size: 13px;
   font-weight: 700;
+  color: var(--text-0);
 }
 
-.task-card-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 4px;
+.batch-task-status {
+  flex: 0 0 auto;
   font-size: 11px;
   color: var(--text-3);
 }
 
-.task-progress {
+.batch-task-head .btn {
+  flex: 0 0 auto;
+}
+
+.batch-task-progress {
   margin-top: 10px;
 }
 
-.task-progress-top {
+.batch-progress-top {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 8px;
-  font-size: 11px;
-  color: var(--text-2);
+  font-size: 12px;
+  color: var(--text-1);
+}
+
+.batch-progress-count {
+  font-weight: 700;
+  color: var(--text-0);
+}
+
+.batch-progress-percent {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .task-progress-track {
-  height: 5px;
-  margin-top: 6px;
+  height: 6px;
+  margin-top: 8px;
   overflow: hidden;
   border-radius: 999px;
   background: var(--bg-2);
@@ -670,104 +714,16 @@ function formatTime(value: Date | string | null | undefined) {
   height: 100%;
   border-radius: 999px;
   background: var(--accent-gradient);
+  transition: width 0.3s var(--ease-out);
 }
 
-.task-card-failure {
-  margin-top: 9px;
-  padding: 8px 10px;
-  border-radius: 12px;
-  background: var(--error-bg);
-  color: var(--error);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.task-card-failures {
-  margin-top: 10px;
+.batch-task-meta {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.task-card-failure-title {
-  font-weight: 700;
-  color: var(--text-0);
-}
-
-.task-card-failure-msg {
-  margin-top: 2px;
-  color: var(--error);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.task-card-failure-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
   margin-top: 8px;
-}
-
-.task-card-toggle {
-  width: 100%;
-  margin-top: 10px;
-  padding: 6px 0;
-  border: 0;
-  border-top: 1px dashed var(--border);
-  background: transparent;
-  color: var(--text-3);
-  font-size: 12px;
-  cursor: pointer;
-  transition: color 0.18s var(--ease-out);
-}
-
-.task-card-toggle:hover {
-  color: var(--accent);
-}
-
-.task-card-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.task-children {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border);
-}
-
-.task-children-title {
-  margin-bottom: 6px;
   font-size: 11px;
   color: var(--text-3);
-}
-
-.task-child-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 24px;
-  font-size: 11px;
-  color: var(--text-2);
-}
-
-.task-child-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-child-status {
-  color: var(--text-3);
-}
-
-.task-child-row.is-nested {
-  padding-left: 18px;
-  font-size: 10px;
 }
 
 .task-center-foot {
@@ -775,6 +731,35 @@ function formatTime(value: Date | string | null | undefined) {
   border-top: 1px solid var(--border);
   color: var(--text-3);
   font-size: 11px;
+}
+
+.task-center-worker-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--bg-2);
+  color: var(--text-2);
+}
+
+.task-center-worker-badge.is-online {
+  background: rgba(63, 138, 99, 0.12);
+  color: var(--success);
+}
+
+.task-center-worker-badge.is-offline {
+  background: rgba(210, 79, 102, 0.12);
+  color: var(--error);
+}
+
+.task-center-worker-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
 }
 
 .task-center-fade-enter-active,

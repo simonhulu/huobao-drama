@@ -5,6 +5,8 @@
     :loading="loading"
     :error="error"
     :last-loaded-at="lastLoadedAt"
+    :worker-health="workerHealth"
+    :is-worker-healthy="isWorkerHealthy"
     @refresh="loadTasks"
     @cancel="cancelTaskWithToast"
     @retry="retryTaskWithToast"
@@ -23,14 +25,16 @@ const {
   loading,
   error,
   lastLoadedAt,
+  workerHealth,
+  isWorkerHealthy,
   loadTasks,
-  startPolling,
+  startUpdates,
   cancelTaskWithToast,
   retryTaskWithToast,
 } = useTasks({ pollMs: 3000 })
 
 onMounted(() => {
   loadTasks()
-  startPolling()
+  startUpdates()
 })
 </script>

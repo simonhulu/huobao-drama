@@ -48,3 +48,8 @@ temp/
 .omo/
 .agents/
 .codex/
+
+# Backend local databases
+backend/data.db
+backend/dev.db
+backend/src/db/*.db

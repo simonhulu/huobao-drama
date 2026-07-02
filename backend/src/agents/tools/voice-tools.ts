@@ -84,6 +84,10 @@ export function createVoiceTools(episodeId: number, dramaId: number) {
       reason: z.string().optional().describe('Why this voice fits'),
     }),
     execute: async ({ character_id, voice_id, reason }) => {
+      const [character] = db.select().from(schema.characters).where(eq(schema.characters.id, character_id)).all()
+      if (character?.voiceStyle) {
+        return { skipped: true, message: `Character ${character_id} already has voice "${character.voiceStyle}" — skipping reassignment.` }
+      }
       const provider = getEpisodeAudioProvider() || 'minimax'
       logTaskProgress('VoiceTool', 'assign-begin', { episodeId, dramaId, characterId: character_id, voiceId: voice_id, provider, reason })
       db.update(schema.characters)

@@ -50,6 +50,7 @@ test('agent.run handler executes agent and records normalized tool events', asyn
     taskId: task.id,
     payload: task.payload,
     signal: new AbortController().signal,
+    attempts: 1,
     progress(message: string, current?: number, total?: number) {
       updateTaskProgress(task.id, {
         progressMessage: message,

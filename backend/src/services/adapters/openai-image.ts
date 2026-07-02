@@ -11,7 +11,8 @@ import type {
   ImageGenResponse,
   ImagePollResponse,
 } from './types'
-import { joinProviderUrl } from './url'
+import { joinProviderUrl } from './url.js'
+import { normalizePrompt } from './prompt-utils.js'
 
 export class OpenAIImageAdapter implements ImageProviderAdapter {
   provider = 'openai'
@@ -22,10 +23,14 @@ export class OpenAIImageAdapter implements ImageProviderAdapter {
 
     const body: any = {
       model: record.model || 'dall-e-3',
-      prompt: record.prompt,
+      prompt: normalizePrompt(record.prompt, this.provider),
       size,
       n: 1,
       response_format: 'url', // 默认返回 URL，可选 'b64_json'
+    }
+
+    if (record.seed != null) {
+      body.seed = record.seed
     }
 
     return {

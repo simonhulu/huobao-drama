@@ -19,9 +19,16 @@ export interface CreationTask {
   progress_total?: number | null
   progress_message?: string | null
   error_message?: string | null
+  error_message_zh?: string | null
   cancel_requested?: boolean | number | null
   idempotency_key?: string | null
   max_attempts?: number | null
+  priority?: number | null
+  scheduled_at?: string | number | Date | null
+  provider?: string | null
+  retry_reason?: string | null
+  attempts?: number | null
+  queue_position?: number | null
   created_at?: string | number | Date | null
   updated_at?: string | number | Date | null
   [key: string]: unknown
@@ -148,8 +155,57 @@ export function taskFailureMessage(task: CreationTask | undefined | null) {
   if (!task) return ''
   const message = taskValue(task, 'error_message')
   if (message) return String(message)
+  const zhMessage = taskValue(task, 'error_message_zh')
+  if (zhMessage) return String(zhMessage)
   if (taskStatus(task) === 'stale') return '任务已中断，请重试'
   return '任务失败，请重试'
+}
+
+export function taskQueuePosition(task: CreationTask | undefined | null) {
+  const value = taskValue(task, 'queue_position')
+  return value == null ? null : Number(value)
+}
+
+export function taskAttempts(task: CreationTask | undefined | null) {
+  return Number(taskValue(task, 'attempts') || 0)
+}
+
+export function taskProvider(task: CreationTask | undefined | null) {
+  return String(taskValue(task, 'provider') || '')
+}
+
+export function taskPriority(task: CreationTask | undefined | null) {
+  return Number(taskValue(task, 'priority') || 0)
+}
+
+export function formatProvider(provider: string) {
+  const labels: Record<string, string> = {
+    openai: 'OpenAI',
+    gemini: 'Gemini',
+    minimax: 'MiniMax',
+    doubao: '火山引擎',
+    aliyun: '阿里',
+    chatfire: 'Chatfire',
+  }
+  return labels[provider] || provider
+}
+
+export function taskStatusDetail(task: CreationTask | undefined | null) {
+  const status = taskStatus(task)
+  const queuePosition = taskQueuePosition(task)
+  const attempts = taskAttempts(task)
+  const provider = taskProvider(task)
+
+  if (status === 'queued' && queuePosition != null) {
+    return `队列第 ${queuePosition} 位`
+  }
+  if (status === 'running' && provider) {
+    return `正在由 ${formatProvider(provider)} 生成`
+  }
+  if ((status === 'failed' || status === 'stale') && attempts > 0) {
+    return `已尝试 ${attempts} 次`
+  }
+  return ''
 }
 
 export function taskErrorInList(tasks: CreationTask[], type: string, scope: TaskScopeMatcher = {}) {
@@ -235,10 +291,72 @@ export function groupTasks<T extends CreationTask>(tasks: T[]): GroupedTasks<T> 
 
 export interface EpisodeTaskGroup {
   key: string
+  dramaId: string
+  episodeId?: string
   title: string
   tasks: CreationTask[]
   grouped: GroupedTasks
   status: TaskStatus
+  progress: {
+    terminal: number
+    total: number
+  }
+}
+
+export interface TypeTaskGroup {
+  type: string
+  label: string
+  tasks: CreationTask[]
+  status: TaskStatus
+  counts: {
+    total: number
+    completed: number
+    queued: number
+    running: number
+    failed: number
+  }
+  progress: {
+    terminal: number
+    total: number
+  }
+}
+
+export interface EpisodeQueueGroup {
+  episodeKey: string
+  dramaId: string
+  episodeId?: string
+  title: string
+  types: TypeTaskGroup[]
+  roots: CreationTask[]
+  childrenByParent: Record<string, CreationTask[]>
+  tasks: CreationTask[]
+  status: TaskStatus
+  counts: {
+    total: number
+    completed: number
+    queued: number
+    running: number
+    failed: number
+  }
+  progress: {
+    terminal: number
+    total: number
+  }
+}
+
+export interface DramaTaskGroup {
+  dramaId: string
+  title: string
+  episodes: EpisodeQueueGroup[]
+  tasks: CreationTask[]
+  status: TaskStatus
+  counts: {
+    total: number
+    completed: number
+    queued: number
+    running: number
+    failed: number
+  }
   progress: {
     terminal: number
     total: number
@@ -290,12 +408,14 @@ export function deriveEpisodeTaskGroups(tasks: CreationTask[]): EpisodeTaskGroup
     const terminal = groupTasks_.filter(isTerminalTask).length
 
     let title: string
+    let dramaId = ''
+    let episodeId: string | undefined
     if (key.includes(':episode_')) {
-      const dramaId = key.slice('drama_'.length, key.indexOf(':episode_'))
-      const episodeId = key.slice(key.indexOf(':episode_') + ':episode_'.length)
+      dramaId = key.slice('drama_'.length, key.indexOf(':episode_'))
+      episodeId = key.slice(key.indexOf(':episode_') + ':episode_'.length)
       title = `项目 ${dramaId} · 第 ${episodeId} 集制作`
     } else if (key.startsWith('drama_')) {
-      const dramaId = key.slice('drama_'.length)
+      dramaId = key.slice('drama_'.length)
       title = `项目 ${dramaId} 后台任务`
     } else {
       title = '后台任务'
@@ -303,6 +423,8 @@ export function deriveEpisodeTaskGroups(tasks: CreationTask[]): EpisodeTaskGroup
 
     result.push({
       key,
+      dramaId,
+      episodeId,
       title,
       tasks: groupTasks_,
       grouped,
@@ -312,6 +434,231 @@ export function deriveEpisodeTaskGroups(tasks: CreationTask[]): EpisodeTaskGroup
   }
 
   return result
+}
+
+function deriveGroupCounts(tasks: CreationTask[]) {
+  return {
+    total: tasks.length,
+    completed: tasks.filter(t => taskStatus(t) === 'succeeded').length,
+    queued: tasks.filter(t => taskStatus(t) === 'queued').length,
+    running: tasks.filter(t => taskStatus(t) === 'running').length,
+    failed: tasks.filter(t => ['failed', 'stale'].includes(taskStatus(t))).length,
+  }
+}
+
+export function deriveTypeTaskGroups(tasks: CreationTask[]): TypeTaskGroup[] {
+  const sorted = [...tasks].sort((a, b) => taskId(b) - taskId(a))
+  const byType: Record<string, CreationTask[]> = {}
+
+  for (const task of sorted) {
+    const type = String(task?.type || 'unknown')
+    byType[type] ||= []
+    byType[type].push(task)
+  }
+
+  return Object.entries(byType)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([type, typeTasks]) => {
+      const status = deriveGroupStatus(typeTasks)
+      const total = typeTasks.length
+      const terminal = typeTasks.filter(isTerminalTask).length
+      return {
+        type,
+        label: taskTitle({ type } as CreationTask),
+        tasks: typeTasks,
+        status,
+        counts: deriveGroupCounts(typeTasks),
+        progress: { terminal, total },
+      }
+    })
+}
+
+function deriveEpisodeQueueGroup(episode: EpisodeTaskGroup): EpisodeQueueGroup {
+  const grouped = groupTasks(episode.tasks)
+  const typeGroups = deriveTypeTaskGroups(episode.tasks)
+  return {
+    episodeKey: episode.key,
+    dramaId: episode.dramaId,
+    episodeId: episode.episodeId,
+    title: episode.title,
+    types: typeGroups,
+    roots: grouped.roots,
+    childrenByParent: grouped.childrenByParent,
+    tasks: episode.tasks,
+    status: episode.status,
+    counts: deriveGroupCounts(episode.tasks),
+    progress: episode.progress,
+  }
+}
+
+export function deriveDramaTaskGroups(tasks: CreationTask[]): DramaTaskGroup[] {
+  const episodes = deriveEpisodeTaskGroups(tasks)
+  const byDrama = new Map<string, EpisodeTaskGroup[]>()
+
+  for (const ep of episodes) {
+    const dramaId = ep.dramaId || 'global'
+    if (!byDrama.has(dramaId)) {
+      byDrama.set(dramaId, [])
+    }
+    byDrama.get(dramaId)!.push(ep)
+  }
+
+  const result: DramaTaskGroup[] = []
+
+  for (const [dramaId, dramaEpisodes] of byDrama) {
+    const queueEpisodes = dramaEpisodes.map(deriveEpisodeQueueGroup)
+    const allTasks = dramaEpisodes.flatMap(ep => ep.tasks)
+    const status = deriveGroupStatus(allTasks)
+    const terminal = allTasks.filter(isTerminalTask).length
+    const isGlobal = dramaId === 'global'
+
+    result.push({
+      dramaId,
+      title: isGlobal ? '全局后台任务' : `项目 ${dramaId}`,
+      episodes: queueEpisodes,
+      tasks: allTasks,
+      status,
+      counts: deriveGroupCounts(allTasks),
+      progress: { terminal, total: allTasks.length },
+    })
+  }
+
+  return result.sort((a, b) => {
+    if (a.dramaId === 'global') return 1
+    if (b.dramaId === 'global') return -1
+    return Number(a.dramaId) - Number(b.dramaId)
+  })
+}
+
+export function deriveActiveBatchTasks(tasks: CreationTask[]): CreationTask[] {
+  const sorted = [...tasks].sort((a, b) => taskId(b) - taskId(a))
+  const seen = new Set<string>()
+  const result: CreationTask[] = []
+
+  for (const task of sorted) {
+    const status = taskStatus(task)
+    const total = Number(taskValue(task, 'progress_total') || 0)
+    const key = `${task.type}:${taskValue(task, 'episode_id') || ''}:${taskValue(task, 'drama_id') || ''}`
+
+    if (!['queued', 'running'].includes(status)) continue
+    if (total <= 0) continue
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    result.push(task)
+  }
+
+  return result
+}
+
+export interface BatchTaskGroup {
+  dramaId: string
+  episodeId?: string
+  type: string
+  label: string
+  task: CreationTask
+  progress: TaskProgressInfo
+}
+
+export interface BatchEpisodeGroup {
+  dramaId: string
+  episodeId?: string
+  title: string
+  tasks: BatchTaskGroup[]
+}
+
+export interface BatchDramaGroup {
+  dramaId: string
+  title: string
+  episodes: BatchEpisodeGroup[]
+}
+
+function batchTaskKey(task: CreationTask) {
+  const dramaId = String(taskValue(task, 'drama_id') || 'global')
+  const episodeId = String(taskValue(task, 'episode_id') || '')
+  return `${dramaId}:${episodeId}:${task.type}`
+}
+
+export function deriveBatchTaskGroups(tasks: CreationTask[]): BatchDramaGroup[] {
+  const sorted = [...tasks].sort((a, b) => taskId(b) - taskId(a))
+  const seen = new Set<string>()
+  const groups: BatchTaskGroup[] = []
+
+  for (const task of sorted) {
+    const status = taskStatus(task)
+    const total = Number(taskValue(task, 'progress_total') || 0)
+
+    if (!['queued', 'running'].includes(status)) continue
+    if (total <= 0) continue
+
+    const key = batchTaskKey(task)
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    const dramaId = String(taskValue(task, 'drama_id') || 'global')
+    const episodeIdRaw = taskValue(task, 'episode_id')
+    const episodeId = episodeIdRaw != null && String(episodeIdRaw) !== '' ? String(episodeIdRaw) : undefined
+
+    groups.push({
+      dramaId,
+      episodeId,
+      type: task.type,
+      label: taskTitle(task),
+      task,
+      progress: taskProgressInfo(task),
+    })
+  }
+
+  const byDrama = new Map<string, Map<string | undefined, BatchTaskGroup[]>>()
+
+  for (const group of groups) {
+    if (!byDrama.has(group.dramaId)) {
+      byDrama.set(group.dramaId, new Map())
+    }
+    const dramaEpisodes = byDrama.get(group.dramaId)!
+    if (!dramaEpisodes.has(group.episodeId)) {
+      dramaEpisodes.set(group.episodeId, [])
+    }
+    dramaEpisodes.get(group.episodeId)!.push(group)
+  }
+
+  const result: BatchDramaGroup[] = []
+
+  for (const [dramaId, episodesMap] of byDrama) {
+    const episodes: BatchEpisodeGroup[] = []
+    for (const [episodeId, typeGroups] of episodesMap) {
+      const isGlobal = dramaId === 'global'
+      const title = episodeId
+        ? `第 ${episodeId} 集`
+        : isGlobal
+          ? '全局任务'
+          : '项目级任务'
+      episodes.push({
+        dramaId,
+        episodeId,
+        title,
+        tasks: typeGroups,
+      })
+    }
+
+    episodes.sort((a, b) => {
+      if (!a.episodeId && b.episodeId) return -1
+      if (a.episodeId && !b.episodeId) return 1
+      return Number(a.episodeId || 0) - Number(b.episodeId || 0)
+    })
+
+    result.push({
+      dramaId,
+      title: dramaId === 'global' ? '全局任务' : `项目 ${dramaId}`,
+      episodes,
+    })
+  }
+
+  return result.sort((a, b) => {
+    if (a.dramaId === 'global') return 1
+    if (b.dramaId === 'global') return -1
+    return Number(a.dramaId) - Number(b.dramaId)
+  })
 }
 
 export function toRetryPayload(task: CreationTask | undefined | null) {

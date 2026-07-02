@@ -31,6 +31,7 @@ function makeCtx(task: any) {
       taskId: task.id,
       payload: task.payload,
       signal: new AbortController().signal,
+      attempts: 1,
       progress(message: string, current?: number, total?: number) {
         progressCalls.push({ message, current, total })
       },
@@ -108,4 +109,91 @@ test('compose.episode handler reports child dependency progress without waiting 
   assert.equal(progressCalls.at(-1)?.total, 2)
   assert.deepEqual(listTaskDependencies(parent.id).map(dep => dep.dependsOnTaskId), [childA.id, childB.id])
   assert.equal(getTask(parent.id)?.type, 'compose.episode')
+})
+
+test('compose.storyboard allows missing narration in direct_script mode', async () => {
+  const ts = now()
+  const dramaId = Number(db.insert(schema.dramas).values({
+    title: 'Direct Script Drama',
+    status: 'draft',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const episodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 1,
+    title: 'Direct Script Episode',
+    workflowType: 'direct_script',
+    renderMode: 'image_story',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const storyboardId = Number(db.insert(schema.storyboards).values({
+    episodeId,
+    storyboardNumber: 1,
+    title: 'Shot 1',
+    firstFrameImage: 'static/images/test.png',
+    duration: 5,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const handler = createComposeStoryboardHandler({
+    composeStoryboard: async (id: number) => {
+      assert.equal(id, storyboardId)
+      return 'static/composed/direct-script-shot.mp4'
+    },
+  })
+  const task = createTask({
+    type: 'compose.storyboard',
+    episodeId,
+    payload: { storyboard_id: storyboardId },
+  })
+  const { ctx } = makeCtx(task)
+
+  const result = await handler.run(ctx)
+  assert.deepEqual(result, { storyboard_id: storyboardId, composed_video_url: 'static/composed/direct-script-shot.mp4' })
+})
+
+test('compose.storyboard still rejects missing narration in story_rewrite mode', async () => {
+  const ts = now()
+  const dramaId = Number(db.insert(schema.dramas).values({
+    title: 'Story Rewrite Drama',
+    status: 'draft',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const episodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 1,
+    title: 'Story Rewrite Episode',
+    workflowType: 'story_rewrite',
+    renderMode: 'image_story',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const storyboardId = Number(db.insert(schema.storyboards).values({
+    episodeId,
+    storyboardNumber: 1,
+    title: 'Shot 1',
+    firstFrameImage: 'static/images/test.png',
+    duration: 5,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const handler = createComposeStoryboardHandler({
+    composeStoryboard: async () => 'static/composed/should-not-reach.mp4',
+  })
+  const task = createTask({
+    type: 'compose.storyboard',
+    episodeId,
+    payload: { storyboard_id: storyboardId },
+  })
+  const { ctx } = makeCtx(task)
+
+  await assert.rejects(
+    () => handler.run(ctx),
+    /缺少旁白/,
+  )
 })

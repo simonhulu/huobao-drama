@@ -18,7 +18,7 @@ const {
 const { default: composeRoute } = await import('./compose.js')
 const { default: mergeRoute } = await import('./merge.js')
 
-function insertEpisode() {
+function insertEpisode(renderMode: string = 'ai_video') {
   const ts = now()
   const dramaId = Number(db.insert(schema.dramas).values({
     title: 'Drama',
@@ -30,6 +30,7 @@ function insertEpisode() {
     dramaId,
     episodeNumber: 1,
     title: 'Episode',
+    renderMode,
     createdAt: ts,
     updatedAt: ts,
   }).run().lastInsertRowid)
@@ -68,7 +69,7 @@ test('POST /storyboards/:id/compose creates compose.storyboard task and preserve
 test('POST /episodes/:id/compose-all creates parent and child compose tasks with dependencies', async () => {
   const { episodeId } = insertEpisode()
   insertStoryboard(episodeId, 1, { videoUrl: 'static/videos/a.mp4' })
-  insertStoryboard(episodeId, 2, { firstFrameImage: 'static/images/b.png' })
+  insertStoryboard(episodeId, 2, { videoUrl: 'static/videos/b.mp4' })
 
   const response = await composeRoute.request(`/episodes/${episodeId}/compose-all`, {
     method: 'POST',
@@ -91,7 +92,7 @@ test('POST /episodes/:id/compose-all creates parent and child compose tasks with
 test('GET /episodes/:id/compose-status derives progress from compose child tasks', async () => {
   const { episodeId } = insertEpisode()
   const storyboardA = insertStoryboard(episodeId, 1, { videoUrl: 'static/videos/a.mp4' })
-  insertStoryboard(episodeId, 2, { firstFrameImage: 'static/images/b.png' })
+  insertStoryboard(episodeId, 2, { videoUrl: 'static/videos/b.mp4' })
 
   const startResponse = await composeRoute.request(`/episodes/${episodeId}/compose-all`, {
     method: 'POST',

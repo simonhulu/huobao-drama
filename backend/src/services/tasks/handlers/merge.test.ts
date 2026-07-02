@@ -22,6 +22,7 @@ function makeCtx(task: any) {
       taskId: task.id,
       payload: task.payload,
       signal: new AbortController().signal,
+      attempts: 1,
       progress(message: string, current?: number, total?: number) {
         progressCalls.push({ message, current, total })
       },
@@ -81,7 +82,16 @@ test('merge.episode handler fails before ffmpeg when storyboards are not compose
     createdAt: ts,
     updatedAt: ts,
   }).run().lastInsertRowid)
-  const mergeId = enqueueEpisodeMerge(episodeId, dramaId)
+  const mergeId = Number(db.insert(schema.videoMerges).values({
+    episodeId,
+    dramaId,
+    title: `Episode ${episodeId} Merge`,
+    provider: 'ffmpeg',
+    model: 'ffmpeg-concat-h264-aac',
+    status: 'processing',
+    scenes: '[]',
+    createdAt: ts,
+  }).run().lastInsertRowid)
   const task = createTask({
     type: 'merge.episode',
     payload: { merge_id: mergeId, episode_id: episodeId, drama_id: dramaId },

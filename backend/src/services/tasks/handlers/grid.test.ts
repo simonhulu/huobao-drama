@@ -37,6 +37,7 @@ test('grid.generate handler executes grid image generation and updates grid draf
     taskId: task.id,
     payload: task.payload,
     signal: new AbortController().signal,
+    attempts: 1,
     progress() {},
     event() {},
     isCancelRequested() {
@@ -86,6 +87,7 @@ test('grid.split handler applies assignments to storyboards', async () => {
     taskId: task.id,
     payload: task.payload,
     signal: new AbortController().signal,
+    attempts: 1,
     progress() {},
     event() {},
     isCancelRequested() {

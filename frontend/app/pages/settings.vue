@@ -101,6 +101,8 @@
                     <div class="config-line">
                       <span class="config-provider">{{ c.provider }}</span>
                       <span class="config-name">{{ c.name || `${c.provider}-${c.service_type}` }}</span>
+                      <span v-if="c.settings?.useForNarration" class="tag tag-success">解说</span>
+                      <span v-if="c.settings?.narrationVoiceUri" class="tag tag-accent">音色已复刻</span>
                     </div>
                     <span class="config-model mono truncate">{{ fmtModel(c.model) }}</span>
                     <span class="config-base mono truncate">{{ c.base_url || '未设置 Base URL' }}</span>
@@ -108,6 +110,9 @@
                 </div>
                 <span :class="['tag', c.api_key ? 'tag-success' : 'tag-error']">{{ c.api_key ? '已配置' : '无密钥' }}</span>
                 <button class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">测试</button>
+                <button v-if="st.type === 'audio' && c.provider === 'siliconflow'" class="btn btn-ghost btn-sm" @click="openCloneVoice(c)">
+                  <Upload :size="13" /> 复刻
+                </button>
                 <label class="toggle"><input type="checkbox" :checked="c.is_active" @change="toggleCfg(c)"><span /></label>
                 <button class="btn btn-ghost btn-icon" @click="startEditCfg(c)"><Pencil :size="13" /></button>
                 <button class="btn btn-ghost btn-icon" @click="delCfg(c.id)"><Trash2 :size="13" /></button>
@@ -116,6 +121,7 @@
             </div>
           </section>
         </div>
+
       </div>
 
       <!-- ===== Agent 配置 ===== -->
@@ -312,6 +318,23 @@
           <span class="mono">{{ endpointHint }}</span>
         </div>
         <label class="field"><span class="field-label">模型（逗号分隔）</span><input v-model="cfgForm.modelStr" class="input" placeholder="model-name" /></label>
+        <div v-if="cfgForm.service_type === 'image'" class="advanced-adapter-section">
+          <button type="button" class="advanced-toggle-btn" @click="cfgFormShowAdvanced = !cfgFormShowAdvanced">
+            <span>Advanced adapter config</span>
+            <ChevronDown :size="14" :style="{ transform: cfgFormShowAdvanced ? 'rotate(180deg)' : '', transition: '0.2s' }" />
+          </button>
+          <div v-if="cfgFormShowAdvanced" class="advanced-adapter-body">
+            <label class="field">
+              <span class="field-label">Adapter preset</span>
+              <BaseSelect v-model="cfgFormSettingsPreset" :options="adapterPresetOptions" @update:modelValue="onAdapterPresetChange" />
+            </label>
+            <label class="field">
+              <span class="field-label">Adapter JSON</span>
+              <textarea v-model="cfgForm.settings" class="textarea mono" rows="14" placeholder="{}" />
+              <span class="field-hint">手动编辑适配器配置 JSON。选择预设会自动填充。</span>
+            </label>
+          </div>
+        </div>
         <div v-if="cfgTestResult" class="test-result" :class="{ ok: cfgTestResult.reachable, bad: !cfgTestResult.reachable }">
           <div class="test-result-head">
             <span class="tag" :class="cfgTestResult.reachable ? 'tag-success' : 'tag-error'">{{ cfgTestResult.status || 'ERROR' }}</span>
@@ -366,6 +389,40 @@
       </form>
     </div>
 
+    <!-- Clone Voice Dialog -->
+    <div v-if="cloneVoiceDialog" class="overlay" @click.self="cloneVoiceDialog = false">
+      <form class="modal card config-modal" @submit.prevent="submitCloneVoice">
+        <div class="config-modal-head">
+          <div>
+            <div class="setup-kicker">SiliconFlow Voice Cloning</div>
+            <h2 class="modal-title">音色复刻</h2>
+            <div class="modal-note">上传一段 5-30 秒的清晰参考音频（mp3/wav/mp4），并填写音频中实际念出的完整文本，复刻后可作为 SiliconFlow 解说音色使用。</div>
+          </div>
+          <span class="tag tag-accent">{{ cloneVoiceTarget?.provider }}</span>
+        </div>
+        <label class="field">
+          <span class="field-label">参考音频</span>
+          <input ref="cloneFileInput" type="file" accept="audio/*,video/*" class="input" @change="onCloneFileChange" />
+          <span class="field-hint">支持 mp3 / wav / mp4。请先裁剪好片段；超过 30 秒会被拒绝，不再自动截取前 25 秒。</span>
+        </label>
+        <label class="field">
+          <span class="field-label">参考音频文本 <span class="dim">（必须和音频逐字匹配）</span></span>
+          <textarea v-model="cloneVoiceForm.text" class="textarea mono" rows="4" placeholder="这段参考音频中实际念出的完整文本" />
+        </label>
+        <label class="field">
+          <span class="field-label">音色名称</span>
+          <input v-model="cloneVoiceForm.custom_name" class="input" placeholder="narration_voice" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn" @click="cloneVoiceDialog = false">取消</button>
+          <button type="submit" class="btn btn-primary" :disabled="cloneVoiceLoading">
+            <Loader2 v-if="cloneVoiceLoading" :size="12" class="animate-spin" />
+            <span v-else>开始复刻</span>
+          </button>
+        </div>
+      </form>
+    </div>
+
     <!-- Add Skill Dialog -->
     <div v-if="addSkillDialog" class="overlay" @click.self="addSkillDialog = false">
       <form class="modal card" @submit.prevent="confirmAddSkill">
@@ -392,7 +449,7 @@
 </template>
 
 <script setup>
-import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, RefreshCw } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, RefreshCw, Upload } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, agentConfigAPI, skillsAPI, voicesAPI } from '~/composables/useApi'
@@ -419,10 +476,120 @@ const cfgEditId = ref(null)
 const presetDialog = ref(false)
 const cfgTesting = ref(false)
 const cfgTestResult = ref(null)
-const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0 })
-const huobaoForm = reactive({ apiKey: '' })
+const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0, settings: '' })
+const cfgFormSettingsPreset = ref('none')
+const cfgFormShowAdvanced = ref(false)
+const adapterPresetOptions = computed(() => [
+  { label: 'None', value: 'none' },
+  { label: 'OpenAI', value: 'openai' },
+  { label: 'MiniMax', value: 'minimax' },
+  { label: 'Gemini', value: 'gemini' },
+  { label: 'Custom', value: 'custom' },
+])
+
+const adapterPresetSamples = {
+  openai: {
+    adapter: {
+      request: {
+        url: '/v1/images/generations',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer {{apiKey}}' },
+        body: { model: '{{model}}', prompt: '{{prompt}}', size: '{{size}}', n: 1, response_format: 'url' },
+      },
+      response: {
+        asyncWhenPath: 'task_id',
+        taskIdPath: 'task_id',
+        imageUrlPath: 'data.0.url',
+      },
+      poll: {
+        request: {
+          url: '/v1/images/task/{{taskId}}',
+          method: 'GET',
+          headers: { Authorization: 'Bearer {{apiKey}}' },
+        },
+        response: {
+          statusPath: 'status',
+          completedValues: ['completed'],
+          imageUrlPath: 'image_url',
+        },
+      },
+    },
+  },
+  minimax: {
+    adapter: {
+      request: {
+        url: '/v1/image_generation',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer {{apiKey}}' },
+        body: { model: '{{model}}', prompt: '{{prompt}}', aspect_ratio: '{{aspectRatio}}', n: 1, response_format: 'url' },
+      },
+      response: {
+        imageUrlPath: 'data.image_urls.0',
+      },
+      size: { strategy: 'aspectRatio' },
+    },
+  },
+  gemini: {
+    adapter: {
+      request: {
+        url: '{{baseUrl}}/v1beta/models/{{model}}:predict?key={{apiKey}}',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: { instances: [{ prompt: '{{prompt}}' }], parameters: { aspectRatio: '{{aspectRatio}}' } },
+      },
+      response: {
+        imageUrlPath: 'predictions.0.imageUrl',
+        base64Path: 'predictions.0.bytesBase64Encoded',
+      },
+      size: { strategy: 'aspectRatio' },
+    },
+  },
+}
+
+function onAdapterPresetChange(val) {
+  if (val === 'none') {
+    cfgForm.settings = ''
+  } else if (val === 'custom') {
+    if (!cfgForm.settings) cfgForm.settings = '{}'
+  } else if (adapterPresetSamples[val]) {
+    cfgForm.settings = JSON.stringify(adapterPresetSamples[val], null, 2)
+  }
+}
+
+function formatSettings(val) {
+  if (!val) return ''
+  try {
+    return JSON.stringify(typeof val === 'string' ? JSON.parse(val) : val, null, 2)
+  } catch {
+    return String(val)
+  }
+}
+
+function parseSettings(str) {
+  if (!str || !str.trim()) return null
+  try {
+    return JSON.parse(str)
+  } catch {
+    return null
+  }
+}
+
+function detectPresetFromSettings(settings) {
+  if (!settings) return 'none'
+  let parsed
+  try { parsed = typeof settings === 'string' ? JSON.parse(settings) : settings } catch { return 'custom' }
+  if (!parsed || typeof parsed !== 'object') return 'none'
+  if (!parsed.adapter || typeof parsed.adapter !== 'object') return 'custom'
+  const adapterKeys = Object.keys(parsed.adapter)
+  for (const [preset, sample] of Object.entries(adapterPresetSamples)) {
+    const sampleAdapterKeys = Object.keys(sample.adapter)
+    const match = sampleAdapterKeys.every(k => adapterKeys.includes(k))
+    if (match) return preset
+  }
+  return 'custom'
+}
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
-const providers = ['ali', 'chatfire', 'gemini', 'minimax', 'openai', 'openrouter', 'vidu', 'volcengine']
+const providers = ['ali', 'apimart', 'chatfire', 'gemini', 'minimax', 'openai', 'openrouter', 'siliconflow', 'vidu', 'volcengine']
 const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
 const serviceMeta = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
@@ -437,6 +604,7 @@ const providerPresets = {
     openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
   },
   image: {
+    apimart: { label: 'APIMart GPT-Image-2', baseUrl: 'https://api.apimart.ai', models: ['gpt-image-2'] },
     chatfire: { label: 'ChatFire 推荐', baseUrl: 'https://api.chatfire.site', models: ['doubao-seedream-4-5-251128'] },
     gemini: { label: 'Gemini 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-image-preview'] },
     volcengine: { label: '火山推荐', baseUrl: 'https://ark.cn-beijing.volces.com', models: ['doubao-seedream-4-0-250828'] },
@@ -449,6 +617,7 @@ const providerPresets = {
   },
   audio: {
     minimax: { label: '火宝音频', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'] },
+    siliconflow: { label: 'SiliconFlow 解说音频', baseUrl: 'https://api.siliconflow.com', models: ['FunAudioLLM/CosyVoice2-0.5B'] },
   },
 }
 const huobaoPresetCards = [
@@ -458,6 +627,7 @@ const huobaoPresetCards = [
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
 ]
 const endpointPrefixes = {
+  apimart: '/v1',
   chatfire: '/v1',
   openai: '/v1',
   openrouter: '/v1',
@@ -512,7 +682,9 @@ async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'
 function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null
-  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: t, priority: 0 })
+  cfgFormShowAdvanced.value = false
+  cfgFormSettingsPreset.value = 'none'
+  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: t, priority: 0, settings: '' })
   const firstPreset = presetsByType(t)[0]
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true
@@ -520,6 +692,9 @@ function startAddCfg(t) {
 function startEditCfg(c) {
   cfgEditId.value = c.id
   cfgTestResult.value = null
+  cfgFormShowAdvanced.value = false
+  const settingsStr = formatSettings(c.settings)
+  cfgFormSettingsPreset.value = detectPresetFromSettings(c.settings)
   Object.assign(cfgForm, {
     name: c.name || '',
     provider: c.provider,
@@ -528,6 +703,7 @@ function startEditCfg(c) {
     modelStr: fmtModel(c.model),
     service_type: c.service_type,
     priority: c.priority ?? 0,
+    settings: settingsStr,
   })
   cfgDialog.value = true
 }
@@ -565,9 +741,10 @@ async function testExistingCfg(c) {
 async function saveCfg() {
   if (!cfgForm.provider) { toast.warning('选择服务商'); return }
   const models = cfgForm.modelStr.split(',').map(s => s.trim()).filter(Boolean)
+  const settings = parseSettings(cfgForm.settings)
   try {
-    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority })
-    else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority })
+    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, settings })
+    else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, settings })
     cfgDialog.value = false; toast.success('已保存'); loadCfgs()
   } catch (e) { toast.error(e.message) }
 }
@@ -584,6 +761,45 @@ async function applyHuobaoPreset() {
     toast.success('火宝推荐配置与默认 Agent LLM 已写入')
   } catch (e) {
     toast.error(e.message)
+  }
+}
+
+const cloneVoiceDialog = ref(false)
+const cloneVoiceTarget = ref(null)
+const cloneVoiceForm = reactive({ custom_name: 'narration_voice', text: '', file: null })
+const cloneVoiceLoading = ref(false)
+
+function openCloneVoice(cfg) {
+  cloneVoiceTarget.value = cfg
+  cloneVoiceForm.custom_name = 'narration_voice'
+  cloneVoiceForm.text = ''
+  cloneVoiceForm.file = null
+  cloneVoiceDialog.value = true
+}
+
+function onCloneFileChange(e) {
+  cloneVoiceForm.file = e.target.files?.[0] || null
+}
+
+async function submitCloneVoice() {
+  if (!cloneVoiceTarget.value) return
+  if (!cloneVoiceForm.file) { toast.warning('请上传参考音频'); return }
+  if (!cloneVoiceForm.text.trim()) { toast.warning('请填写参考音频文本'); return }
+
+  cloneVoiceLoading.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', cloneVoiceForm.file)
+    formData.append('text', cloneVoiceForm.text)
+    formData.append('custom_name', cloneVoiceForm.custom_name)
+    const r = await aiConfigAPI.cloneVoice(cloneVoiceTarget.value.id, formData)
+    toast.success(`音色复刻成功: ${r.uri}`)
+    cloneVoiceDialog.value = false
+    await loadCfgs()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    cloneVoiceLoading.value = false
   }
 }
 
@@ -1185,6 +1401,17 @@ onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills() })
 .huobao-grid .field-hint a:hover {
   text-decoration: underline;
 }
+
+.advanced-adapter-section { margin-top: 4px; }
+.advanced-toggle-btn {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; padding: 10px 12px; font-size: 12px; font-weight: 600; color: var(--text-1);
+  background: rgba(255,255,255,0.72); border: 1px solid var(--border); border-radius: 12px;
+  cursor: pointer; transition: background 0.15s;
+}
+.advanced-toggle-btn:hover { background: var(--accent-bg); border-color: var(--accent); color: var(--accent-text); }
+.advanced-adapter-body { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; padding: 14px; border: 1px dashed var(--border); border-radius: 14px; background: rgba(244,248,255,0.5); }
+.textarea.mono { font-family: var(--font-mono); font-size: 12px; line-height: 1.5; }
 
 @media (max-width: 900px) {
   .preset-grid,

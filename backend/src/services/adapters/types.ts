@@ -73,6 +73,7 @@ export interface AIConfig {
   baseUrl: string
   apiKey: string
   model: string
+  settings?: string | Record<string, any> | null
 }
 
 export interface ImageGenerationRecord {
@@ -82,6 +83,7 @@ export interface ImageGenerationRecord {
   size?: string | null
   frameType?: string | null
   referenceImages?: string | null
+  seed?: number | null
   // ... 其他字段
 }
 
@@ -125,6 +127,46 @@ export interface VideoPollResponse {
 }
 
 /**
+ * 音乐/BGM 生成 Provider Adapter
+ */
+export interface MusicProviderAdapter {
+  provider: string
+
+  buildGenerateRequest(config: AIConfig, record: MusicGenerationRecord): ProviderRequest
+
+  parseGenerateResponse(result: any): MusicGenResponse
+
+  buildPollRequest(config: AIConfig, taskId: string): ProviderRequest
+
+  parsePollResponse(result: any): MusicPollResponse
+
+  buildFileRetrieveRequest(config: AIConfig, fileId: string): ProviderRequest
+
+  parseFileRetrieveResponse(result: any): { audioUrl: string | null; error?: string }
+}
+
+export interface MusicGenerationRecord {
+  id: number
+  prompt?: string | null
+  duration?: number | null
+  model?: string | null
+}
+
+export interface MusicGenResponse {
+  isAsync: boolean
+  taskId?: string
+  audioUrl?: string
+  error?: string
+}
+
+export interface MusicPollResponse {
+  status: 'pending' | 'processing' | 'completed' | 'failed'
+  fileId?: string
+  audioUrl?: string
+  error?: string
+}
+
+/**
  * TTS 语音合成 Provider Adapter
  */
 export interface TTSProviderAdapter {
@@ -132,12 +174,16 @@ export interface TTSProviderAdapter {
 
   buildGenerateRequest(config: AIConfig, params: any): ProviderRequest
 
-  parseResponse(result: any): {
+  parseResponse(result: any, config: AIConfig): Promise<{
     audioHex: string
     audioLength: number
     sampleRate: number
     bitrate: number
     format: string
     channel: number
-  }
+    /** 部分厂商（如 MiniMax）会返回带时间码的字幕信息 */
+    titles?: any[]
+    /** 厂商额外信息，如 audio_length */
+    extra?: Record<string, any>
+  }>
 }

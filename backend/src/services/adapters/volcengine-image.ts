@@ -11,7 +11,8 @@ import type {
   ImageGenResponse,
   ImagePollResponse,
 } from './types'
-import { joinProviderUrl } from './url'
+import { joinProviderUrl } from './url.js'
+import { normalizePrompt } from './prompt-utils.js'
 
 export class VolcEngineImageAdapter implements ImageProviderAdapter {
   provider = 'volcengine'
@@ -22,7 +23,7 @@ export class VolcEngineImageAdapter implements ImageProviderAdapter {
 
     const body: any = {
       model,
-      prompt: record.prompt,
+      prompt: normalizePrompt(record.prompt, this.provider),
     }
 
     // 尺寸参数

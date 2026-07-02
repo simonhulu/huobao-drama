@@ -98,12 +98,29 @@ export async function readImageAsCompressedDataUrl(
     maxWidth?: number
     maxHeight?: number
     quality?: number
+    /** 输出格式：'jpeg' | 'png' | 'webp' | 'preserve'（保留原格式） */
+    format?: 'jpeg' | 'png' | 'webp' | 'preserve'
   } = {},
 ): Promise<string> {
+  const { buffer, mimeType } = await readImageAsCompressedBuffer(relativePath, options)
+  return `data:${mimeType};base64,${buffer.toString('base64')}`
+}
+
+export async function readImageAsCompressedBuffer(
+  relativePath: string,
+  options: {
+    maxWidth?: number
+    maxHeight?: number
+    quality?: number
+    /** 输出格式：'jpeg' | 'png' | 'webp' | 'preserve'（保留原格式） */
+    format?: 'jpeg' | 'png' | 'webp' | 'preserve'
+  } = {},
+): Promise<{ buffer: Buffer; mimeType: string; ext: string }> {
   const filePath = getAbsolutePath(relativePath)
   const maxWidth = options.maxWidth ?? 768
   const maxHeight = options.maxHeight ?? 768
   const quality = options.quality ?? 68
+  const format = options.format ?? 'jpeg'
 
   const resized = sharp(filePath).rotate().resize({
     width: maxWidth,
@@ -112,11 +129,39 @@ export async function readImageAsCompressedDataUrl(
     withoutEnlargement: true,
   })
   const metadata = await resized.metadata()
-  const output = metadata.hasAlpha
-    ? await resized.flatten({ background: '#ffffff' }).jpeg({ quality, mozjpeg: true }).toBuffer()
-    : await resized.jpeg({ quality, mozjpeg: true }).toBuffer()
-  const mimeType = 'image/jpeg'
-  return `data:${mimeType};base64,${output.toString('base64')}`
+  const ext = path.extname(filePath).toLowerCase()
+  const originalMimeType = extToMimeType(ext)
+
+  let outputBuffer: Buffer
+  let mimeType: string
+
+  if (format === 'preserve') {
+    mimeType = originalMimeType
+    if (originalMimeType === 'image/png' && !metadata.hasAlpha) {
+      outputBuffer = await resized.jpeg({ quality, mozjpeg: true }).toBuffer()
+      mimeType = 'image/jpeg'
+    } else if (originalMimeType === 'image/png') {
+      outputBuffer = await resized.png({ quality: Math.min(quality, 100), compressionLevel: 9 }).toBuffer()
+    } else if (originalMimeType === 'image/webp') {
+      outputBuffer = await resized.webp({ quality }).toBuffer()
+    } else {
+      outputBuffer = await resized.jpeg({ quality, mozjpeg: true }).toBuffer()
+      mimeType = 'image/jpeg'
+    }
+  } else if (format === 'png') {
+    outputBuffer = await resized.png({ quality: Math.min(quality, 100), compressionLevel: 9 }).toBuffer()
+    mimeType = 'image/png'
+  } else if (format === 'webp') {
+    outputBuffer = await resized.webp({ quality }).toBuffer()
+    mimeType = 'image/webp'
+  } else {
+    outputBuffer = metadata.hasAlpha
+      ? await resized.flatten({ background: '#ffffff' }).jpeg({ quality, mozjpeg: true }).toBuffer()
+      : await resized.jpeg({ quality, mozjpeg: true }).toBuffer()
+    mimeType = 'image/jpeg'
+  }
+
+  return { buffer: outputBuffer, mimeType, ext: mimeTypeToExt(mimeType) }
 }
 
 export function parseDataUrl(dataUrl: string): { mimeType: string; data: string } | null {
@@ -126,6 +171,10 @@ export function parseDataUrl(dataUrl: string): { mimeType: string; data: string 
     mimeType: match[1],
     data: match[2],
   }
+}
+
+export function mimeTypeToExtension(mimeType: string): string {
+  return mimeTypeToExt(mimeType)
 }
 
 function mimeTypeToExt(mimeType: string): string {

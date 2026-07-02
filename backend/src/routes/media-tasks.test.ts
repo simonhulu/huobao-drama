@@ -15,6 +15,8 @@ const { default: videosRoute } = await import('./videos.js')
 const { default: storyboardsRoute } = await import('./storyboards.js')
 const { default: charactersRoute } = await import('./characters.js')
 
+const { default: gridRoute } = await import('./grid.js')
+
 function insertConfig(serviceType: string, provider = 'openai-compatible') {
   const ts = now()
   return Number(db.insert(schema.aiServiceConfigs).values({
@@ -60,14 +62,18 @@ test('POST /images creates image.generate task and keeps generation status query
     body: JSON.stringify({
       drama_id: dramaId,
       prompt: 'image prompt',
+      frame_type: 'first_frame',
     }),
   })
 
   assert.equal(response.status, 201)
   const json = await response.json()
+  assert.equal(typeof json.data.id, 'number')
   assert.equal(typeof json.data.task_id, 'number')
   assert.equal(json.data.status, 'pending')
-  assert.equal(getTask(json.data.task_id)?.type, 'image.generate')
+  const task = getTask(json.data.task_id)
+  assert.equal(task?.type, 'image.generate')
+  assert.equal(task?.payload?.frame_type, 'first_frame')
 })
 
 test('POST /videos creates video.generate task and keeps generation status queryable', async () => {
@@ -90,7 +96,7 @@ test('POST /videos creates video.generate task and keeps generation status query
 })
 
 test('POST /storyboards/:id/generate-tts creates tts.storyboard task', async () => {
-  const { episodeId, ts } = insertEpisode()
+  const { dramaId, episodeId, ts } = insertEpisode()
   const storyboardId = Number(db.insert(schema.storyboards).values({
     episodeId,
     storyboardNumber: 1,
@@ -108,7 +114,10 @@ test('POST /storyboards/:id/generate-tts creates tts.storyboard task', async () 
   const json = await response.json()
   assert.equal(typeof json.data.task_id, 'number')
   assert.equal(json.data.status, 'queued')
-  assert.equal(getTask(json.data.task_id)?.type, 'tts.storyboard')
+  const task = getTask(json.data.task_id)
+  assert.equal(task?.type, 'tts.storyboard')
+  assert.equal(task?.dramaId, dramaId)
+  assert.equal(task?.episodeId, episodeId)
 })
 
 test('POST /characters/:id/generate-voice-sample creates tts.character_sample task', async () => {
@@ -132,4 +141,126 @@ test('POST /characters/:id/generate-voice-sample creates tts.character_sample ta
   assert.equal(typeof json.data.task_id, 'number')
   assert.equal(json.data.status, 'queued')
   assert.equal(getTask(json.data.task_id)?.type, 'tts.character_sample')
+})
+
+import { eq } from 'drizzle-orm'
+
+test('POST /images with storyboard_id derives seed and style consistency from characters/scene', async () => {
+  const { dramaId, episodeId, ts } = insertEpisode()
+  db.update(schema.dramas).set({ style: 'film noir' }).where(eq(schema.dramas.id, dramaId)).run()
+
+  const characterId = Number(db.insert(schema.characters).values({
+    dramaId,
+    name: 'Hero',
+    appearance: 'black coat, red tie',
+    seed: 12345,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const sceneId = Number(db.insert(schema.scenes).values({
+    dramaId,
+    episodeId,
+    location: 'rainy street',
+    time: 'night',
+    prompt: 'rainy street at night',
+    seed: 67890,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const storyboardId = Number(db.insert(schema.storyboards).values({
+    episodeId,
+    storyboardNumber: 1,
+    sceneId,
+    title: 'Opening shot',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  db.insert(schema.storyboardCharacters).values({ storyboardId, characterId }).run()
+  db.insert(schema.episodeCharacters).values({ episodeId, characterId, createdAt: ts }).run()
+  db.insert(schema.episodeScenes).values({ episodeId, sceneId, createdAt: ts }).run()
+
+  const response = await imagesRoute.request('/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      storyboard_id: storyboardId,
+      drama_id: dramaId,
+      prompt: 'a cinematic frame',
+    }),
+  })
+
+  assert.equal(response.status, 201)
+  const json = await response.json()
+  const genId = getTask(json.data.task_id)?.payload?.image_generation_id ?? json.data.image_generation_id
+  const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()
+
+  assert.ok(typeof record.seed === 'number')
+  assert.notEqual(record.seed, 12345 ^ 67890)
+  assert.ok(record.prompt?.includes('保持角色Hero形象一致'))
+  assert.ok(record.prompt?.startsWith('film noir style'))
+  assert.equal(record.style, 'film noir')
+})
+
+test('POST /grid/generate derives combined seed and style consistency suffix', async () => {
+  const { dramaId, episodeId, ts } = insertEpisode()
+  db.update(schema.dramas).set({ style: 'anime' }).where(eq(schema.dramas.id, dramaId)).run()
+
+  const characterId = Number(db.insert(schema.characters).values({
+    dramaId,
+    name: 'Sidekick',
+    appearance: 'blue hair',
+    seed: 11111,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const sceneId = Number(db.insert(schema.scenes).values({
+    dramaId,
+    episodeId,
+    location: 'rooftop',
+    time: 'sunset',
+    prompt: 'rooftop at sunset',
+    seed: 22222,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const storyboardId = Number(db.insert(schema.storyboards).values({
+    episodeId,
+    storyboardNumber: 1,
+    sceneId,
+    title: 'Rooftop',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  db.insert(schema.storyboardCharacters).values({ storyboardId, characterId }).run()
+  db.insert(schema.episodeCharacters).values({ episodeId, characterId, createdAt: ts }).run()
+  db.insert(schema.episodeScenes).values({ episodeId, sceneId, createdAt: ts }).run()
+
+  const response = await gridRoute.request('/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      storyboard_ids: [storyboardId],
+      drama_id: dramaId,
+      rows: 1,
+      cols: 2,
+      mode: 'first_frame',
+    }),
+  })
+
+  assert.equal(response.status, 200)
+  const json = await response.json()
+  const genId = json.data.image_generation_id
+  const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, genId)).all()
+
+  assert.ok(typeof record.seed === 'number')
+  assert.notEqual(record.seed, 11111 ^ 22222)
+  assert.ok(record.prompt?.includes('保持角色Sidekick形象一致'))
+  assert.ok(record.prompt?.includes('anime style'))
+  assert.equal(record.style, 'anime')
 })

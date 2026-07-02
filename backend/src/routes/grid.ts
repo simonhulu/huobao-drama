@@ -3,8 +3,11 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
+import { aspectRatioToSize } from '../services/adapters/aspect-ratio-to-size.js'
 import { splitGridImage } from '../services/grid-split.js'
+import { buildConsistencySeed, buildConsistencySuffix, buildGridConsistencyInput } from '../services/image-seed.js'
 import { createAgent } from '../agents/index.js'
+import { styleToPromptPhrase } from '../services/visual-style.js'
 import { logTaskError, logTaskPayload, logTaskProgress } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -141,7 +144,7 @@ function buildGridPrompt(
   dramaStyle: string,
   referenceAssets: Array<{ path: string; label: string; kind: string; imageLabel: string }>,
 ): string {
-  const style = dramaStyle || 'cinematic'
+  const style = styleToPromptPhrase(dramaStyle) || 'cinematic film still, dramatic lighting, movie composition'
   const storyboardCharacterIds = getStoryboardCharacterIds(storyboards.map((sb) => sb.id))
   const legend = buildReferenceLegend(referenceAssets)
 
@@ -352,6 +355,7 @@ async function tryAgentGridPrompt(
   cols: number,
   mode: string,
   referenceLegend: string,
+  dramaStyle: string,
 ) {
   const agent = createAgent('grid_prompt_generator', episodeId, dramaId)
   if (!agent) return null
@@ -365,6 +369,7 @@ async function tryAgentGridPrompt(
         `行数：${rows}`,
         `列数：${cols}`,
         `模式：${mode}`,
+        `整体视觉风格：${dramaStyle || 'cinematic'}，所有格子必须保持同一风格。`,
         referenceLegend ? `参考图映射：${referenceLegend}` : '',
         '当提示词涉及到某个角色或场景时，直接把对应的图片编号写进提示词，例如：图片1中的角色A站了起来，图片3中的房间场景。不要只写名字，不写图片编号。',
         `必须严格按 ${rows}x${cols} 生成，总共 exactly ${rows * cols} visible panels。不要合并格子，不要缺格。`,
@@ -430,6 +435,7 @@ app.post('/prompt', async (c) => {
       actualCols,
       mode,
       referenceLegend,
+      dramaStyle,
     )
 
     if (agentPayload?.grid_prompt) {
@@ -489,6 +495,7 @@ app.post('/generate', async (c) => {
     cols,
     mode = 'first_frame', // first_frame | first_last | multi_ref
     custom_prompt,
+    aspect_ratio,
   } = body
 
   if (!storyboard_ids?.length) return badRequest(c, 'storyboard_ids required')
@@ -509,11 +516,16 @@ app.post('/generate', async (c) => {
   }
 
   const referenceAssets = collectGridReferenceAssets(storyboards)
-  const prompt = custom_prompt || buildGridPrompt(mode, storyboards, rows, cols, dramaStyle, referenceAssets)
+  const basePrompt = custom_prompt || buildGridPrompt(mode, storyboards, rows, cols, dramaStyle, referenceAssets)
+  const consistency = buildGridConsistencyInput(storyboard_ids)
+  const consistencySeed = buildConsistencySeed(consistency)
+  const prompt = `${basePrompt}${buildConsistencySuffix(consistency)}`
   const referenceImages = referenceAssets.map((asset) => asset.path)
 
-  // Size: first_last mode uses Nx2 layout
-  const cellW = 960, cellH = 540
+  const baseSize = aspectRatioToSize(aspect_ratio)
+  const [baseWStr, baseHStr] = baseSize.split('x')
+  const cellW = Math.round(Number(baseWStr) / cols)
+  const cellH = Math.round(Number(baseHStr) / rows)
   const actualCols = cols
   const actualRows = rows
   const size = `${cellW * actualCols}x${cellH * actualRows}`
@@ -525,6 +537,8 @@ app.post('/generate', async (c) => {
       size,
       frameType: `grid_${mode}_${actualRows}x${actualCols}`,
       referenceImages,
+      seed: consistencySeed,
+      style: dramaStyle,
     })
 
     logTaskProgress('GridGenerate', 'reference-images', {

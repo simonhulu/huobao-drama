@@ -8,6 +8,16 @@ import { db, schema } from '../../db/index.js'
 import { eq } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
 import { logTaskProgress, logTaskSuccess } from '../../utils/task-logger.js'
+import { stripVideoTags } from '../../services/adapters/prompt-utils.js'
+import { normalizeStoryboardImagePromptForAspectRatio } from '../../services/storyboard-aspect-prompt.js'
+
+const STORY_RETENTION_RULES = [
+  '镜头服务于故事，不得只保留表面动作。',
+  '原文中的内心、背景、因果、动机、悬念与反转默认都是有效信息。',
+  '不可直接看见的信息，要通过反应镜头、环境细节、物件特写、表情停顿或空间变化转译到镜头里。',
+  '若某个镜头主要承担背景、心理或上下文承接，要在 description/action/result/atmosphere 中写清楚。',
+  '只有信息重复且无叙事功能时，才允许压缩。',
+]
 
 function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
   db.delete(schema.storyboardCharacters)
@@ -56,6 +66,12 @@ function validateStoryboardBindings(episodeId: number, sceneId: number | null | 
 }
 
 export function createStoryboardTools(episodeId: number, dramaId: number) {
+  const getEpisodeAspectRatio = () => {
+    const [ep] = db.select().from(schema.episodes)
+      .where(eq(schema.episodes.id, episodeId)).all()
+    return ep?.aspectRatio ?? null
+  }
+
   const readStoryboardContext = createTool({
     id: 'read_storyboard_context',
     description: 'Read the screenplay, characters, and scenes for storyboard breakdown.',
@@ -64,8 +80,12 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       const [ep] = db.select().from(schema.episodes)
         .where(eq(schema.episodes.id, episodeId)).all()
       if (!ep) return { error: 'Episode not found' }
-      const script = ep.scriptContent || ep.content
+      const script = ep.content || ep.scriptContent
       if (!script) return { error: 'Episode has no script' }
+      const originalStory = ep.content || ''
+      const formattedScript = ep.scriptContent || ''
+
+      const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
 
       const charLinks = db.select().from(schema.episodeCharacters)
         .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
@@ -110,13 +130,31 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         }))
 
       const payload = {
+        drama: {
+          id: drama?.id,
+          title: drama?.title || '',
+          style: drama?.style || '',
+        },
         episode: {
           id: ep.id,
           title: ep.title,
           episode_number: ep.episodeNumber,
           description: ep.description || '',
+          aspect_ratio: ep.aspectRatio || '',
+          dialogue_mode: ep.dialogueMode || 'narration_only',
+          opening_hook: ep.openingHook || '',
+          cliffhanger: ep.cliffhanger || '',
         },
+        original_story: originalStory,
+        formatted_script: formattedScript,
         script,
+        source_material: {
+          original_story: originalStory,
+          formatted_script: formattedScript,
+          active_script: script,
+          episode_synopsis: ep.description || '',
+        },
+        storytelling_rules: STORY_RETENTION_RULES,
         characters,
         scenes,
         existing_storyboards: existingStoryboards
@@ -131,6 +169,12 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
               .map(link => link.characterId),
             shot_type: sb.shotType || '',
             duration: sb.duration || 0,
+            description: sb.description || '',
+            action: sb.action || '',
+            result: sb.result || '',
+            atmosphere: sb.atmosphere || '',
+            dialogue: sb.dialogue || '',
+            narration: sb.narration || '',
           })),
       }
       logTaskSuccess('StoryboardTool', 'read-context', {
@@ -147,7 +191,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
 
   const saveStoryboards = createTool({
     id: 'save_storyboards',
-    description: 'Save generated storyboards. Replaces all existing storyboards for this episode.',
+    description: 'Save generated storyboards. Replaces all existing storyboards for this episode. When calling this tool, output the arguments as a plain JSON object. Do not wrap them in markdown code fences (```json). In direct_script mode, shots are saved exactly as provided; each shot should represent a complete narrative event or plot beat, not a sentence or time segment.',
     inputSchema: z.object({
       storyboards: z.array(z.object({
         shot_number: z.number(),
@@ -167,6 +211,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         bgm_prompt: z.string().optional(),
         sound_effect: z.string().optional(),
         duration: z.number().optional(),
+        energy_level: z.enum(['high', 'medium', 'low']).optional(),
         scene_id: z.number().nullable().optional(),
         character_ids: z.array(z.number()).optional(),
       })),
@@ -189,9 +234,22 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       }
       db.delete(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId)).run()
 
+      const aspectRatio = getEpisodeAspectRatio()
+      const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
+      const style = drama?.style || ''
+
+      const shotsToSave = storyboards
+        .slice()
+        .sort((a, b) => a.shot_number - b.shot_number)
+
       let totalDuration = 0
-      for (const sb of storyboards) {
+      for (const sb of shotsToSave) {
         validateStoryboardBindings(episodeId, sb.scene_id, sb.character_ids)
+        const cleanedImagePrompt = normalizeStoryboardImagePromptForAspectRatio(
+          stripVideoTags(sb.image_prompt || ''),
+          aspectRatio,
+        )
+        const fallbackImagePrompt = cleanedImagePrompt || [sb.title, sb.location, sb.atmosphere].filter(Boolean).join('，')
         const res = db.insert(schema.storyboards).values({
           episodeId,
           storyboardNumber: sb.shot_number,
@@ -200,14 +258,15 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
           location: sb.location, time: sb.time,
           action: sb.action, dialogue: sb.dialogue,
           description: sb.description, result: sb.result,
-          atmosphere: sb.atmosphere, imagePrompt: sb.image_prompt,
+          atmosphere: sb.atmosphere, imagePrompt: fallbackImagePrompt,
           videoPrompt: sb.video_prompt, bgmPrompt: sb.bgm_prompt,
           soundEffect: sb.sound_effect,
-          sceneId: sb.scene_id, duration: sb.duration || 10,
+          sceneId: sb.scene_id, duration: sb.duration || 8,
+          energyLevel: sb.energy_level || 'medium',
           createdAt: ts, updatedAt: ts,
         }).run()
         syncStoryboardCharacters(Number(res.lastInsertRowid), sb.character_ids || [])
-        totalDuration += sb.duration || 10
+        totalDuration += sb.duration || 8
       }
 
       db.update(schema.episodes)
@@ -216,10 +275,10 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
 
       logTaskSuccess('StoryboardTool', 'save-complete', {
         episodeId,
-        count: storyboards.length,
+        count: shotsToSave.length,
         totalDuration,
       })
-      return { message: `Saved ${storyboards.length} storyboards`, count: storyboards.length, total_duration: totalDuration }
+      return { message: `Saved ${shotsToSave.length} storyboards`, count: shotsToSave.length, total_duration: totalDuration }
     },
   })
 
@@ -276,7 +335,17 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
       if ('action' in fields) updates.action = fields.action
       if ('result' in fields) updates.result = fields.result
       if ('atmosphere' in fields) updates.atmosphere = fields.atmosphere
-      if ('image_prompt' in fields) updates.imagePrompt = fields.image_prompt
+      if ('image_prompt' in fields) {
+        updates.imagePrompt = normalizeStoryboardImagePromptForAspectRatio(
+          stripVideoTags(fields.image_prompt || ''),
+          getEpisodeAspectRatio(),
+        )
+        updates.imagePromptFinal = false
+        if (!updates.imagePrompt) {
+          const [existing] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboard_id)).all()
+          updates.imagePrompt = [existing?.title, existing?.location, existing?.atmosphere].filter(Boolean).join('，')
+        }
+      }
       if ('video_prompt' in fields) updates.videoPrompt = fields.video_prompt
       if ('bgm_prompt' in fields) updates.bgmPrompt = fields.bgm_prompt
       if ('sound_effect' in fields) updates.soundEffect = fields.sound_effect

@@ -2,12 +2,12 @@ import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, badRequest } from '../utils/response.js'
-import { generateVideo } from '../services/video-generation.js'
+import { createVideoGenerationRecord } from '../services/video-generation.js'
+import { createTask } from '../services/tasks/store.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
 
-// POST /videos — Generate video
 app.post('/', async (c) => {
   const body = await c.req.json()
   if (!body.prompt) return badRequest(c, 'prompt is required')
@@ -17,8 +17,8 @@ app.post('/', async (c) => {
     if (body.storyboard_id) {
       const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, Number(body.storyboard_id))).all()
       if (sb) {
-        const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId)).all()
-        if (ep?.videoConfigId != null) configId = ep.videoConfigId
+        // 视频生成始终使用当前 active 视频配置，除非调用方显式传入 body.config_id
+        void sb
       }
     }
 
@@ -29,7 +29,8 @@ app.post('/', async (c) => {
       duration: body.duration,
     })
     logTaskPayload('VideoAPI', 'request body', body)
-    const id = await generateVideo({
+
+    const generationId = createVideoGenerationRecord({
       storyboardId: body.storyboard_id,
       dramaId: body.drama_id,
       prompt: body.prompt,
@@ -44,10 +45,19 @@ app.post('/', async (c) => {
       configId,
     })
 
-    const [record] = db.select().from(schema.videoGenerations)
-      .where(eq(schema.videoGenerations.id, id)).all()
-    logTaskSuccess('VideoAPI', 'generate', { generationId: id, provider: record?.provider })
-    return created(c, record)
+    const task = createTask({
+      type: 'video.generate',
+      dramaId: body.drama_id ? Number(body.drama_id) : null,
+      scopeType: body.storyboard_id ? 'storyboard' : null,
+      scopeId: body.storyboard_id ? Number(body.storyboard_id) : null,
+      payload: {
+        video_generation_id: generationId,
+        config_id: configId,
+      },
+    })
+
+    logTaskSuccess('VideoAPI', 'generate', { generationId, taskId: task.id })
+    return created(c, { id: generationId, task_id: task.id, status: 'pending' })
   } catch (err: any) {
     logTaskError('VideoAPI', 'generate', { error: err.message })
     return badRequest(c, err.message)

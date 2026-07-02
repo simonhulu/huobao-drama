@@ -3,6 +3,9 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
+import { ensureSceneSeed } from '../services/image-seed.js'
+import { aspectRatioToSize } from '../services/adapters/aspect-ratio-to-size.js'
+import { applyVisualStyle } from '../services/visual-style.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -47,11 +50,18 @@ app.post('/:id/generate-image', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id))).all()
   if (!ep) return badRequest(c, 'Episode not found')
 
-  const prompt = scene.prompt || `${scene.location}, ${scene.time || ''}, 高质量场景, 电影感`
+  const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, scene.dramaId)).all()
+  const style = drama?.style || undefined
+  const prompt = applyVisualStyle(
+    scene.prompt || `${scene.location}, ${scene.time || ''}, 高质量场景, 电影感`,
+    style,
+  )
   try {
     logTaskStart('SceneImage', 'generate', { sceneId: id, episodeId: ep.id, dramaId: scene.dramaId, location: scene.location })
     db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, id)).run()
-    const genId = await generateImage({ sceneId: id, dramaId: scene.dramaId, prompt, configId: ep.imageConfigId ?? undefined })
+    const seed = scene.seed ?? ensureSceneSeed(id)
+    const size = aspectRatioToSize(ep.aspectRatio)
+    const genId = await generateImage({ sceneId: id, dramaId: scene.dramaId, prompt, size, seed, style })
     logTaskSuccess('SceneImage', 'generate', { sceneId: id, generationId: genId })
     return success(c, { image_generation_id: genId })
   } catch (err: any) {

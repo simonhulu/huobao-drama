@@ -113,9 +113,13 @@ function extractLanguage(voiceId: string, voiceName: string): string {
   return '其他'
 }
 
+function containsChinese(text: string) {
+  return /[\u4e00-\u9fa5]/.test(text)
+}
+
 function shouldKeepVoice(voice: { voice_id: string, voice_name: string }) {
   const language = extractLanguage(voice.voice_id, voice.voice_name)
-  if (language !== '中文' && language !== '粤语') return false
+  if (language !== '中文' && language !== '粤语' && !containsChinese(voice.voice_name)) return false
 
   const text = `${voice.voice_id} ${voice.voice_name}`.toLowerCase()
 

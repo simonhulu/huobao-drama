@@ -18,14 +18,18 @@ sqlite.exec(`
   CREATE TABLE IF NOT EXISTS dramas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
+    video_title TEXT,
     description TEXT,
     genre TEXT,
     style TEXT DEFAULT 'realistic',
+    workflow_type TEXT DEFAULT 'story_rewrite',
+    pacing_mode TEXT DEFAULT 'tight',
     total_episodes INTEGER DEFAULT 1,
     total_duration INTEGER DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'draft',
     thumbnail TEXT,
     tags TEXT,
+    hook TEXT,
     metadata TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -37,6 +41,7 @@ sqlite.exec(`
     drama_id INTEGER NOT NULL,
     episode_number INTEGER NOT NULL,
     title TEXT NOT NULL,
+    video_title TEXT,
     content TEXT,
     script_content TEXT,
     description TEXT,
@@ -47,6 +52,25 @@ sqlite.exec(`
     image_config_id INTEGER,
     video_config_id INTEGER,
     audio_config_id INTEGER,
+    aspect_ratio TEXT,
+    render_mode TEXT DEFAULT 'image_story',
+    auto_mode INTEGER DEFAULT 0,
+    enable_ai_rewrite INTEGER DEFAULT 1,
+    workflow_type TEXT DEFAULT 'story_rewrite',
+    narration_voice_id TEXT,
+    narration_speed REAL DEFAULT 1.0,
+    subtitle_enabled INTEGER DEFAULT 1,
+    subtitle_font TEXT DEFAULT 'PingFang SC',
+    subtitle_color TEXT DEFAULT '#FFFFFF',
+    subtitle_size INTEGER DEFAULT 48,
+    subtitle_position TEXT DEFAULT 'bottom',
+    pacing_mode TEXT DEFAULT 'tight',
+    dialogue_mode TEXT DEFAULT 'narration_only',
+    narration_mode TEXT DEFAULT 'rewrite',
+    opening_hook TEXT,
+    cliffhanger TEXT,
+    retention_beats TEXT,
+    energy_curve TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT
@@ -64,10 +88,13 @@ sqlite.exec(`
     image_url TEXT,
     reference_images TEXT,
     seed_value TEXT,
+    seed INTEGER,
     sort_order INTEGER,
     local_path TEXT,
     voice_sample_url TEXT,
     voice_provider TEXT,
+    voice_pitch INTEGER,
+    voice_speed REAL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT
@@ -84,6 +111,7 @@ sqlite.exec(`
     image_url TEXT,
     status TEXT DEFAULT 'pending',
     local_path TEXT,
+    seed INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT
@@ -104,24 +132,47 @@ sqlite.exec(`
     result TEXT,
     atmosphere TEXT,
     image_prompt TEXT,
+    image_prompt_final INTEGER DEFAULT 0,
     video_prompt TEXT,
     bgm_prompt TEXT,
     sound_effect TEXT,
+    bgm_audio_url TEXT,
+    sfx_audio_url TEXT,
     dialogue TEXT,
+    narration TEXT,
     description TEXT,
     duration INTEGER DEFAULT 0,
+    energy_level TEXT DEFAULT 'medium',
     composed_image TEXT,
     first_frame_image TEXT,
     last_frame_image TEXT,
     reference_images TEXT,
     video_url TEXT,
     tts_audio_url TEXT,
+    narration_audio_url TEXT,
     subtitle_url TEXT,
     composed_video_url TEXT,
     status TEXT DEFAULT 'pending',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS grid_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drama_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    rows INTEGER,
+    cols INTEGER,
+    prompt TEXT,
+    cell_prompts TEXT,
+    reference_images TEXT,
+    active_image_path TEXT,
+    image_generation_id INTEGER,
+    status TEXT DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS episode_characters (
@@ -342,6 +393,76 @@ sqlite.exec(`
     updated_at TEXT NOT NULL,
     deleted_at TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS worker_heartbeats (
+    worker_id TEXT PRIMARY KEY,
+    pid INTEGER,
+    started_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_last_seen
+    ON worker_heartbeats (last_seen_at);
+
+  CREATE TABLE IF NOT EXISTS creation_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    drama_id INTEGER,
+    episode_id INTEGER,
+    scope_type TEXT,
+    scope_id INTEGER,
+    idempotency_key TEXT,
+    parent_task_id INTEGER,
+    payload_json TEXT,
+    result_json TEXT,
+    progress_current INTEGER DEFAULT 0,
+    progress_total INTEGER DEFAULT 0,
+    progress_message TEXT,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    attempts INTEGER DEFAULT 0,
+    max_attempts INTEGER DEFAULT 1,
+    error_code TEXT,
+    error_message TEXT,
+    cancel_requested INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_creation_tasks_drama_episode
+    ON creation_tasks (drama_id, episode_id);
+  CREATE INDEX IF NOT EXISTS idx_creation_tasks_status
+    ON creation_tasks (status);
+  CREATE INDEX IF NOT EXISTS idx_creation_tasks_type
+    ON creation_tasks (type);
+  CREATE INDEX IF NOT EXISTS idx_creation_tasks_idempotency
+    ON creation_tasks (type, idempotency_key);
+  CREATE INDEX IF NOT EXISTS idx_creation_tasks_parent
+    ON creation_tasks (parent_task_id);
+  CREATE INDEX IF NOT EXISTS idx_creation_tasks_lease
+    ON creation_tasks (lease_owner, lease_expires_at);
+
+  CREATE TABLE IF NOT EXISTS creation_task_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    data_json TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_creation_task_events_task_id
+    ON creation_task_events (task_id);
+
+  CREATE TABLE IF NOT EXISTS creation_task_dependencies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    depends_on_task_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_creation_task_dependencies_task
+    ON creation_task_dependencies (task_id);
+  CREATE INDEX IF NOT EXISTS idx_creation_task_dependencies_depends_on
+    ON creation_task_dependencies (depends_on_task_id);
 `)
 
 function ensureColumn(table: string, column: string, definition: string) {
@@ -358,6 +479,54 @@ function ensureColumn(table: string, column: string, definition: string) {
 ensureColumn('episodes', 'image_config_id', 'INTEGER')
 ensureColumn('episodes', 'video_config_id', 'INTEGER')
 ensureColumn('episodes', 'audio_config_id', 'INTEGER')
+ensureColumn('episodes', 'aspect_ratio', 'TEXT')
+ensureColumn('episodes', 'render_mode', "TEXT DEFAULT 'image_story'")
+ensureColumn('episodes', 'auto_mode', "INTEGER DEFAULT 0")
+ensureColumn('episodes', 'enable_ai_rewrite', "INTEGER DEFAULT 1")
+ensureColumn('episodes', 'narration_voice_id', 'TEXT')
+ensureColumn('episodes', 'narration_speed', 'REAL DEFAULT 1.0')
+ensureColumn('episodes', 'video_title', 'TEXT')
+ensureColumn('dramas', 'video_title', 'TEXT')
+ensureColumn('dramas', 'workflow_type', "TEXT DEFAULT 'story_rewrite'")
+ensureColumn('episodes', 'workflow_type', "TEXT DEFAULT 'story_rewrite'")
+
+// Migrate legacy workflow_type values to new naming
+sqlite.exec(`UPDATE dramas SET workflow_type = 'story_rewrite' WHERE workflow_type = 'short_drama'`)
+sqlite.exec(`UPDATE dramas SET workflow_type = 'direct_script' WHERE workflow_type = 'finished_script'`)
+sqlite.exec(`UPDATE episodes SET workflow_type = 'story_rewrite' WHERE workflow_type = 'short_drama'`)
+sqlite.exec(`UPDATE episodes SET workflow_type = 'direct_script' WHERE workflow_type = 'finished_script'`)
+ensureColumn('episodes', 'subtitle_enabled', 'INTEGER DEFAULT 1')
+ensureColumn('episodes', 'subtitle_font', "TEXT DEFAULT 'PingFang SC'")
+ensureColumn('episodes', 'subtitle_color', "TEXT DEFAULT '#FFFFFF'")
+ensureColumn('episodes', 'subtitle_size', 'INTEGER DEFAULT 48')
+ensureColumn('episodes', 'subtitle_position', "TEXT DEFAULT 'bottom'")
+ensureColumn('episodes', 'subtitle_margin', 'INTEGER DEFAULT 60')
+ensureColumn('episodes', 'subtitle_margin_v', 'INTEGER DEFAULT 40')
+ensureColumn('episodes', 'subtitle_background_color', 'TEXT')
+ensureColumn('episodes', 'subtitle_stroke_color', 'TEXT')
+ensureColumn('episodes', 'subtitle_stroke_width', 'INTEGER DEFAULT 2')
+ensureColumn('episodes', 'narration_mode', "TEXT DEFAULT 'rewrite'")
+ensureColumn('episodes', 'retention_beats', 'TEXT')
+ensureColumn('storyboards', 'narration', 'TEXT')
+ensureColumn('storyboards', 'narration_audio_url', 'TEXT')
+ensureColumn('storyboards', 'image_prompt_final', 'INTEGER DEFAULT 0')
+ensureColumn('storyboards', 'bgm_audio_url', 'TEXT')
+ensureColumn('storyboards', 'sfx_audio_url', 'TEXT')
+ensureColumn('storyboards', 'ambient_audio_url', 'TEXT')
+
+ensureColumn('characters', 'seed', 'INTEGER')
+ensureColumn('characters', 'voice_pitch', 'INTEGER')
+ensureColumn('characters', 'voice_speed', 'REAL')
+ensureColumn('scenes', 'seed', 'INTEGER')
+
+ensureColumn('creation_tasks', 'priority', 'INTEGER DEFAULT 0')
+ensureColumn('creation_tasks', 'scheduled_at', 'TEXT')
+ensureColumn('creation_tasks', 'provider', 'TEXT')
+ensureColumn('creation_tasks', 'retry_reason', 'TEXT')
+
+ensureColumn('image_generations', 'attempts', 'INTEGER DEFAULT 0')
+ensureColumn('image_generations', 'last_error_code', 'TEXT')
+ensureColumn('image_generations', 'last_error_detail', 'TEXT')
 
 export const db = drizzle(sqlite, { schema })
 export { schema }

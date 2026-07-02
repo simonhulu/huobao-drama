@@ -10,7 +10,7 @@ import type {
   VideoGenResponse,
   VideoPollResponse,
 } from './types'
-import { joinProviderUrl } from './url'
+import { joinProviderUrl } from './url.js'
 
 export class MiniMaxVideoAdapter implements VideoProviderAdapter {
   provider = 'minimax'

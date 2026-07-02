@@ -3,8 +3,9 @@ import { eq } from 'drizzle-orm'
 import { getActiveConfig, getConfigById } from './ai.js'
 import { now } from '../utils/response.js'
 import { downloadFile, readImageAsCompressedDataUrl } from '../utils/storage.js'
-import { getVideoAdapter } from './adapters/registry'
+import { getVideoAdapter } from './adapters/registry.js'
 import type { AIConfig } from './adapters/types'
+import type { TaskContext } from './tasks/types.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
 interface GenerateVideoParams {
@@ -22,7 +23,7 @@ interface GenerateVideoParams {
   configId?: number
 }
 
-export async function generateVideo(params: GenerateVideoParams): Promise<number> {
+export function createVideoGenerationRecord(params: GenerateVideoParams): number {
   const ts = now()
   const config = params.configId
     ? getConfigById(params.configId)
@@ -65,20 +66,65 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
     },
     params,
   })
-  processVideoGeneration(lastId, config).catch(err => {
-    logTaskError('VideoTask', 'process', { id: lastId, error: err.message })
-    console.error(`Video generation ${lastId} failed:`, err)
-  })
   return lastId
 }
 
-async function processVideoGeneration(id: number, config: AIConfig) {
+export async function generateVideo(params: GenerateVideoParams): Promise<number> {
+  const config = params.configId
+    ? getConfigById(params.configId)
+    : getActiveConfig('video')
+  if (!config) throw new Error('No active video AI config')
+
+  const lastId = createVideoGenerationRecord(params)
+  processVideoGeneration(lastId, config)
+  return lastId
+}
+
+export interface ExecuteVideoGenerationOptions {
+  configId?: number
+  taskContext?: TaskContext<any>
+}
+
+export interface ExecuteVideoGenerationResult {
+  video_generation_id: number
+  local_path: string
+  video_url?: string | null
+}
+
+export async function executeVideoGeneration(
+  generationId: number,
+  options: ExecuteVideoGenerationOptions = {},
+): Promise<ExecuteVideoGenerationResult> {
+  const rows = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, generationId)).all()
+  const record = rows[0]
+  if (!record) throw new Error(`Video generation ${generationId} not found`)
+
+  const config = options.configId ? getConfigById(options.configId) : getActiveConfig('video')
+  if (!config) throw new Error('No active video AI config')
+
+  options.taskContext?.progress('Starting video generation', 0, 3)
+  await runVideoGeneration(generationId, config, options.taskContext)
+  options.taskContext?.progress('Video generation finished', 3, 3)
+
+  const [updated] = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, generationId)).all()
+  if (!updated || updated.status !== 'completed') {
+    throw new Error(`Video generation ${generationId} did not complete: ${updated?.status || 'missing'}`)
+  }
+  return {
+    video_generation_id: generationId,
+    local_path: updated.localPath || '',
+    video_url: updated.videoUrl || null,
+  }
+}
+
+async function runVideoGeneration(id: number, config: AIConfig, taskContext?: TaskContext<any>): Promise<void> {
   const adapter = getVideoAdapter(config.provider)
 
   try {
     const rows = db.select().from(schema.videoGenerations).where(eq(schema.videoGenerations.id, id)).all()
     const record = rows[0]
     if (!record) return
+    taskContext?.progress('Building video generation request', 0, 3)
     logTaskProgress('VideoTask', 'build-request', {
       id,
       provider: config.provider,
@@ -151,7 +197,7 @@ async function processVideoGeneration(id: number, config: AIConfig) {
       return
     }
 
-    pollVideoTask(id, config, taskId!, record.storyboardId)
+    await pollVideoTask(id, config, taskId!, record.storyboardId)
   } catch (err: any) {
     logTaskError('VideoTask', 'process', { id, provider: config.provider, error: err.message })
     db.update(schema.videoGenerations)
@@ -159,6 +205,13 @@ async function processVideoGeneration(id: number, config: AIConfig) {
       .where(eq(schema.videoGenerations.id, id))
       .run()
   }
+}
+
+function processVideoGeneration(id: number, config: AIConfig): void {
+  runVideoGeneration(id, config).catch(err => {
+    logTaskError('VideoTask', 'process', { id, error: err.message })
+    console.error(`Video generation ${id} failed:`, err)
+  })
 }
 
 async function normalizeVideoReferenceUrl(value: string | null | undefined): Promise<string | null> {

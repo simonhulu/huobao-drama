@@ -10,6 +10,9 @@ export interface CreateTaskInput {
   parentTaskId?: number | null
   payload?: unknown
   maxAttempts?: number
+  priority?: number
+  scheduledAt?: string | null
+  provider?: string | null
 }
 
 export interface TaskListFilter {
@@ -19,6 +22,8 @@ export interface TaskListFilter {
   type?: string
 }
 
+export type TransactionClient = Parameters<Parameters<typeof import('../../db/index.js').db.transaction>[0]>[0]
+
 export interface TransitionTaskInput {
   result?: unknown
   progressCurrent?: number
@@ -26,6 +31,7 @@ export interface TransitionTaskInput {
   progressMessage?: string | null
   errorCode?: string | null
   errorMessage?: string | null
+  sync?: (tx: TransactionClient, task: CreationTask) => void
 }
 
 export interface LeaseTaskInput {
@@ -63,6 +69,10 @@ export interface CreationTask {
   errorCode: string | null
   errorMessage: string | null
   cancelRequested: boolean
+  priority: number
+  scheduledAt: string | null
+  provider: string | null
+  retryReason: string | null
   createdAt: string
   updatedAt: string
   startedAt: string | null
@@ -88,6 +98,7 @@ export interface TaskContext<TPayload = any> {
   taskId: number
   payload: TPayload
   signal: AbortSignal
+  attempts: number
   progress(message: string, current?: number, total?: number): void
   event(type: string, data?: unknown): void
   isCancelRequested(): boolean

@@ -148,8 +148,12 @@ test('runWorkerOnce retries retryable failures until success', async () => {
   })
 
   assert.equal(await runWorkerOnce({ workerId: 'worker-a' }), true)
-  assert.equal(getTask(task.id)?.status, 'queued')
-  assert.equal(await runWorkerOnce({ workerId: 'worker-a' }), true)
+  const afterFirst = getTask(task.id)
+  assert.equal(afterFirst?.status, 'queued')
+  const retryNowMs = afterFirst?.scheduledAt
+    ? new Date(afterFirst.scheduledAt).getTime() + 1000
+    : Date.now()
+  assert.equal(await runWorkerOnce({ workerId: 'worker-a', nowMs: retryNowMs }), true)
 
   const loaded = getTask(task.id)
   assert.equal(loaded?.status, 'succeeded')
@@ -176,8 +180,12 @@ test('runWorkerOnce stops retrying after maxAttempts is reached', async () => {
   })
 
   assert.equal(await runWorkerOnce({ workerId: 'worker-a' }), true)
-  assert.equal(getTask(task.id)?.status, 'queued')
-  assert.equal(await runWorkerOnce({ workerId: 'worker-a' }), true)
+  const afterFirst = getTask(task.id)
+  assert.equal(afterFirst?.status, 'queued')
+  const retryNowMs = afterFirst?.scheduledAt
+    ? new Date(afterFirst.scheduledAt).getTime() + 1000
+    : Date.now()
+  assert.equal(await runWorkerOnce({ workerId: 'worker-a', nowMs: retryNowMs }), true)
 
   const loaded = getTask(task.id)
   assert.equal(loaded?.status, 'failed')
@@ -231,8 +239,47 @@ test('startTaskWorkerLoop polls queued tasks until stopped', async () => {
   try {
     await waitFor(() => getTask(task.id)?.status === 'succeeded')
   } finally {
-    loop.stop()
+    await loop.stop()
   }
 
   assert.deepEqual(getTask(task.id)?.result, { loop: true })
+})
+
+test('startTaskWorkerLoop can execute tasks concurrently', async () => {
+  clearTaskHandlers()
+  let running = 0
+  let maxRunning = 0
+  registerTaskHandler('test.loop.concurrent', {
+    resumable: true,
+    maxAttempts: 1,
+    run: async () => {
+      running += 1
+      maxRunning = Math.max(maxRunning, running)
+      await sleep(80)
+      running -= 1
+      return { ok: true }
+    },
+  })
+  const tasks = Array.from({ length: 4 }, (_value, index) =>
+    createTask({
+      type: 'test.loop.concurrent',
+      idempotencyKey: `worker-loop-concurrent-${index}`,
+    }),
+  )
+
+  const loop = startTaskWorkerLoop({
+    workerId: 'worker-loop-concurrent',
+    intervalMs: 5,
+    leaseMs: 500,
+    recoverOnStart: false,
+    concurrency: 4,
+  })
+  try {
+    await waitFor(() => tasks.every(task => getTask(task.id)?.status === 'succeeded'), 1000)
+  } finally {
+    await loop.stop()
+  }
+
+  assert.equal(running, 0)
+  assert.equal(maxRunning, 4)
 })

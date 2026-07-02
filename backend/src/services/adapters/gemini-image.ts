@@ -14,8 +14,9 @@ import type {
   ImageGenResponse,
   ImagePollResponse,
 } from './types'
-import { joinProviderUrl } from './url'
+import { joinProviderUrl } from './url.js'
 import { parseDataUrl } from '../../utils/storage.js'
+import { normalizePrompt } from './prompt-utils.js'
 
 export class GeminiImageAdapter implements ImageProviderAdapter {
   provider = 'gemini'
@@ -43,7 +44,7 @@ export class GeminiImageAdapter implements ImageProviderAdapter {
         }
       } catch {}
     }
-    parts.push({ text: record.prompt || 'Generate an image' })
+    parts.push({ text: normalizePrompt(record.prompt, this.provider) || 'Generate an image' })
 
     const body = {
       contents: [{

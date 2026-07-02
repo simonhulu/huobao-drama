@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import { badRequest, created, success } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
+import { taskEventBus } from '../services/tasks/events.js'
+import type { TaskChangedEvent } from '../services/tasks/events.js'
 import {
   createTask,
   getTask,
@@ -11,8 +13,28 @@ import {
 
 const app = new Hono()
 
-function taskToResponse(task: any) {
-  return toSnakeCase(task)
+function enrichTaskResponse(task: any, queuePositionMap: Map<number, number>) {
+  return {
+    ...toSnakeCase(task),
+    queue_position: queuePositionMap.get(task.id) ?? null,
+  }
+}
+
+function buildQueuePositionMap(tasks: any[]) {
+  const queued = tasks
+    .filter(t => t.status === 'queued')
+    .sort((a, b) => {
+      const pa = a.priority ?? 0
+      const pb = b.priority ?? 0
+      if (pa !== pb) return pb - pa
+      const sa = a.scheduledAt ?? ''
+      const sb = b.scheduledAt ?? ''
+      if (sa !== sb) return sa.localeCompare(sb)
+      return a.id - b.id
+    })
+  const map = new Map<number, number>()
+  queued.forEach((task, index) => map.set(task.id, index + 1))
+  return map
 }
 
 app.post('/', async (c) => {
@@ -29,9 +51,12 @@ app.post('/', async (c) => {
     parentTaskId: body.parent_task_id,
     payload: body.payload,
     maxAttempts: body.max_attempts,
+    priority: body.priority,
+    scheduledAt: body.scheduled_at,
+    provider: body.provider,
   })
 
-  return created(c, taskToResponse(task))
+  return created(c, toSnakeCase(task))
 })
 
 app.get('/', (c) => {
@@ -47,13 +72,20 @@ app.get('/', (c) => {
     type,
   })
 
-  return success(c, toSnakeCaseArray(tasks))
+  const queuePositionMap = buildQueuePositionMap(tasks)
+  return success(c, tasks.map(task => enrichTaskResponse(task, queuePositionMap)))
 })
 
 app.get('/:id', (c) => {
   const id = Number(c.req.param('id'))
   const task = getTask(id)
-  return success(c, task ? taskToResponse(task) : null)
+  if (!task) return success(c, null)
+  const all = listTasks({
+    dramaId: task.dramaId ?? undefined,
+    episodeId: task.episodeId ?? undefined,
+  })
+  const queuePositionMap = buildQueuePositionMap(all)
+  return success(c, enrichTaskResponse(task, queuePositionMap))
 })
 
 app.get('/:id/events', (c) => {
@@ -61,10 +93,62 @@ app.get('/:id/events', (c) => {
   return success(c, toSnakeCaseArray(listTaskEvents(id)))
 })
 
+app.get('/stream', (c) => {
+  const dramaId = c.req.query('drama_id')
+  const episodeId = c.req.query('episode_id')
+  const dramaIdNum = dramaId ? Number(dramaId) : undefined
+  const episodeIdNum = episodeId ? Number(episodeId) : undefined
+
+  const encoder = new TextEncoder()
+  let keepAliveTimer: ReturnType<typeof setInterval> | null = null
+
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('event: connected\ndata: {}\n\n'))
+
+      const listener = (event: TaskChangedEvent) => {
+        if (event.type !== 'task.changed') return
+        const task = event.task
+        if (dramaIdNum != null && task.dramaId !== dramaIdNum) return
+        if (episodeIdNum != null && task.episodeId !== episodeIdNum) return
+
+        const payload = JSON.stringify({
+          task: toSnakeCase(task),
+          reason: event.reason,
+        })
+        controller.enqueue(encoder.encode(`event: task\ndata: ${payload}\n\n`))
+      }
+
+      taskEventBus.on('task', listener)
+
+      keepAliveTimer = setInterval(() => {
+        controller.enqueue(encoder.encode(':keep-alive\n\n'))
+      }, 15_000)
+
+      c.req.raw.signal.addEventListener('abort', () => {
+        if (keepAliveTimer) clearInterval(keepAliveTimer)
+        taskEventBus.off('task', listener)
+        try { controller.close() } catch {}
+      })
+    },
+    cancel() {
+      if (keepAliveTimer) clearInterval(keepAliveTimer)
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  })
+})
+
 app.post('/:id/cancel', (c) => {
   const id = Number(c.req.param('id'))
   const task = requestCancel(id)
-  return success(c, taskToResponse(task))
+  return success(c, toSnakeCase(task))
 })
 
 export default app

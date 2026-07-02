@@ -15,6 +15,7 @@ function makeContext(task: any) {
     taskId: task.id,
     payload: task.payload,
     signal: new AbortController().signal,
+    attempts: 1,
     progress(message: string, current?: number, total?: number) {
       updateTaskProgress(task.id, { progressMessage: message, progressCurrent: current, progressTotal: total })
     },

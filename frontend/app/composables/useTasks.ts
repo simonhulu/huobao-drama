@@ -1,6 +1,6 @@
 import { computed, onBeforeUnmount, ref, unref, type MaybeRef } from 'vue'
 import { toast } from 'vue-sonner'
-import { taskAPI } from './useApi'
+import { healthAPI, taskAPI } from './useApi'
 import {
   groupTasks,
   isActiveTask,
@@ -17,6 +17,7 @@ interface UseTasksOptions {
   dramaId?: MaybeRef<number | null | undefined>
   episodeId?: MaybeRef<number | null | undefined>
   pollMs?: number
+  enableStreaming?: boolean
 }
 
 function optionValue(value: any) {
@@ -33,6 +34,11 @@ export function useTasks(options: UseTasksOptions = {}) {
   const error = ref('')
   const lastLoadedAt = ref<Date | null>(null)
   const pollTimer = ref<ReturnType<typeof setInterval> | null>(null)
+  const eventSource = ref<EventSource | null>(null)
+  const streaming = ref(false)
+  const streamFailed = ref(false)
+  const workerHealth = ref<{ healthy_count: number; total_count: number; timeout_ms: number; workers: any[] } | null>(null)
+  const workerHealthError = ref('')
 
   const grouped = computed(() => groupTasks(tasks.value))
   const activeTasks = computed(() => tasks.value.filter(isActiveTask))
@@ -40,6 +46,10 @@ export function useTasks(options: UseTasksOptions = {}) {
   const hasVisibleTasks = computed(() => tasks.value.length > 0)
   const activeCount = computed(() => grouped.value.activeCount)
   const failedCount = computed(() => grouped.value.failedCount)
+  const isWorkerHealthy = computed(() => {
+    if (!workerHealth.value) return true
+    return workerHealth.value.healthy_count > 0
+  })
 
   async function loadTasks() {
     const dramaId = optionValue(options.dramaId)
@@ -64,10 +74,29 @@ export function useTasks(options: UseTasksOptions = {}) {
     }
   }
 
+  async function loadWorkerHealth() {
+    workerHealthError.value = ''
+    try {
+      workerHealth.value = await healthAPI.workers()
+    } catch (err: any) {
+      workerHealthError.value = err?.message || '获取 Worker 状态失败'
+      workerHealth.value = null
+    }
+  }
+
   function stopPolling() {
     if (!pollTimer.value) return
     clearInterval(pollTimer.value)
     pollTimer.value = null
+  }
+
+  function stopStreaming() {
+    if (!eventSource.value) return
+    try {
+      eventSource.value.close()
+    } catch {}
+    eventSource.value = null
+    streaming.value = false
   }
 
   function startPolling(onTaskSettled?: () => void | Promise<void>) {
@@ -75,12 +104,75 @@ export function useTasks(options: UseTasksOptions = {}) {
     pollTimer.value = setInterval(() => {
       void (async () => {
         const before = activeTaskIds(tasks.value)
-        await loadTasks()
+        await Promise.all([loadTasks(), loadWorkerHealth()])
         const after = activeTaskIds(tasks.value)
         const settled = [...before].some(id => !after.has(id))
         if (settled) await onTaskSettled?.()
       })()
     }, options.pollMs || 3000)
+  }
+
+  function buildStreamUrl() {
+    const dramaId = optionValue(options.dramaId)
+    const episodeId = optionValue(options.episodeId)
+    const params = new URLSearchParams()
+    if (dramaId) params.set('drama_id', String(dramaId))
+    if (episodeId) params.set('episode_id', String(episodeId))
+    const query = params.toString()
+    return `/api/v1/tasks/stream${query ? `?${query}` : ''}`
+  }
+
+  function startStreaming(onTaskSettled?: () => void | Promise<void>) {
+    if (eventSource.value || streaming.value) return
+    if (streamFailed.value) return
+    if (options.enableStreaming === false) return
+    if (typeof EventSource === 'undefined') {
+      streamFailed.value = true
+      return
+    }
+
+    const es = new EventSource(buildStreamUrl())
+    eventSource.value = es
+    streaming.value = true
+    let connected = false
+
+    es.addEventListener('connected', () => {
+      connected = true
+      void loadWorkerHealth()
+    })
+
+    es.addEventListener('task', () => {
+      void (async () => {
+        const before = activeTaskIds(tasks.value)
+        await loadTasks()
+        const after = activeTaskIds(tasks.value)
+        const settled = [...before].some(id => !after.has(id))
+        if (settled) await onTaskSettled?.()
+      })()
+    })
+
+    es.addEventListener('error', () => {
+      if (!connected) {
+        streamFailed.value = true
+      }
+      stopStreaming()
+      if (!pollTimer.value) {
+        startPolling(onTaskSettled)
+      }
+    })
+  }
+
+  function startUpdates(onTaskSettled?: () => void | Promise<void>) {
+    if (options.enableStreaming !== false && typeof EventSource !== 'undefined' && !streamFailed.value) {
+      startStreaming(onTaskSettled)
+      if (streaming.value) return
+    }
+    startPolling(onTaskSettled)
+  }
+
+  function stopUpdates() {
+    stopStreaming()
+    stopPolling()
   }
 
   function latestTask(type: string, scope: TaskScopeMatcher = {}) {
@@ -135,7 +227,7 @@ export function useTasks(options: UseTasksOptions = {}) {
     }
   }
 
-  onBeforeUnmount(stopPolling)
+  onBeforeUnmount(stopUpdates)
 
   return {
     tasks,
@@ -148,9 +240,19 @@ export function useTasks(options: UseTasksOptions = {}) {
     hasVisibleTasks,
     activeCount,
     failedCount,
+    workerHealth,
+    workerHealthError,
+    isWorkerHealthy,
+    streaming,
+    streamFailed,
     loadTasks,
+    loadWorkerHealth,
     startPolling,
     stopPolling,
+    startStreaming,
+    stopStreaming,
+    startUpdates,
+    stopUpdates,
     latestTask,
     isTaskRunning,
     taskError,

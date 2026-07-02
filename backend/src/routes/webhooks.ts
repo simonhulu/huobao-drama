@@ -9,8 +9,100 @@ import { success, badRequest } from '../utils/response.js'
 import { downloadFile } from '../utils/storage.js'
 import { ViduVideoAdapter } from '../services/adapters/vidu-video'
 import { logTaskError, logTaskProgress, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
+import { completeImageGenerationFromUrl, failImageGenerationFromProvider } from '../services/image-generation.js'
 
 const app = new Hono()
+
+function readAPIMartTaskId(body: any): string | null {
+  return body?.task_id
+    || body?.id
+    || body?.data?.task_id
+    || body?.data?.id
+    || null
+}
+
+function readAPIMartStatus(body: any): string {
+  return String(body?.status || body?.data?.status || '').toLowerCase()
+}
+
+function readAPIMartImageUrl(body: any): string | null {
+  const data = body?.data ?? body
+  const firstImage = data?.result?.images?.[0]
+  const url = firstImage?.url
+  if (Array.isArray(url)) return url[0] || null
+  if (typeof url === 'string') return url
+  return data?.image_url || data?.url || data?.data?.[0]?.url || null
+}
+
+function readAPIMartError(body: any): string {
+  return body?.error?.message
+    || body?.error
+    || body?.data?.error?.message
+    || body?.data?.error
+    || body?.error_message
+    || 'APIMart image generation failed'
+}
+
+async function handleAPIMartImageCallback(c: any) {
+  const body = await c.req.json()
+  const taskId = readAPIMartTaskId(body)
+  const status = readAPIMartStatus(body)
+
+  logTaskProgress('Webhook', 'apimart-image-callback', {
+    taskId,
+    status,
+    hasImageUrl: !!readAPIMartImageUrl(body),
+  })
+
+  if (!taskId) {
+    logTaskWarn('Webhook', 'apimart-image-missing-task-id', { status })
+    return badRequest(c, 'Missing task_id')
+  }
+
+  const [record] = db.select().from(schema.imageGenerations)
+    .where(eq(schema.imageGenerations.taskId, taskId))
+    .all()
+  if (!record) {
+    logTaskWarn('Webhook', 'apimart-image-task-not-found', { taskId, status })
+    return success(c, { message: 'Task not found' })
+  }
+
+  if (status === 'completed' || status === 'succeeded' || status === 'success') {
+    const imageUrl = readAPIMartImageUrl(body)
+    if (!imageUrl) return badRequest(c, 'Missing image URL')
+    try {
+      await completeImageGenerationFromUrl(record.id, 'apimart', imageUrl)
+      logTaskSuccess('Webhook', 'apimart-image-updated', {
+        taskId,
+        generationId: record.id,
+        storyboardId: record.storyboardId,
+      })
+      return success(c, { message: 'Image updated successfully' })
+    } catch (err: any) {
+      logTaskError('Webhook', 'apimart-image-download-failed', {
+        taskId,
+        generationId: record.id,
+        error: err.message,
+      })
+      return badRequest(c, err.message)
+    }
+  }
+
+  if (status === 'failed' || status === 'error' || status === 'cancelled') {
+    const error = readAPIMartError(body)
+    failImageGenerationFromProvider(record.id, error)
+    logTaskError('Webhook', 'apimart-image-failed', { taskId, generationId: record.id, error })
+    return success(c, { message: 'Error recorded' })
+  }
+
+  return success(c, { message: 'Status noted' })
+}
+
+// POST /webhooks/apimart/images/callback
+// APIMart appends /callback to the webhook base URL supplied in requests.
+app.post('/apimart/images/callback', handleAPIMartImageCallback)
+// Backward-compatible direct callback path for existing/manual integrations.
+app.post('/apimart/images', handleAPIMartImageCallback)
 
 // POST /webhooks/vidu
 // Vidu 回调格式: { task_id, state, video_url, ... }

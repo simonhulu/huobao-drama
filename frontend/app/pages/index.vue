@@ -51,7 +51,7 @@
           <h3 class="project-title">{{ d.title }}</h3>
 
           <div class="project-meta">
-            <span v-if="d.style" class="style-tag">{{ d.style }}</span>
+            <span v-if="d.style" class="style-tag">{{ styleLabel(d.style) }}</span>
             <span class="meta-item">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               {{ d.characters?.length || 0 }}
@@ -105,13 +105,22 @@
             <span class="field-label">项目名称 <span class="required">*</span></span>
             <input v-model="form.title" class="input" placeholder="例如：都市情感短剧《时光邮局》" required autofocus />
           </label>
+          <label class="field">
+            <span class="field-label">题材 <span class="required">*</span></span>
+            <BaseSelect v-model="form.genre" :options="genreSelectOptions" placeholder="选择题材" @update:model-value="onGenreChange" />
+            <span class="field-hint">选择题材后，会自动推荐对应的视觉风格</span>
+          </label>
           <div class="field-row">
             <label class="field">
               <span class="field-label">计划集数</span>
               <input v-model.number="form.total_episodes" class="input" type="number" min="1" max="100" />
             </label>
             <label class="field">
-              <span class="field-label">视觉风格</span>
+              <span class="field-label">
+                视觉风格
+                <span v-if="isRecommendedStyle" class="recommendation-badge">推荐</span>
+                <span v-else class="recommendation-hint">推荐：{{ styleLabel(recommendedStyle) }}</span>
+              </span>
               <BaseSelect v-model="form.style" :options="styleSelectOptions" placeholder="选择风格" searchable />
             </label>
           </div>
@@ -138,9 +147,60 @@ import BaseSelect from '~/components/BaseSelect.vue'
 const dramas = ref([])
 const loading = ref(false)
 const showCreate = ref(false)
-const form = ref({ title: '', total_episodes: 1, style: '' })
-const styles = ['realistic', 'anime', 'ghibli', 'cinematic', 'comic', 'watercolor']
-const styleSelectOptions = computed(() => styles.map(s => ({ label: s, value: s })))
+const form = ref({ title: '', total_episodes: 1, genre: 'generic', style: 'generic' })
+
+// 题材：内容主题，只影响推荐视觉风格
+const genres = ['generic', 'history', 'scifi', 'mythology', 'space', 'deepsea', 'ancient', 'wasteland']
+const genreLabels = {
+  generic: '通用',
+  history: '历史 / 历史人物',
+  scifi: '科幻',
+  mythology: '神话 / 奇幻',
+  space: '天文 / 太空',
+  deepsea: '深海',
+  ancient: '古文明',
+  wasteland: '末日废土',
+}
+const genreSelectOptions = computed(() => genres.map(g => ({ label: genreLabels[g] || g, value: g })))
+
+// 视觉风格：真正注入图片 prompt 的风格短语
+const styles = ['generic', 'realistic', 'anime', 'ghibli', 'cinematic', 'comic', 'watercolor']
+const styleLabels = {
+  generic: '通用（电影感）',
+  realistic: '写实',
+  anime: '二次元',
+  ghibli: '吉卜力',
+  cinematic: '电影',
+  comic: '漫画',
+  watercolor: '水彩',
+}
+const styleSelectOptions = computed(() => styles.map(s => ({ label: styleLabels[s] || s, value: s })))
+
+// 题材 → 推荐视觉风格（两者独立，不再混在一起）
+const genreStyleRecommendations = {
+  generic: 'generic',
+  history: 'realistic',
+  scifi: 'cinematic',
+  mythology: 'cinematic',
+  space: 'cinematic',
+  deepsea: 'cinematic',
+  ancient: 'realistic',
+  wasteland: 'cinematic',
+}
+const recommendedStyle = computed(() => genreStyleRecommendations[form.value.genre] || 'generic')
+const isRecommendedStyle = computed(() => form.value.style === recommendedStyle.value)
+
+function styleLabel(value) {
+  return styleLabels[value] || value || ''
+}
+
+function genreLabel(value) {
+  return genreLabels[value] || value || ''
+}
+
+function onGenreChange() {
+  form.value.style = recommendedStyle.value
+}
 
 async function load() {
   loading.value = true
@@ -380,8 +440,18 @@ onMounted(load)
 .modal-desc { font-size: 13px; color: var(--text-3); }
 .modal-form { display: flex; flex-direction: column; gap: 16px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
-.field-label { font-size: 12px; font-weight: 600; color: var(--text-1); }
+.field-label { font-size: 12px; font-weight: 600; color: var(--text-1); display: inline-flex; align-items: center; gap: 8px; }
 .required { color: var(--error); }
+.field-hint { font-size: 12px; color: var(--text-3); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.recommendation-badge {
+  display: inline-flex; align-items: center;
+  font-size: 10px; font-weight: 600;
+  padding: 2px 6px; border-radius: 999px;
+  background: var(--accent-bg); color: var(--accent);
+}
+.recommendation-hint {
+  font-size: 11px; font-weight: 500; color: var(--text-3);
+}
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 6px; }
 </style>

@@ -3,7 +3,7 @@
  * API 文档: https://help.aliyun.com/zh/model-studio/image-to-video-api-reference
  */
 import type { VideoProviderAdapter, VideoGenerationRecord } from './types'
-import { joinProviderUrl } from './url'
+import { joinProviderUrl } from './url.js'
 
 export class AliVideoAdapter implements VideoProviderAdapter {
   readonly provider = 'ali'

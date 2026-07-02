@@ -10,36 +10,41 @@ import type {
   ImageGenResponse,
   ImagePollResponse,
 } from './types'
-import { joinProviderUrl } from './url'
+import { joinProviderUrl } from './url.js'
+import { sizeToMiniMaxAspectRatio } from './minimax-aspect-ratio.js'
+import { normalizePrompt } from './prompt-utils.js'
 
 export class MiniMaxImageAdapter implements ImageProviderAdapter {
   provider = 'minimax'
 
   buildGenerateRequest(config: AIConfig, record: ImageGenerationRecord): ProviderRequest {
+    // MiniMax 文生图是同步接口，使用 aspect_ratio 而非 size
+    // 支持的 aspect_ratio: 1:1, 16:9, 4:3, 3:2, 2:3, 3:4, 9:16, 21:9
+    const aspectRatio = sizeToMiniMaxAspectRatio(record.size)
+
     const body: any = {
       model: record.model || config.model,
-      prompt: record.prompt,
-      size: record.size || '1920x1080',
+      prompt: normalizePrompt(record.prompt, this.provider),
+      aspect_ratio: aspectRatio,
       n: 1,
+      response_format: 'url',
     }
 
-    // MiniMax 支持 reference_images（参考图）
+    if (record.seed != null) {
+      body.seed = record.seed
+    }
+
+    // MiniMax 图生图人物一致性：通过 subject_reference 传入角色参考图
     if (record.referenceImages) {
       try {
         const refs = JSON.parse(record.referenceImages)
-        if (refs.length > 0) {
-          body.image = refs // 支持多张参考图
+        if (Array.isArray(refs) && refs.length > 0) {
+          body.subject_reference = refs.slice(0, 9).map((imageFile: string) => ({
+            type: 'character',
+            image_file: imageFile,
+          }))
         }
       } catch {}
-    }
-
-    // aspect_ratio 参数（MiniMax 支持）
-    if (record.size) {
-      const [w, h] = record.size.split('x')
-      if (w && h) {
-        const ratio = `${w}/${h}`
-        body.aspect_ratio = ratio
-      }
     }
 
     return {
@@ -54,46 +59,34 @@ export class MiniMaxImageAdapter implements ImageProviderAdapter {
   }
 
   parseGenerateResponse(result: any): ImageGenResponse {
-    // 异步模式：返回 task_id
-    if (result.task_id || result.id) {
-      return { isAsync: true, taskId: result.task_id || result.id }
+    // MiniMax 文生图同步返回 { data: { image_urls: [...] } }
+    const imageUrls = result.data?.image_urls
+    if (Array.isArray(imageUrls) && imageUrls.length > 0) {
+      return { isAsync: false, imageUrl: imageUrls[0] }
     }
-    // 同步模式：直接返回图片 URL
-    const imageUrl = result.data?.[0]?.url || result.url
-    if (imageUrl) {
-      return { isAsync: false, imageUrl }
-    }
-    throw new Error('No image URL or task_id in response')
+    throw new Error('No image URL in MiniMax response')
   }
 
-  buildPollRequest(config: AIConfig, taskId: string): ProviderRequest {
-    return {
-      url: joinProviderUrl(config.baseUrl, '/v1', `/image_generation/task/${taskId}`),
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-      },
-      body: undefined,
-    }
+  buildPollRequest(): ProviderRequest {
+    // MiniMax 文生图没有轮询接口
+    throw new Error('MiniMax image generation does not support polling')
   }
 
-  parsePollResponse(result: any): ImagePollResponse {
-    const status = result.status || result.state
-    if (status === 'completed' || status === 'succeeded') {
-      return { status: 'completed', imageUrl: result.image_url || result.data?.image_url || result.url || result.data?.url }
-    }
-    if (status === 'failed' || status === 'error') {
-      return { status: 'failed', error: result.error_msg || result.error || 'Generation failed' }
-    }
-    return { status: status || 'processing' }
+  parsePollResponse(): ImagePollResponse {
+    // MiniMax 文生图没有轮询接口
+    throw new Error('MiniMax image generation does not support polling')
   }
 
   extractImageUrl(result: any): string | null {
-    return result.image_url || result.data?.image_url || result.url || result.data?.url || null
+    const imageUrls = result.data?.image_urls
+    if (Array.isArray(imageUrls) && imageUrls.length > 0) {
+      return imageUrls[0]
+    }
+    return null
   }
 
   extractImageBase64(result: any): { data: string; mimeType: string } | null {
-    // MiniMax 通常返回 URL，不返回 base64
+    // MiniMax 文生图只返回 URL
     return null
   }
 }
