@@ -128,8 +128,7 @@ export async function composeIntroForEpisode(input: IntroComposeInput): Promise<
   }
 
   if (!template) {
-    console.warn('No intro template found, skipping intro')
-    return null
+    return renderClassicTitleFadeIntro(input)
   }
 
   const config = template.config as IntroTemplateConfig
@@ -138,6 +137,6 @@ export async function composeIntroForEpisode(input: IntroComposeInput): Promise<
     return renderClassicTitleFadeIntro(input)
   }
 
-  console.warn(`Intro template ${template.id} renderer not implemented yet`)
-  return null
+  console.warn(`Intro template ${template.id} renderer not implemented yet, falling back to classic title fade`)
+  return renderClassicTitleFadeIntro(input)
 }

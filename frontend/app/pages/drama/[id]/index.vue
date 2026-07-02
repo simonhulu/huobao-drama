@@ -28,6 +28,16 @@
               {{ drama.scenes?.length || 0 }} 场景
             </span>
           </div>
+          <div class="intro-template-row">
+            <span class="intro-template-label">开场模板</span>
+            <BaseSelect
+              :model-value="drama.intro_template_id"
+              :options="introTemplateOptions"
+              placeholder="使用默认开场"
+              searchable
+              @update:model-value="onIntroTemplateChange"
+            />
+          </div>
         </div>
       </div>
       <div class="head-actions">
@@ -97,8 +107,6 @@
                 <span class="plan-duration">{{ episode.duration }}s</span>
               </div>
               <p class="plan-summary">{{ episode.summary }}</p>
-              <p class="plan-hook">开场钩子：{{ episode.opening_hook }}</p>
-              <p class="plan-hook">集尾悬念：{{ episode.cliffhanger_hook }}</p>
               <p class="plan-preview">{{ episode.content_preview }}</p>
             </div>
           </div>
@@ -534,7 +542,8 @@
 
 <script setup>
 import { toast } from 'vue-sonner'
-import { aiConfigAPI, dramaAPI, episodeAPI } from '~/composables/useApi'
+import BaseSelect from '~/components/BaseSelect.vue'
+import { aiConfigAPI, dramaAPI, episodeAPI, introTemplateAPI } from '~/composables/useApi'
 
 const route = useRoute()
 const drama = ref(null)
@@ -573,6 +582,22 @@ const importScriptVideoConfigId = ref(null)
 const importScriptAudioConfigId = ref(null)
 const importScriptAspect = ref('16:9')
 const importScriptRenderMode = ref('image_story')
+
+const introTemplates = ref([])
+const introTemplateOptions = computed(() =>
+  introTemplates.value.map(t => ({ label: `${t.name}${t.is_default ? ' · 默认' : ''}`, value: t.id }))
+)
+async function loadIntroTemplates() {
+  try { introTemplates.value = await introTemplateAPI.list() }
+  catch (e) { toast.error(e.message) }
+}
+async function onIntroTemplateChange(id) {
+  try {
+    await dramaAPI.update(dramaId, { intro_template_id: id || null })
+    toast.success('已更新开场模板')
+    await load()
+  } catch (e) { toast.error(e.message) }
+}
 
 const selectedEpisodeIds = ref([])
 const deletingEpisodeIds = ref([])
@@ -899,7 +924,7 @@ async function runPreProduction() {
   }
 }
 
-onMounted(() => { load(); loadConfigs() })
+onMounted(() => { load(); loadConfigs(); loadIntroTemplates() })
 </script>
 
 <style scoped>
@@ -956,6 +981,15 @@ onMounted(() => { load(); loadConfigs() })
 }
 
 .page-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.intro-template-row {
+  display: flex; align-items: center; gap: 10px; margin-top: 6px;
+}
+.intro-template-label {
+  font-size: 12px; color: var(--text-2); flex-shrink: 0;
+}
+.intro-template-row .base-select {
+  min-width: 200px;
+}
 .style-chip {
   font-size: 11px; font-weight: 500;
   padding: 2px 8px;

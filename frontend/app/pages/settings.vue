@@ -275,6 +275,48 @@
           </div>
         </div>
       </div>
+
+      <!-- ===== 开场模板 ===== -->
+      <div v-else-if="tab === 'intro'" class="settings-scroll">
+        <div class="settings-head">
+          <div class="settings-brand">
+            <div class="settings-brand-mark">
+              <img v-if="showBrandImage" :src="brandLogo" alt="火宝短剧" class="settings-brand-logo" @error="showBrandImage = false" />
+              <span v-else class="settings-brand-fallback">火</span>
+            </div>
+            <div class="settings-brand-copy">
+              <div class="settings-brand-kicker">Huobao Shorts</div>
+              <div class="settings-brand-name">火宝短剧</div>
+            </div>
+          </div>
+          <h2 class="settings-title">开场模板</h2>
+          <p class="settings-desc">每个剧集成片前会自动插入开场动画。设置默认模板，或创建自定义 JSON 模板。</p>
+        </div>
+        <div class="section-head">
+          <span class="section-title">模板列表</span>
+          <button class="btn btn-primary btn-sm ml-auto" @click="startAddIntro">
+            <Plus :size="13" /> 新建模板
+          </button>
+        </div>
+        <div class="config-list">
+          <div v-for="t in introTemplates" :key="t.id" class="card config-row">
+            <div class="config-info">
+              <div class="config-main">
+                <div class="config-line">
+                  <span class="config-provider">{{ t.name }}</span>
+                  <span class="config-name">{{ t.id }}</span>
+                  <span v-if="t.is_default" class="tag tag-success">默认</span>
+                </div>
+                <span class="config-model mono truncate">{{ fmtIntroConfig(t.config) }}</span>
+              </div>
+            </div>
+            <button class="btn btn-ghost btn-sm" :disabled="t.is_default" @click="setDefaultIntro(t.id)">设为默认</button>
+            <button class="btn btn-ghost btn-icon" @click="startEditIntro(t)"><Pencil :size="13" /></button>
+            <button class="btn btn-ghost btn-icon" @click="delIntro(t.id)"><Trash2 :size="13" /></button>
+          </div>
+          <p v-if="!introTemplates.length" class="config-empty">暂无开场模板，点击右上角创建。</p>
+        </div>
+      </div>
     </div>
 
     <!-- AI Config Dialog -->
@@ -445,14 +487,43 @@
         </div>
       </form>
     </div>
+
+    <!-- Intro Template Dialog -->
+    <div v-if="introDialog" class="overlay" @click.self="introDialog = false">
+      <form class="modal card config-modal" @submit.prevent="saveIntro">
+        <div class="config-modal-head">
+          <div>
+            <div class="setup-kicker">Intro Template</div>
+            <h2 class="modal-title">{{ introEditId ? '编辑开场模板' : '新建开场模板' }}</h2>
+            <div class="modal-note">ID 创建后不可修改。config 为 JSON，支持 duration、background、layers 等字段。</div>
+          </div>
+        </div>
+        <label class="field">
+          <span class="field-label">模板 ID <span class="dim">(英文，唯一)</span></span>
+          <input v-model="introForm.id" class="input" :disabled="!!introEditId" placeholder="如 classic-title-fade" />
+        </label>
+        <label class="field">
+          <span class="field-label">名称</span>
+          <input v-model="introForm.name" class="input" placeholder="如 经典标题淡入" />
+        </label>
+        <label class="field">
+          <span class="field-label">Config JSON</span>
+          <textarea v-model="introForm.config" class="textarea mono" rows="14" placeholder="{}" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn" @click="introDialog = false">取消</button>
+          <button type="submit" class="btn btn-primary" :disabled="introSaving">保存</button>
+        </div>
+      </form>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, RefreshCw, Upload } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, RefreshCw, Upload, Clapperboard } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { toast } from 'vue-sonner'
-import { aiConfigAPI, agentConfigAPI, skillsAPI, voicesAPI } from '~/composables/useApi'
+import { aiConfigAPI, agentConfigAPI, skillsAPI, voicesAPI, introTemplateAPI } from '~/composables/useApi'
 import brandLogo from '~/assets/huobao-logo.png'
 
 const showBrandImage = ref(true)
@@ -460,6 +531,7 @@ const tab = ref('ai')
 const showAdvanced = ref(false)
 const baseTabs = [
   { id: 'ai', label: 'AI 服务', icon: Cpu },
+  { id: 'intro', label: '开场模板', icon: Clapperboard },
 ]
 const advancedTabs = [
   { id: 'agents', label: 'Agent 配置', icon: Bot },
@@ -1067,7 +1139,89 @@ async function saveSkill(id) {
   }
 }
 
-onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills() })
+// ===== Intro Templates =====
+const introTemplates = ref([])
+const introDialog = ref(false)
+const introEditId = ref(null)
+const introSaving = ref(false)
+const introForm = reactive({ id: '', name: '', config: '' })
+
+function fmtIntroConfig(c) {
+  try {
+    return JSON.stringify(typeof c === 'string' ? JSON.parse(c) : c)
+  } catch {
+    return String(c)
+  }
+}
+
+async function loadIntros() {
+  try { introTemplates.value = await introTemplateAPI.list() }
+  catch (e) { toast.error(e.message) }
+}
+
+function startAddIntro() {
+  introEditId.value = null
+  introForm.id = ''
+  introForm.name = ''
+  introForm.config = JSON.stringify({
+    duration: 3,
+    background: { type: 'color', value: '#000000' },
+    layers: [
+      { type: 'text', content: '{{dramaTitle}}', fontSize: 72, color: '#ffffff', position: 'center', animation: { type: 'fade', duration: 1.5 } }
+    ]
+  }, null, 2)
+  introDialog.value = true
+}
+
+function startEditIntro(t) {
+  introEditId.value = t.id
+  introForm.id = t.id
+  introForm.name = t.name || ''
+  introForm.config = fmtIntroConfig(t.config)
+  introDialog.value = true
+}
+
+async function saveIntro() {
+  if (!introForm.id || !introForm.name) { toast.warning('请填写 ID 和名称'); return }
+  let config
+  try { config = JSON.parse(introForm.config) }
+  catch { toast.warning('Config JSON 格式错误'); return }
+
+  introSaving.value = true
+  try {
+    if (introEditId.value) {
+      await introTemplateAPI.update(introEditId.value, { name: introForm.name, config })
+    } else {
+      await introTemplateAPI.create({ id: introForm.id, name: introForm.name, config })
+    }
+    introDialog.value = false
+    toast.success('已保存')
+    await loadIntros()
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    introSaving.value = false
+  }
+}
+
+async function delIntro(id) {
+  if (!confirm(`确定删除开场模板「${id}」？`)) return
+  try {
+    await introTemplateAPI.del(id)
+    toast.success('已删除')
+    await loadIntros()
+  } catch (e) { toast.error(e.message) }
+}
+
+async function setDefaultIntro(id) {
+  try {
+    await introTemplateAPI.setDefault(id)
+    toast.success('已设为默认')
+    await loadIntros()
+  } catch (e) { toast.error(e.message) }
+}
+
+onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadIntros() })
 </script>
 
 <style scoped>

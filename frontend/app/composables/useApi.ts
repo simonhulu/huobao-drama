@@ -176,6 +176,15 @@ export const agentConfigAPI = {
   del: (id: number) => api.del(`/agent-configs/${id}`),
 }
 
+export const introTemplateAPI = {
+  list: () => api.get<any[]>('/intro-templates'),
+  get: (id: string) => api.get(`/intro-templates/${id}`),
+  create: (data: any) => api.post('/intro-templates', data),
+  update: (id: string, data: any) => api.put(`/intro-templates/${id}`, data),
+  del: (id: string) => api.del(`/intro-templates/${id}`),
+  setDefault: (id: string) => api.post(`/intro-templates/${id}/set-default`, {}),
+}
+
 export const scriptAPI = {
   clean: (content: string, options: any = {}) => api.post('/scripts/clean', { content, ...options }),
 }

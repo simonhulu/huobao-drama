@@ -14,7 +14,7 @@
           <span class="studio-episode-chip">第 {{ episodeNumber }} 集</span>
           <div class="studio-meta-row">
             <span class="studio-meta-pill">{{ currentSubStageLabel }}</span>
-            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/11</span>
+            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/12</span>
             <span class="studio-meta-inline">{{ chars.length }} 角色 · {{ sbs.length }} 镜头</span>
           </div>
         </div>
@@ -190,10 +190,10 @@
         <div class="progress-wrap">
           <div class="progress-head">
             <span class="progress-label">制作进度</span>
-            <span class="progress-val">{{ pipelineProgress }}/11</span>
+            <span class="progress-val">{{ pipelineProgress }}/12</span>
           </div>
           <div class="progress-track">
-            <div class="progress-fill" :style="{ width: (pipelineProgress / 11 * 100) + '%' }"></div>
+            <div class="progress-fill" :style="{ width: (pipelineProgress / 12 * 100) + '%' }"></div>
           </div>
         </div>
         <div class="sidebar-jumper" v-if="sidebarJumpSteps.length">
@@ -234,6 +234,69 @@
         <div v-if="cliffhanger" class="retention-card">
           <span class="retention-label">结尾悬念</span>
           <span class="retention-text">{{ cliffhanger }}</span>
+        </div>
+      </div>
+
+      <!-- ===== INTRO PANEL ===== -->
+      <div v-if="panel === 'intro'" class="content-panel intro-panel">
+        <div class="intro-section">
+          <div class="intro-section-head">
+            <span class="intro-section-title">本集钩子与前情提要文案</span>
+            <div class="intro-section-actions">
+              <button v-if="!hookEditing" class="btn btn-ghost btn-sm" @click="startEditHooks">编辑</button>
+              <button v-else class="btn btn-primary btn-sm" @click="saveHooks">保存</button>
+              <button class="btn btn-ghost btn-sm" :disabled="isTaskTypeRunning('hook.design')" @click="regenerateHooks">AI 重新生成</button>
+            </div>
+          </div>
+          <div v-if="!hookEditing" class="hook-display">
+            <div v-if="openingHook" class="hook-display-row"><span class="hook-display-label">开场钩子</span><span class="hook-display-text">{{ openingHook }}</span></div>
+            <div v-if="cliffhanger" class="hook-display-row"><span class="hook-display-label">结尾悬念</span><span class="hook-display-text">{{ cliffhanger }}</span></div>
+            <div v-if="recapScript" class="hook-display-row"><span class="hook-display-label">前情提要</span><span class="hook-display-text">{{ recapScript }}</span></div>
+            <div v-if="seriesHook" class="hook-display-row"><span class="hook-display-label">系列钩子</span><span class="hook-display-text">{{ seriesHook }}</span></div>
+            <p v-if="!openingHook && !cliffhanger && !recapScript && !seriesHook" class="hook-empty">暂无钩子文案，点击「AI 重新生成」或「编辑」手动填写。</p>
+          </div>
+          <div v-else class="hook-form">
+            <label class="field">
+              <span class="field-label">开场钩子</span>
+              <textarea v-model="hookForm.opening_hook" class="textarea" rows="2" placeholder="3 秒开场钩子文案" />
+            </label>
+            <label class="field">
+              <span class="field-label">结尾悬念</span>
+              <textarea v-model="hookForm.cliffhanger_hook" class="textarea" rows="2" placeholder="集尾悬念文案" />
+            </label>
+            <label class="field">
+              <span class="field-label">前情提要文案</span>
+              <textarea v-model="hookForm.recap_script" class="textarea" rows="4" placeholder="用于生成前情提要视频的文案，第 2 集及以后生效" />
+            </label>
+            <label class="field">
+              <span class="field-label">系列钩子</span>
+              <input v-model="hookForm.series_hook" class="input" placeholder="贯穿全剧的系列钩子" />
+            </label>
+          </div>
+        </div>
+
+        <div class="intro-section">
+          <div class="intro-section-head">
+            <span class="intro-section-title">成片前置素材</span>
+          </div>
+          <div class="intro-pre-grid">
+            <div class="intro-pre-item">
+              <div class="intro-pre-row">
+                <span class="intro-pre-label">开场动画</span>
+                <span :class="['tag', introUrl ? 'tag-success' : '']">{{ introUrl ? '已生成' : '未生成' }}</span>
+                <button class="btn btn-ghost btn-sm" :disabled="isTaskTypeRunning('intro.compose')" @click="regenerateIntro">重新生成</button>
+              </div>
+              <video v-if="introUrl" :src="'/' + introUrl" controls class="intro-pre-preview" preload="metadata" playsinline />
+            </div>
+            <div v-if="episodeNumber > 1" class="intro-pre-item">
+              <div class="intro-pre-row">
+                <span class="intro-pre-label">前情提要</span>
+                <span :class="['tag', recapUrl ? 'tag-success' : '']">{{ recapUrl ? '已生成' : '未生成' }}</span>
+                <button class="btn btn-ghost btn-sm" :disabled="isTaskTypeRunning('recap.compose')" @click="regenerateRecap">重新生成</button>
+              </div>
+              <video v-if="recapUrl" :src="'/' + recapUrl" controls class="intro-pre-preview" preload="metadata" playsinline />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1848,9 +1911,9 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import {
-  Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download, Loader2, Settings2, X,
+  Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download, Loader2, Settings2, X, Sparkles,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, ttsAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, libraryAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, ttsAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, libraryAPI, taskAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import { useTasks } from '~/composables/useTasks'
 import BaseSelect from '~/components/BaseSelect.vue'
@@ -1885,6 +1948,7 @@ const STORY_CARRIER_FIELDS = [
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), sbs = ref([]), mergeData = ref(null)
 const panel = ref('script')
+const panelInitialized = ref(false)
 const { running: rn, runningType: rt, run: runAgent, loadTasks: loadAgentTasks } = useAgent()
 
 const localRaw = ref(''), localScript = ref('')
@@ -1938,7 +2002,13 @@ const subtitlePreviewUrl = ref('')
 const firstSubtitleStoryboard = computed(() => sbs.value.find(s => (s.narration || s.dialogue)?.trim()) || null)
 const openingHook = computed(() => episode.value?.opening_hook || '')
 const cliffhanger = computed(() => episode.value?.cliffhanger || '')
+const recapScript = computed(() => episode.value?.recap_script || '')
+const seriesHook = computed(() => episode.value?.series_hook || '')
+const introUrl = computed(() => episode.value?.intro_video_url || '')
+const recapUrl = computed(() => episode.value?.recap_video_url || '')
 const workflowType = computed(() => episode.value?.workflow_type || episode.value?.workflowType || '')
+const hookEditing = ref(false)
+const hookForm = reactive({ opening_hook: '', cliffhanger_hook: '', recap_script: '', series_hook: '' })
 const narrationMode = computed(() => episode.value?.narration_mode || episode.value?.narrationMode || '')
 // 业务契约：direct_script 的 narration 字段不是 AI 旁白，而是逐镜头原文 TTS 切片。
 // 只有 story_rewrite + rewrite 才允许调用 narrator 生成新的解说/旁白文案。
@@ -2916,6 +2986,7 @@ const prodTabDefs = computed(() => [
 ])
 
 const mainStageDefs = [
+  { id: 'intro', label: '开场/提要', desc: '钩子与开场前情提要', icon: Sparkles },
   { id: 'script', label: '剧本', desc: '内容改写与整理', icon: FileText },
   { id: 'assets', label: '资产', desc: '角色、场景与音色', icon: FolderKanban },
   { id: 'storyboard', label: '分镜', desc: '镜头制作与合成', icon: Clapperboard },
@@ -2923,6 +2994,13 @@ const mainStageDefs = [
 ]
 
 const sidebarSections = computed(() => ([
+  {
+    id: 'intro',
+    label: '开场/提要',
+    items: [
+      { key: 'intro:hooks', label: '开头和结尾', desc: '', icon: Sparkles, done: !!(openingHook.value && cliffhanger.value) },
+    ],
+  },
   {
     id: 'script',
     label: '剧本',
@@ -2960,6 +3038,7 @@ const sidebarSections = computed(() => ([
 })))
 
 const activeMainStage = computed(() => {
+  if (panel.value === 'intro') return 'intro'
   if (panel.value === 'export') return 'export'
   if (panel.value === 'production') {
     return ['chars', 'scenes'].includes(prodTab.value) ? 'assets' : 'storyboard'
@@ -2970,6 +3049,7 @@ const activeMainStage = computed(() => {
 })
 
 function mainStageDone(stageId) {
+  if (stageId === 'intro') return !!(openingHook.value && cliffhanger.value)
   if (stageId === 'script') return !!scriptContent.value
   if (stageId === 'assets') {
     const charsReady = !!chars.value.length && charsVoiced.value === chars.value.length
@@ -2991,6 +3071,10 @@ function mainStageDone(stageId) {
 }
 
 function goMainStage(stageId) {
+  if (stageId === 'intro') {
+    panel.value = 'intro'
+    return
+  }
   if (stageId === 'script') {
     panel.value = 'script'
     scriptStep.value = Math.min(scriptStep.value, 1)
@@ -3022,6 +3106,11 @@ function goMainStage(stageId) {
 }
 
 const activeSubSteps = computed(() => {
+  if (activeMainStage.value === 'intro') {
+    return [
+      { key: 'intro:hooks', label: '开头和结尾', done: !!(openingHook.value && cliffhanger.value) },
+    ]
+  }
   if (activeMainStage.value === 'script') {
     return [
       { key: 'script:raw', label: '原始内容', done: !!rawContent.value },
@@ -3051,6 +3140,7 @@ const activeSubSteps = computed(() => {
 })
 
 const activeSubStepKey = computed(() => {
+  if (panel.value === 'intro') return 'intro:hooks'
   if (panel.value === 'script') {
     if (scriptStep.value === 0) return 'script:raw'
     if (scriptStep.value === 1) return 'script:rewrite'
@@ -3068,6 +3158,11 @@ const sidebarJumpSteps = computed(() => {
 })
 
 const bubbleSteps = computed(() => {
+  if (panel.value === 'intro') {
+    return [
+      { key: 'intro:hooks', label: '开头和结尾', done: !!(openingHook.value && cliffhanger.value) },
+    ]
+  }
   if (panel.value === 'script') {
     return [
       { key: 'script:raw', label: '原始内容', done: !!rawContent.value },
@@ -3088,14 +3183,19 @@ const bubbleSteps = computed(() => {
 })
 
 const activeBubbleKey = computed(() => {
+  if (panel.value === 'intro') return activeSubStepKey.value
   if (panel.value === 'script') return activeSubStepKey.value
   if (panel.value === 'production') return `prod:${prodTab.value}`
   return ''
 })
 
-const showBottomBubble = computed(() => panel.value === 'script' || panel.value === 'production')
+const showBottomBubble = computed(() => panel.value === 'intro' || panel.value === 'script' || panel.value === 'production')
 
 function goSubStep(key) {
+  if (key.startsWith('intro:')) {
+    panel.value = 'intro'
+    return
+  }
   if (key.startsWith('script:')) {
     panel.value = 'script'
     const stepMap = {
@@ -3118,6 +3218,7 @@ function goSubStep(key) {
 
 const pipelineProgress = computed(() => {
   let p = 0
+  if (openingHook.value && cliffhanger.value) p++
   if (rawContent.value) p++
   if (scriptContent.value) p++
   if (chars.value.length) p++
@@ -3132,6 +3233,7 @@ const pipelineProgress = computed(() => {
 })
 
 const currentStageLabel = computed(() => {
+  if (panel.value === 'intro') return '开场/提要阶段 · 开头和结尾'
   if (panel.value === 'script') return `剧本阶段 · ${stepLabels[scriptStep.value]}`
   if (panel.value === 'production') return `制作阶段 · ${prodTabDefs.value[prodTabIdx.value]?.label || '制作'}`
   return mergeUrl.value ? '导出阶段 · 成片已生成' : '导出阶段 · 等待拼接'
@@ -3387,6 +3489,13 @@ async function refresh(options = {}) {
       else if (epHasScript && chars.value.length) scriptStep.value = 2
       else if (epHasScript || epHasContent) scriptStep.value = 1
       else scriptStep.value = 0
+
+      if (!panelInitialized.value) {
+        panelInitialized.value = true
+        const hasHooks = !!(episode.value?.opening_hook && episode.value?.cliffhanger_hook)
+        if (!hasHooks) panel.value = 'intro'
+      }
+
       await loadLatestGridImage()
     }
   } catch (e) {
@@ -3397,6 +3506,52 @@ async function refresh(options = {}) {
 
 function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
 function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
+function startEditHooks() {
+  hookForm.opening_hook = openingHook.value
+  hookForm.cliffhanger_hook = cliffhanger.value
+  hookForm.recap_script = recapScript.value
+  hookForm.series_hook = seriesHook.value
+  hookEditing.value = true
+}
+async function saveHooks() {
+  try {
+    await episodeAPI.update(epId.value, {
+      opening_hook: hookForm.opening_hook,
+      cliffhanger_hook: hookForm.cliffhanger_hook,
+      recap_script: hookForm.recap_script,
+      series_hook: hookForm.series_hook,
+    })
+    Object.assign(episode.value, {
+      opening_hook: hookForm.opening_hook,
+      cliffhanger: hookForm.cliffhanger_hook,
+      recap_script: hookForm.recap_script,
+      series_hook: hookForm.series_hook,
+    })
+    hookEditing.value = false
+    toast.success('钩子文案已保存')
+  } catch (e) { toast.error(e.message) }
+}
+function isTaskTypeRunning(type) {
+  return isActiveTask(latestMediaTask(type, () => true))
+}
+async function regenerateHooks() {
+  try {
+    await taskAPI.create({ type: 'hook.design', drama_id: dramaId, episode_id: epId.value, payload: { episode_id: epId.value } })
+    toast.success('已创建钩子设计任务')
+  } catch (e) { toast.error(e.message) }
+}
+async function regenerateIntro() {
+  try {
+    await taskAPI.create({ type: 'intro.compose', drama_id: dramaId, episode_id: epId.value, payload: { episode_id: epId.value } })
+    toast.success('已创建开场合成任务')
+  } catch (e) { toast.error(e.message) }
+}
+async function regenerateRecap() {
+  try {
+    await taskAPI.create({ type: 'recap.compose', drama_id: dramaId, episode_id: epId.value, payload: { episode_id: epId.value } })
+    toast.success('已创建前情提要合成任务')
+  } catch (e) { toast.error(e.message) }
+}
 function useStoryValidationSample() {
   localRaw.value = STORY_VALIDATION_SAMPLE
   saveRaw()
@@ -6718,5 +6873,78 @@ onMounted(() => {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
+}
+
+.hook-editor {
+  margin: 0 32px 18px;
+  padding: 14px 16px;
+}
+.hook-editor-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;
+}
+.hook-editor-title {
+  font-size: 13px; font-weight: 600; color: var(--text-0);
+}
+.hook-editor-actions {
+  display: flex; align-items: center; gap: 8px;
+}
+.hook-display {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.hook-display-row {
+  display: flex; gap: 10px; font-size: 12px; line-height: 1.5;
+}
+.hook-display-label {
+  width: 64px; flex-shrink: 0; color: var(--text-3);
+}
+.hook-display-text {
+  flex: 1; color: var(--text-1);
+}
+.hook-empty {
+  font-size: 12px; color: var(--text-3); margin: 0;
+}
+.hook-form {
+  display: flex; flex-direction: column; gap: 12px;
+}
+
+.intro-panel {
+  display: flex; flex-direction: column; gap: 18px;
+  padding: 18px 32px 32px;
+}
+.intro-section {
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.intro-section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px;
+}
+.intro-section-title {
+  font-size: 13px; font-weight: 600; color: var(--text-0);
+}
+.intro-section-actions {
+  display: flex; align-items: center; gap: 8px;
+}
+.intro-pre-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px;
+}
+.intro-pre-item {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.intro-pre-row {
+  display: flex; align-items: center; gap: 10px;
+}
+.intro-pre-label {
+  font-size: 12px; color: var(--text-2); width: 56px;
+}
+.intro-pre-preview {
+  width: 100%; max-height: 180px; border-radius: 10px; background: #000;
+}
+
+@media (max-width: 900px) {
+  .intro-panel { padding: 16px; }
+  .intro-pre-grid { grid-template-columns: 1fr; }
 }
 </style>

@@ -1,5 +1,5 @@
-import { getTask, listTaskDependencies } from '../store.js'
-import { eq } from 'drizzle-orm'
+import { getTask, listTaskDependencies, addTaskDependency } from '../store.js'
+import { and, eq } from 'drizzle-orm'
 import { db, schema } from '../../../db/index.js'
 import { registerTaskHandler } from '../registry.js'
 import type { TaskContext, TaskHandler } from '../types.js'
@@ -105,6 +105,16 @@ export function createComposeEpisodeHandler(): TaskHandler<ComposeEpisodePayload
       if (episode?.autoMode && succeeded === total && failed === 0 && total > 0) {
         const mergeTask = scheduleMergeForEpisode(episode.dramaId, episodeId)
         if (mergeTask) {
+          const mediaTasks = db.select().from(schema.creationTasks)
+            .where(and(
+              eq(schema.creationTasks.episodeId, episodeId),
+              eq(schema.creationTasks.status, 'queued'),
+            ))
+            .all()
+            .filter(t => t.type === 'intro.compose' || t.type === 'recap.compose')
+          for (const mediaTask of mediaTasks) {
+            addTaskDependency(mergeTask.id, mediaTask.id)
+          }
           ctx.event('compose.episode.merge_scheduled', {
             episode_id: episodeId,
             merge_task_id: mergeTask.id,

@@ -195,7 +195,8 @@ test('POST /:id/smart-split creates episodes from structured AI output', async (
     /这个人从来没有登记过身份。/,
   )
   assert.match(row.description || '', /婚礼前夜，新娘发现未婚夫突然失踪/)
-  assert.match(row.description || '', /集尾钩子/)
+  assert.equal(row.openingHook, null)
+  assert.equal(row.cliffhanger, null)
 })
 
 test('POST /:id/smart-split rejects invalid request body', async () => {
