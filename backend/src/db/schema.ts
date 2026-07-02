@@ -20,9 +20,19 @@ export const dramas = sqliteTable('dramas', {
   tags: text('tags'),
   hook: text('hook'),
   metadata: text('metadata'),
+  introTemplateId: text('intro_template_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
+})
+
+export const introTemplates = sqliteTable('intro_templates', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  config: text('config', { mode: 'json' }).notNull(),
+  isDefault: integer('is_default', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 })
 
 export const episodes = sqliteTable('episodes', {
@@ -63,6 +73,10 @@ export const episodes = sqliteTable('episodes', {
   narrationMode: text('narration_mode').default('rewrite'),
   openingHook: text('opening_hook'),
   cliffhanger: text('cliffhanger'),
+  recapScript: text('recap_script'),
+  recapVideoUrl: text('recap_video_url'),
+  introVideoUrl: text('intro_video_url'),
+  seriesHook: text('series_hook'),
   retentionBeats: text('retention_beats'),
   energyCurve: text('energy_curve'),
   createdAt: text('created_at').notNull(),

@@ -36,6 +36,15 @@ sqlite.exec(`
     deleted_at TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS intro_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    config TEXT NOT NULL,
+    is_default INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS episodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     drama_id INTEGER NOT NULL,
@@ -69,6 +78,10 @@ sqlite.exec(`
     narration_mode TEXT DEFAULT 'rewrite',
     opening_hook TEXT,
     cliffhanger TEXT,
+    recap_script TEXT,
+    recap_video_url TEXT,
+    intro_video_url TEXT,
+    series_hook TEXT,
     retention_beats TEXT,
     energy_curve TEXT,
     created_at TEXT NOT NULL,
@@ -523,6 +536,12 @@ ensureColumn('creation_tasks', 'priority', 'INTEGER DEFAULT 0')
 ensureColumn('creation_tasks', 'scheduled_at', 'TEXT')
 ensureColumn('creation_tasks', 'provider', 'TEXT')
 ensureColumn('creation_tasks', 'retry_reason', 'TEXT')
+
+ensureColumn('dramas', 'intro_template_id', 'TEXT')
+ensureColumn('episodes', 'recap_script', 'TEXT')
+ensureColumn('episodes', 'recap_video_url', 'TEXT')
+ensureColumn('episodes', 'intro_video_url', 'TEXT')
+ensureColumn('episodes', 'series_hook', 'TEXT')
 
 ensureColumn('image_generations', 'attempts', 'INTEGER DEFAULT 0')
 ensureColumn('image_generations', 'last_error_code', 'TEXT')
