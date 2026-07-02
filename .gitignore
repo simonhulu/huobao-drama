@@ -48,6 +48,10 @@ temp/
 .omo/
 .agents/
 .codex/
+.opencode/
+.logs/
+.AGENTS.md.bkup
+polished-zhangjuzheng-script*
 
 # Backend local databases
 backend/data.db
