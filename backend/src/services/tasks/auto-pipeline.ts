@@ -267,6 +267,63 @@ export function scheduleBreakdownAndNarrationForEpisode(dramaId: number, episode
   return { breaker, splitter, narrator }
 }
 
+export function scheduleHookDesignAndIntroRecap(dramaId: number, episodeId: number) {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return { hookTask: null, introTask: null, recapTask: null }
+
+  const hookTask = createTask({
+    type: 'hook.design',
+    dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: `hook.design:auto:${dramaId}:${episodeId}`,
+    payload: { episode_id: episodeId },
+  })
+
+  const introTask = createTask({
+    type: 'intro.compose',
+    dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: `intro.compose:auto:${dramaId}:${episodeId}`,
+    payload: { episode_id: episodeId },
+  })
+  addTaskDependency(introTask.id, hookTask.id)
+
+  const recapTask = createTask({
+    type: 'recap.compose',
+    dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: `recap.compose:auto:${dramaId}:${episodeId}`,
+    payload: { episode_id: episodeId },
+  })
+  addTaskDependency(recapTask.id, hookTask.id)
+
+  // recap 需要上一集的画面，因此依赖上一集所有镜头合成完成
+  if (ep.episodeNumber > 1) {
+    const prevEpisode = db.select().from(schema.episodes)
+      .where(and(eq(schema.episodes.dramaId, dramaId), eq(schema.episodes.episodeNumber, ep.episodeNumber - 1)))
+      .all()[0]
+    if (prevEpisode) {
+      const prevComposeEpisodeTasks = db.select().from(schema.creationTasks)
+        .where(and(
+          eq(schema.creationTasks.type, 'compose.episode'),
+          eq(schema.creationTasks.episodeId, prevEpisode.id),
+        ))
+        .all()
+      for (const prevTask of prevComposeEpisodeTasks) {
+        addTaskDependency(recapTask.id, prevTask.id)
+      }
+    }
+  }
+
+  return { hookTask, introTask, recapTask }
+}
+
 export function scheduleDirectScriptPipeline(dramaId: number, episodeId: number) {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   const dialogueMode = ep?.dialogueMode || 'narration_only'

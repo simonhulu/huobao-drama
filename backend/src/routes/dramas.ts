@@ -3,7 +3,7 @@ import { eq, and, isNull, like, desc, inArray } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, notFound, created, now, serverError } from '../utils/response.js'
 import { toSnakeCase, toSnakeCaseArray } from '../utils/transform.js'
-import { scheduleAutoStartForEpisode, scheduleExtractAfterRewrite, resetDramaEpisodes, scheduleDirectScriptPipeline } from '../services/tasks/auto-pipeline.js'
+import { scheduleAutoStartForEpisode, scheduleExtractAfterRewrite, resetDramaEpisodes, scheduleDirectScriptPipeline, scheduleHookDesignAndIntroRecap } from '../services/tasks/auto-pipeline.js'
 import { getSmartSplitDurationPreset, splitStoryIntoEpisodes, buildEpisodeSplitMetadata } from '../services/episode-splitter.js'
 import { generateRetentionTitles } from '../services/title-generator.js'
 import { cleanDirectScript, type HookStyle, type RetentionMode } from '../services/direct-script-cleaner.js'
@@ -310,6 +310,11 @@ app.post('/:id/smart-split', async (c) => {
       console.error('Generate retention titles failed:', err)
     }
 
+    // 为每一集调度钩子设计和开场/前情提要合成任务
+    for (const ep of createdEpisodes) {
+      if (ep?.id) scheduleHookDesignAndIntroRecap(dramaId, ep.id)
+    }
+
     return created(c, {
       drama_id: dramaId,
       hook: splitResult.hook,
@@ -490,6 +495,9 @@ app.post('/:id/import-script', async (c) => {
       cliffhanger: cliffhanger || null,
       retention_beats: retentionBeats,
     })
+
+    // 精稿直出也调度钩子/开场/前情提要任务
+    scheduleHookDesignAndIntroRecap(dramaId, episodeId)
 
     nextNum++
   }

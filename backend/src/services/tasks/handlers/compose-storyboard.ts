@@ -3,8 +3,8 @@ import { registerTaskHandler } from '../registry.js'
 import { scheduleMergeForEpisode } from '../auto-pipeline.js'
 import { getEpisodeScriptSource, getEpisodeVisualStyle } from '../../episode-mode.js'
 import { db, schema } from '../../../db/index.js'
-import { eq } from 'drizzle-orm'
-import { listTasks } from '../store.js'
+import { eq, and } from 'drizzle-orm'
+import { listTasks, addTaskDependency } from '../store.js'
 import { logTaskWarn } from '../../../utils/task-logger.js'
 import type { TaskContext, TaskHandler } from '../types.js'
 
@@ -93,7 +93,20 @@ function scheduleMergeIfEpisodeReady(storyboardId: number) {
   }).length
   if (failedCount > 0) return
 
-  scheduleMergeForEpisode(ep.dramaId, ep.id)
+  const mergeTask = scheduleMergeForEpisode(ep.dramaId, ep.id)
+  if (!mergeTask) return
+
+  // 合并必须等开场和前情提要合成完成
+  const mediaTasks = db.select().from(schema.creationTasks)
+    .where(and(
+      eq(schema.creationTasks.episodeId, ep.id),
+      eq(schema.creationTasks.status, 'queued'),
+    ))
+    .all()
+    .filter(t => t.type === 'intro.compose' || t.type === 'recap.compose')
+  for (const mediaTask of mediaTasks) {
+    addTaskDependency(mergeTask.id, mediaTask.id)
+  }
 }
 
 export function registerComposeStoryboardHandler() {
