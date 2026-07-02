@@ -37,8 +37,6 @@ export async function generateRetentionTitles(input: TitleGenerationInput): Prom
   const episodesInfo = splitResult.episodes.map((ep, idx) => ({
     number: idx + 1,
     summary: ep.summary,
-    openingHook: ep.openingHook,
-    cliffhanger: ep.cliffhangerHook,
   }))
 
   const userPrompt = `请为以下漫画/短剧项目生成一个项目主标题，以及每一集的吸睛标题。
@@ -50,7 +48,7 @@ export async function generateRetentionTitles(input: TitleGenerationInput): Prom
 ${splitResult.plotProgressionChain.map(b => `- ${b.phase}: ${b.summary}`).join('\n')}
 
 分集信息：
-${episodesInfo.map(e => `第${e.number}集\n- 开场钩子：${e.openingHook}\n- 结尾悬念：${e.cliffhanger}\n- 本集摘要：${e.summary}`).join('\n\n')}
+${episodesInfo.map(e => `第${e.number}集\n- 本集摘要：${e.summary}`).join('\n\n')}
 
 原文摘要（前 2000 字）：
 ${sourceText.slice(0, 2000)}
@@ -77,10 +75,10 @@ ${sourceText.slice(0, 2000)}
     episodeTitles[idx] = cleanTitle(m[2])
   }
 
-  // 如果某些集没有生成到，用 opening_hook 兜底
+  // 如果某些集没有生成到，用 summary 兜底
   for (let i = 0; i < splitResult.episodes.length; i++) {
     if (!episodeTitles[i]) {
-      const fallback = splitResult.episodes[i]?.openingHook
+      const fallback = splitResult.episodes[i]?.summary
       episodeTitles[i] = fallback && fallback.length >= 10 ? fallback : `${dramaTitle} 第${i + 1}集`
     }
   }

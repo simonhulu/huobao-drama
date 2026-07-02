@@ -176,7 +176,8 @@ test('splitStoryIntoEpisodes uses two deepseek-v4-flash tool calls and materiali
     '当晚顾承突然出现，说父亲临终前把公司交给了他。林晚强装镇定，把钥匙藏进掌心。可她刚转身，就在顾承袖口看见了和木箱上一样的火漆印。',
   )
   assert.deepEqual(result.episodes[0].coveredBeatIds, ['beat_1', 'beat_2'])
-  assert.equal(result.episodes[1].cliffhangerHook, '同样的火漆印意味着顾承早就接触过父亲的隐藏计划。')
+  assert.equal((result.episodes[0] as any).openingHook, undefined)
+  assert.equal((result.episodes[1] as any).cliffhangerHook, undefined)
 })
 
 test('materializeEpisodeContents fails fast when model anchors cannot map back to source text', () => {
@@ -186,8 +187,6 @@ test('materializeEpisodeContents fails fast when model anchors cannot map back t
       {
         title: '错误边界',
         summary: '测试',
-        cliffhangerHook: '测试',
-        openingHook: '测试',
         estimatedDurationSeconds: 90,
         openingAnchor: '她推门进屋',
         endingAnchor: '并不存在的锚点',
@@ -196,8 +195,6 @@ test('materializeEpisodeContents fails fast when model anchors cannot map back t
       {
         title: '第二集',
         summary: '测试',
-        cliffhangerHook: '测试',
-        openingHook: '测试',
         estimatedDurationSeconds: 90,
         openingAnchor: '她翻开抽屉',
         endingAnchor: '她翻开抽屉，看见一张被烧焦的照片。',
@@ -214,8 +211,6 @@ test('materializeEpisodeContents keeps the final episode when its ending anchor 
       {
         title: '第一集',
         summary: '测试',
-        cliffhangerHook: '测试',
-        openingHook: '测试',
         estimatedDurationSeconds: 90,
         openingAnchor: '她推门进屋',
         endingAnchor: '发现桌上放着一把旧钥匙。',
@@ -224,8 +219,6 @@ test('materializeEpisodeContents keeps the final episode when its ending anchor 
       {
         title: '第二集',
         summary: '测试',
-        cliffhangerHook: '测试',
-        openingHook: '测试',
         estimatedDurationSeconds: 90,
         openingAnchor: '她翻开抽屉',
         endingAnchor: '林晚翻开抽屉，看见一张被烧焦的照片。',
@@ -246,8 +239,6 @@ test('materializeEpisodeContents tolerates quote style and whitespace difference
       {
         title: '告别',
         summary: '测试',
-        cliffhangerHook: '测试',
-        openingHook: '测试',
         estimatedDurationSeconds: 90,
         openingAnchor: '她冷冷地说：',
         endingAnchor: '"放心。"\n"我不会再打扰你们。"',

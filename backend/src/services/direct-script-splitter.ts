@@ -22,8 +22,6 @@ export interface DirectScriptSegment {
   title: string
   content: string
   summary: string
-  openingHook: string
-  cliffhangerHook: string
   estimatedDurationSeconds: number
 }
 
@@ -46,8 +44,6 @@ export function splitDirectScriptByMarkers(sourceText: string, markers: string[]
       title: `第${index + 1}段`,
       content,
       summary: '',
-      openingHook: '',
-      cliffhangerHook: '',
       estimatedDurationSeconds: 0,
     }))
 }
@@ -73,8 +69,6 @@ export async function smartSplitDirectScript(
     title: ep.title,
     content: ep.content,
     summary: ep.summary,
-    openingHook: ep.openingHook,
-    cliffhangerHook: ep.cliffhangerHook,
     estimatedDurationSeconds: ep.estimatedDurationSeconds,
   }))
 }

@@ -79,8 +79,6 @@ const plotProgressionBeatSchema = z.object({
 const splitEpisodeSchema = z.object({
   title: z.string().min(1),
   summary: z.string().min(1),
-  opening_hook: z.string().min(1),
-  cliffhanger_hook: z.string().min(1),
   estimated_duration_seconds: z.number().int().positive(),
   opening_anchor: z.string().min(1),
   ending_anchor: z.string().min(1),
@@ -133,8 +131,6 @@ const splitEpisodesToolJsonSchema = {
         properties: {
           title: { type: 'string' },
           summary: { type: 'string' },
-          opening_hook: { type: 'string' },
-          cliffhanger_hook: { type: 'string' },
           estimated_duration_seconds: { type: 'integer' },
           opening_anchor: { type: 'string' },
           ending_anchor: { type: 'string' },
@@ -146,8 +142,6 @@ const splitEpisodesToolJsonSchema = {
         required: [
           'title',
           'summary',
-          'opening_hook',
-          'cliffhanger_hook',
           'estimated_duration_seconds',
           'opening_anchor',
           'ending_anchor',
@@ -181,8 +175,6 @@ export interface PlotProgressionBeat {
 export interface SmartSplitEpisodeBoundary {
   title: string
   summary: string
-  openingHook: string
-  cliffhangerHook: string
   estimatedDurationSeconds: number
   openingAnchor: string
   endingAnchor: string
@@ -313,9 +305,6 @@ function buildEpisodeSplitSystemPrompt(preset: SmartSplitDurationPreset, style?:
   }
 
   base.push(
-    '每集必须提供 opening_hook 和 cliffhanger_hook。',
-    'opening_hook 必须是“一句话总结本集情节并留下悬念”的解说式开头，例如：“婆婆说我不能生，我当场气得离家出走，我的丈夫会怎么办？”',
-    'cliffhanger_hook 必须是结尾悬念，让观众想看下一集。',
     '同时提供一个 series_hook（整部剧的一句话核心钩子），用于封面和标题。',
     '每集的 opening_anchor 和 ending_anchor 必须直接从原文中逐字复制。',
     '只通过函数调用提交 episodes 和 series_hook，不要输出额外正文。',
@@ -342,11 +331,9 @@ function buildEpisodeSplitUserPrompt(
     '2. series_hook 用一句话概括整部剧最大冲突/悬念，适合做封面标题。',
     '3. 每一集都要引用 covered_beat_ids，保证分集决策严格受剧情推进链约束。',
     '4. 每集 summary 要写清真实推进，不要只写表面动作。',
-    '5. 每集 opening_hook 必须是“一句话总结本集情节并留下悬念”的解说式开头，例如：“婆婆说我不能生，我当场气得离家出走，我的丈夫会怎么办？”',
-    '6. 每集 cliffhanger_hook 必须是结尾悬念，让观众想看下一集。',
     aiManga
-      ? '7. AI 漫剧模式下：允许合并相邻低密度 beat、跳过非必要说明；所有集数合起来必须完整覆盖主线情节和情绪弧线，不必逐字覆盖原文。'
-      : '7. 所有集数合起来必须完整覆盖原文，不得遗漏关键上下文。',
+      ? '5. AI 漫剧模式下：允许合并相邻低密度 beat、跳过非必要说明；所有集数合起来必须完整覆盖主线情节和情绪弧线，不必逐字覆盖原文。'
+      : '5. 所有集数合起来必须完整覆盖原文，不得遗漏关键上下文。',
     '',
     '原文：',
     input.sourceText,
@@ -510,7 +497,6 @@ function mergeSplitEpisodesByDuration(
     if (combinedDuration <= preset.maxSeconds) {
       current.content = `${current.content}\n\n${ep.content}`
       current.summary = `${current.summary}；${ep.summary}`
-      current.cliffhangerHook = ep.cliffhangerHook
       current.endingAnchor = ep.endingAnchor
       current.coveredBeatIds = [...current.coveredBeatIds, ...ep.coveredBeatIds]
       currentDuration = combinedDuration
@@ -531,7 +517,6 @@ function mergeSplitEpisodesByDuration(
     if (lastDuration < preset.minSeconds && prevDuration + lastDuration <= preset.maxSeconds) {
       prev.content = `${prev.content}\n\n${last.content}`
       prev.summary = `${prev.summary}；${last.summary}`
-      prev.cliffhangerHook = last.cliffhangerHook
       prev.endingAnchor = last.endingAnchor
       prev.coveredBeatIds = [...prev.coveredBeatIds, ...last.coveredBeatIds]
       prev.estimatedDurationSeconds = Math.min(preset.maxSeconds, prevDuration + lastDuration)
@@ -646,8 +631,6 @@ export async function splitStoryIntoEpisodes(input: SmartSplitInput): Promise<Sm
   let episodes = materializeEpisodeContents(sourceText, splitEpisodesPayload.episodes.map((episode) => ({
     title: episode.title,
     summary: episode.summary,
-    openingHook: episode.opening_hook,
-    cliffhangerHook: episode.cliffhanger_hook,
     estimatedDurationSeconds: episode.estimated_duration_seconds,
     openingAnchor: episode.opening_anchor,
     endingAnchor: episode.ending_anchor,
@@ -656,7 +639,7 @@ export async function splitStoryIntoEpisodes(input: SmartSplitInput): Promise<Sm
 
   episodes = mergeSplitEpisodesByDuration(episodes, pacingMode, effectivePreset)
 
-  const hook = splitEpisodesPayload.series_hook || episodes[0]?.openingHook || episodes[0]?.cliffhangerHook || input.dramaTitle || '精彩故事即将展开'
+  const hook = splitEpisodesPayload.series_hook || episodes[0]?.title || input.dramaTitle || '精彩故事即将展开'
 
   return {
     hook,

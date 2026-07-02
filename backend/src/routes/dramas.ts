@@ -211,7 +211,7 @@ app.post('/:id/smart-split', async (c) => {
       return splitResult.episodes.map((episode, index) => {
         const reusableEpisode = reusablePlaceholders[index]
         const episodeNumber = reusableEpisode?.episodeNumber ?? nextEpisodeNumber++
-        const description = `${episode.summary}\n\n集尾钩子：${episode.cliffhangerHook}`
+        const description = episode.summary
         let episodeId: number
 
         if (reusableEpisode) {
@@ -227,8 +227,6 @@ app.post('/:id/smart-split', async (c) => {
             renderMode,
             pacingMode,
             dialogueMode: 'narration_only',
-            openingHook: episode.openingHook,
-            cliffhanger: episode.cliffhangerHook,
             narrationVoiceId: 'DaniangzhuVoice01',
             workflowType: 'story_rewrite',
             status: 'draft',
@@ -251,8 +249,6 @@ app.post('/:id/smart-split', async (c) => {
             renderMode,
             pacingMode,
             dialogueMode: 'narration_only',
-            openingHook: episode.openingHook,
-            cliffhanger: episode.cliffhangerHook,
             narrationVoiceId: 'DaniangzhuVoice01',
             workflowType: 'story_rewrite',
             status: 'draft',
@@ -274,8 +270,6 @@ app.post('/:id/smart-split', async (c) => {
           duration: row.duration,
           description: row.description,
           content_preview: buildContentPreview(row.content || ''),
-          opening_hook: episode.openingHook,
-          cliffhanger_hook: episode.cliffhangerHook,
           summary: episode.summary,
           covered_beat_ids: episode.coveredBeatIds,
         }
@@ -391,8 +385,6 @@ app.post('/:id/import-script', async (c) => {
       title: body.title || '导入集',
       content: scriptContent,
       summary: body.description || '',
-      openingHook: '',
-      cliffhangerHook: '',
       estimatedDurationSeconds: 0,
     }]
   }
@@ -416,8 +408,8 @@ app.post('/:id/import-script', async (c) => {
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i]
     let segmentContent = segment.content
-    let openingHook = segment.openingHook
-    let cliffhanger = segment.cliffhangerHook
+    let openingHook = ''
+    let cliffhanger = ''
     let retentionBeats: RetentionStructure | null = null
 
     // 留存优化模式下，对每段做结构化编辑，并提取开头钩子/结尾悬念/留存 beat。
