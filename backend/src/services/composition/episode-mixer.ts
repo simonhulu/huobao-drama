@@ -63,6 +63,19 @@ function getAudioDuration(filePath: string): Promise<number> {
   })
 }
 
+function getVideoDuration(filePath: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        reject(err)
+        return
+      }
+      const stream = metadata.streams.find(s => s.codec_type === 'video')
+      resolve(stream?.duration ? Number(stream.duration) : (metadata.format.duration || 0))
+    })
+  })
+}
+
 async function buildConcatVideo(shots: Shot[], outputPath: string): Promise<void> {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true })
 
@@ -460,8 +473,32 @@ export async function mixEpisode(
 
   logTaskStart('EpisodeMixer', 'mix-episode', { episodeId, shots: storyboards.length })
 
+  const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+
   const shots: Shot[] = []
   let totalDuration = 0
+
+  async function prependVideo(url: string | null | undefined) {
+    if (!url) return
+    const abs = toAbsPath(url)
+    if (!fs.existsSync(abs)) return
+    const duration = await getVideoDuration(abs)
+    shots.push({
+      storyboardId: 0,
+      videoPath: url,
+      narrationPath: null,
+      narrationDuration: 0,
+      videoDuration: duration,
+      bgmPath: null,
+    })
+    totalDuration += duration
+  }
+
+  if (episode) {
+    await prependVideo(episode.introVideoUrl)
+    await prependVideo(episode.recapVideoUrl)
+  }
+
   for (const sb of storyboards) {
     if (!sb.composedVideoUrl) {
       throw new Error(`Storyboard ${sb.id} has no composed video`)
