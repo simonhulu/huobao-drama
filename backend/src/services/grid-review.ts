@@ -180,13 +180,17 @@ export async function vlmChatWithImages(
     temperature: 0.3,
     max_tokens: maxTokens,
   }
-  const res = await aiFetch('apimart', `${cfg.baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) return null
-  return extractChatContent(await res.text()) || null
+  try {
+    const res = await aiFetch('apimart', `${cfg.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) return null
+    return extractChatContent(await res.text()) || null
+  } catch {
+    return null
+  }
 }
 
 async function vlmReviewCell(
@@ -221,11 +225,16 @@ async function vlmReviewCell(
     max_tokens: 300,
   }
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const res = await aiFetch('apimart', `${cfg.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify(body),
-    })
+    let res: Response
+    try {
+      res = await aiFetch('apimart', `${cfg.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify(body),
+      })
+    } catch (error: any) {
+      return { verdict: null, error: `vlm unavailable: ${String(error?.message || error).slice(0, 120)}` }
+    }
     if (!res.ok) return { verdict: null, error: `vlm HTTP ${res.status}: ${(await res.text()).slice(0, 120)}` }
     const content = extractChatContent(await res.text())
     const parsed = parseGridReviewJson(content)

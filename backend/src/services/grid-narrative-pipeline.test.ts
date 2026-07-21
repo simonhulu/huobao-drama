@@ -188,6 +188,10 @@ test('narration evidence gate accepts direct events, aftermath traces, and ident
     description: '两份旧档案被手推齐并置，笔尖停在材料交界处。',
     graphic: { type: 'identity_reveal', alias: 'William Livingston', verdict: '身份不符' },
   }), [])
+  assert.deepEqual(findNarrationEvidenceContractIssues({
+    narration: '也可能找不到足够便宜的方式把它运出去。',
+    description: '工人把油桶从空板车搬回仓库，大门外铁轨和栈桥空无车马。',
+  }), [])
 })
 
 test('image updates preserve an existing Grok video binding', () => {

@@ -98,6 +98,7 @@ const GENERIC_PROXY_BROLL_PATTERN = /(?:记者[^。；，,]{0,16}(?:询问|采�
 
 const NARRATION_EVIDENCE_RULES: Array<{
   narration: RegExp
+  excludeNarration?: RegExp
   evidence: RegExp
   issue: string
 }> = [
@@ -113,6 +114,7 @@ const NARRATION_EVIDENCE_RULES: Array<{
   },
   {
     narration: /(?:不太好找|找不到|没找到|难以找到|难找|扑空|下落不明|去向不明)/u,
+    excludeNarration: /(?:找不到|没找到|难以找到|难找)[^。！？]{0,16}(?:方式|办法|方法|途径)/u,
     evidence: /(?:空房|空屋|空无一人|衣柜[^。；，,]{0,10}空|脚印|后门|门[^。；，,]{0,10}(?:晃动|敞开)|热气|余温|遗留|扑空|去向|离开|消失|躲藏|藏匿)/u,
     issue: '追查落空旁白缺少空房、离开痕迹或扑空结果的直接可见证据',
   },
@@ -146,7 +148,9 @@ export function findNarrationEvidenceContractIssues(input: NarrationEvidenceCont
   const narration = String(input.narration || '')
   const description = String(input.description || '')
   const issues = NARRATION_EVIDENCE_RULES
-    .filter((rule) => rule.narration.test(narration) && !rule.evidence.test(description))
+    .filter((rule) => rule.narration.test(narration)
+      && !rule.excludeNarration?.test(narration)
+      && !rule.evidence.test(description))
     .map((rule) => rule.issue)
 
   if (IDENTITY_CONTRADICTION_PATTERN.test(narration)) {
