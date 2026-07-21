@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/adapter-response/v1",
+  "title": "Editorial adapter response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adapterProtocolVersion",
+    "operationId",
+    "operation",
+    "status",
+    "adapter",
+    "capabilities",
+    "artifacts",
+    "telemetry",
+    "warnings",
+    "error"
+  ],
+  "properties": {
+    "adapterProtocolVersion": {"const": 1},
+    "operationId": {"type": "string", "format": "uuid"},
+    "operation": {"enum": ["capabilities", "build-props", "render", "inspect"]},
+    "status": {"enum": ["ok", "error"]},
+    "adapter": {"$ref": "editorial://schema/adapter-capabilities/v1#/$defs/adapterIdentity"},
+    "capabilities": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "editorial://schema/adapter-capabilities/v1"}
+      ]
+    },
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifactReference"}},
+    "telemetry": {"$ref": "#/$defs/telemetry"},
+    "warnings": {"type": "array", "items": {"$ref": "#/$defs/warning"}},
+    "error": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/error"}]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "ok"}}, "required": ["status"]},
+      "then": {"properties": {"error": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "error"}}, "required": ["status"]},
+      "then": {"properties": {"error": {"$ref": "#/$defs/error"}}}
+    },
+    {
+      "if": {
+        "properties": {"operation": {"const": "capabilities"}, "status": {"const": "ok"}},
+        "required": ["operation", "status"]
+      },
+      "then": {"properties": {"capabilities": {"$ref": "editorial://schema/adapter-capabilities/v1"}}},
+      "else": {"properties": {"capabilities": {"type": "null"}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "absolutePath": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/"},
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "path", "sha256", "schemaId"],
+      "properties": {
+        "type": {
+          "enum": [
+            "remotion-props",
+            "build-telemetry",
+            "media",
+            "render-manifest",
+            "render-telemetry",
+            "inspect-report",
+            "layout-telemetry"
+          ]
+        },
+        "path": {"$ref": "#/$defs/absolutePath"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "schemaId": {"type": "string", "minLength": 1, "maxLength": 240}
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifactReference"}}
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "blocking"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "blocking": {"type": "boolean"}
+      }
+    },
+    "errorDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaId": {"type": "string", "maxLength": 240},
+        "instancePath": {"type": "string", "maxLength": 1000},
+        "expected": {"type": "string", "maxLength": 2000},
+        "actual": {"type": "string", "maxLength": 2000},
+        "artifactPath": {"$ref": "#/$defs/absolutePath"},
+        "operationId": {"type": "string", "format": "uuid"},
+        "deadline": {"type": "string", "format": "date-time"},
+        "signal": {"type": "string", "maxLength": 40},
+        "diagnosticId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "category", "message", "retryable", "stage"],
+      "properties": {
+        "code": {
+          "enum": [
+            "INTERNAL_ERROR",
+            "INVALID_INPUT",
+            "SCHEMA_VALIDATION_FAILED",
+            "PROTOCOL_VERSION_MISMATCH",
+            "ENVIRONMENT_LOCK_MISMATCH",
+            "TARGET_UNSUPPORTED",
+            "ASSET_FAILURE",
+            "ASSET_HASH_MISMATCH",
+            "ADAPTER_OPERATION_FAILED",
+            "ADAPTER_TIMEOUT",
+            "ADAPTER_INSPECTION_FAILED",
+            "MALFORMED_OUTPUT",
+            "PROTOCOL_VIOLATION",
+            "CANCELLED"
+          ]
+        },
+        "category": {
+          "enum": [
+            "internal",
+            "invalid_input",
+            "protocol_mismatch",
+            "asset_failure",
+            "adapter_failure",
+            "inspection_failure",
+            "protocol_failure",
+            "cancelled"
+          ]
+        },
+        "message": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "retryable": {"type": "boolean"},
+        "stage": {
+          "enum": ["ADAPTER_READY", "PROPS_BUILT", "RENDERED", "INSPECTED"]
+        },
+        "details": {"$ref": "#/$defs/errorDetails"}
+      }
+    }
+  }
+}

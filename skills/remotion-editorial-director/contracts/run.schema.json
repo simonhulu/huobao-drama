@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/run/v1",
+  "title": "Editorial run index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "operation",
+    "status",
+    "currentStage",
+    "stageAttempts",
+    "artifacts",
+    "implementationVersions",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/run/v1"},
+    "runId": {"type": "string", "pattern": "^run-[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "supersedesRunId": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^run-[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"}
+      ]
+    },
+    "operation": {"enum": ["analyze-reference", "plan-edit", "render-recipe", "produce"]},
+    "status": {"enum": ["created", "running", "awaiting_agent", "failed", "cancelled", "complete"]},
+    "currentStage": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+    "stageAttempts": {"type": "array", "items": {"$ref": "#/$defs/stageAttempt"}},
+    "artifacts": {"$ref": "#/$defs/artifactMap"},
+    "implementationVersions": {"$ref": "#/$defs/versionMap"},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "updatedAt": {"type": "string", "format": "date-time"},
+    "failure": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/failure"}]}
+  },
+  "$defs": {
+    "artifactMap": {
+      "type": "object",
+      "x-editorial-map": true,
+      "additionalProperties": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"}
+    },
+    "versionMap": {
+      "type": "object",
+      "x-editorial-map": true,
+      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 240}
+    },
+    "stageAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "attemptId", "status", "startedAt"],
+      "properties": {
+        "stage": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+        "attemptId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "status": {"enum": ["running", "awaiting_agent", "failed", "cancelled", "complete"]},
+        "startedAt": {"type": "string", "format": "date-time"},
+        "endedAt": {"type": "string", "format": "date-time"},
+        "inputHashes": {"$ref": "editorial://schema/common/v1#/$defs/hashMap"},
+        "outputHashes": {"$ref": "editorial://schema/common/v1#/$defs/hashMap"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "category", "stage", "retryable", "diagnosticId"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+        "category": {"type": "string", "minLength": 1, "maxLength": 80},
+        "stage": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+        "retryable": {"type": "boolean"},
+        "diagnosticId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+      }
+    }
+  }
+}

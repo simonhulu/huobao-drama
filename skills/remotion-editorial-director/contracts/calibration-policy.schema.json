@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/calibration-policy/v1",
+  "title": "Editorial calibration policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "policyVersion", "sources", "thresholds", "updatedAt"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/calibration-policy/v1"},
+    "policyVersion": {"type": "string", "minLength": 1, "maxLength": 120},
+    "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sourcePolicy"}},
+    "thresholds": {"$ref": "#/$defs/thresholds"},
+    "updatedAt": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "sourcePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId", "evidenceTier", "allowedTechniqueIds", "lockHash"],
+      "properties": {
+        "sourceId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "evidenceTier": {"enum": ["human_gold", "model_reviewed", "machine_only"]},
+        "allowedTechniqueIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/technique-annotations/v1#/$defs/techniqueId"}
+        },
+        "lockHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"}
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimumConfidence", "minimumAgreement", "maximumUnresolvedRate"],
+      "properties": {
+        "minimumConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimumAgreement": {"type": "number", "minimum": 0, "maximum": 1},
+        "maximumUnresolvedRate": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}

@@ -15,6 +15,11 @@ export function frameProgress(frame: number, start: number, end: number) {
   return clamp((frame - start) / (end - start), 0, 1);
 }
 
+/** Zero-based, start-inclusive, end-exclusive visibility semantics. */
+export function isFrameVisible(frame: number, start: number, end: number) {
+  return frame >= start && frame < end;
+}
+
 export function buildTimeline(shots: EditorialShot[], fps = 30): TimelineItem[] {
   let cursor = 0;
   return shots.map((shot, index) => {
@@ -31,13 +36,13 @@ export function buildTimeline(shots: EditorialShot[], fps = 30): TimelineItem[] 
       Math.max(0, requested),
       Math.max(0, Math.floor(shot.durationInFrames * 0.45)),
     );
-    cursor += Math.max(1, Math.round(shot.durationInFrames));
+    cursor += shot.durationInFrames;
     return { shot, startFrame, incomingOffsetFrames };
   });
 }
 
 export function totalDurationInFrames(shots: EditorialShot[]) {
-  return shots.reduce((total, shot) => total + Math.max(1, Math.round(shot.durationInFrames)), 0);
+  return shots.reduce((total, shot) => total + shot.durationInFrames, 0);
 }
 
 const GENERIC_SUBJECTS = new Set(["text", "shape", "layer"]);
@@ -102,6 +107,10 @@ export function validateTimeline(shots: EditorialShot[], durationInFrames: numbe
       }
     }
     (shot.texts ?? []).forEach((cue) => {
+      if (cue.id) {
+        if (seenIds.has(cue.id)) errors.push(`${id || "shot"}: node id ${cue.id} must be unique`);
+        seenIds.add(cue.id);
+      }
       errors.push(...validateCueRange(
         id || "shot",
         "text",
@@ -116,6 +125,10 @@ export function validateTimeline(shots: EditorialShot[], durationInFrames: numbe
       }
     });
     (shot.graphics ?? []).forEach((cue) => {
+      if (cue.id) {
+        if (seenIds.has(cue.id)) errors.push(`${id || "shot"}: node id ${cue.id} must be unique`);
+        seenIds.add(cue.id);
+      }
       errors.push(...validateCueRange(
         id || "shot",
         "graphic",
@@ -127,7 +140,7 @@ export function validateTimeline(shots: EditorialShot[], durationInFrames: numbe
     });
   });
   const total = totalDurationInFrames(shots);
-  if (Math.abs(total - durationInFrames) > 1) {
+  if (total !== durationInFrames) {
     errors.push(`durationInFrames ${durationInFrames} does not match shot total ${total}`);
   }
   return errors;

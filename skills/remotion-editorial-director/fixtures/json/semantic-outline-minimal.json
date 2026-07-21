@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "editorial://schema/semantic-outline/v1",
+  "outlineId": "outline-minimal-001",
+  "units": [
+    {
+      "semanticUnitId": "unit-001",
+      "startSeconds": 0,
+      "endSeconds": 1,
+      "text": "The market reversed its earlier trend.",
+      "narrativeRole": "reversal",
+      "entityIds": ["entity-market"],
+      "claimIds": ["claim-market-reversal"],
+      "emphasis": 0.8,
+      "uncertainty": 0.1,
+      "assetRequirements": ["asset-market-chart"]
+    }
+  ],
+  "entities": [
+    {
+      "entityId": "entity-market",
+      "label": "Market",
+      "kind": "concept"
+    }
+  ],
+  "claims": [
+    {
+      "claimId": "claim-market-reversal",
+      "text": "The market reversed its earlier trend.",
+      "sourceNote": "Locked narration sentence 1.",
+      "evidenceClaimIds": ["evidence-market-reversal"]
+    }
+  ],
+  "metrics": []
+}

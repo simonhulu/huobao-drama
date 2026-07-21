@@ -30,8 +30,12 @@ export type TextEntry =
   | "type_on"
   | "counter";
 
+export type EditorialCoordinateMode = "normalized" | "legacy";
+
 export type EditorialAsset = {
   src: string;
+  /** Inventory identity carried through production props and telemetry. */
+  assetId?: string;
   kind?: "image" | "video";
   fit?: "cover" | "contain";
   position?: string;
@@ -53,8 +57,10 @@ export type EditorialTransition = {
 };
 
 export type EditorialTextCue = {
+  id?: string;
   type?: "text" | "counter";
   subject: string;
+  subjectId?: string;
   text?: string;
   startFrame: number;
   endFrame: number;
@@ -71,6 +77,7 @@ export type EditorialTextCue = {
   prefix?: string;
   suffix?: string;
   /** Required by the validator for counter cues; keeps metrics auditable. */
+  metricId?: string;
   unit?: string;
   period?: string;
   from?: number;
@@ -80,8 +87,10 @@ export type EditorialTextCue = {
 };
 
 export type EditorialGraphicCue = {
+  id?: string;
   kind: "underline" | "bar" | "globe" | "grid" | "monitor" | "divider" | "badge";
   subject: string;
+  subjectId?: string;
   startFrame: number;
   endFrame: number;
   x?: number;
@@ -127,8 +136,26 @@ export type MagnatesEditorialRecipe = MagnatesEditorialTimeline & {
 };
 
 export type MagnatesEditorialProps = MagnatesEditorialTimeline & {
-  schemaVersion?: 1 | "magnates-remotion-recipe-v1";
-  recipeSchemaVersion?: "magnates-remotion-recipe-v1";
+  schemaVersion: 2;
+  recipeSchemaVersion: "magnates-remotion-recipe-v2";
+  kind?: "magnates-editorial-recipe-props";
+  compositionId?: "MagnatesEditorial";
+  visualMode?: "magnates-editorial";
+  width: number;
+  height: number;
+  logicalWidth: number;
+  logicalHeight: number;
+  targetProfileId: "youtube-720p" | "youtube-1080p";
+  title?: string;
+  audioUrl?: string | null;
+  audioAssetId?: string | null;
+};
+
+export type MagnatesEditorialPreviewProps = {
+  durationInFrames?: number;
+  fps?: number;
+  title?: string;
+  shots?: EditorialShot[];
   audioUrl?: string | null;
 };
 

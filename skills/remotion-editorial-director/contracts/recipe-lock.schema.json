@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/recipe-lock/v1",
+  "title": "Editorial recipe lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "lockId",
+    "recipeSchemaVersion",
+    "payloadPath",
+    "payloadHash",
+    "authoringResultHash",
+    "evidenceHashes",
+    "validationReportHash",
+    "authoringIdentity",
+    "supersedes",
+    "reason",
+    "lockedAt"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/recipe-lock/v1"},
+    "lockId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "recipeSchemaVersion": {"const": "magnates-remotion-recipe-v2"},
+    "payloadPath": {"$ref": "editorial://schema/common/v1#/$defs/absolutePath"},
+    "payloadHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "authoringResultHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "evidenceHashes": {"$ref": "editorial://schema/common/v1#/$defs/hashMap"},
+    "validationReportHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "authoringIdentity": {"$ref": "#/$defs/authoringIdentity"},
+    "supersedes": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/supersedes"}
+      ]
+    },
+    "reason": {"enum": ["initial", "migration", "repair", "revision"]},
+    "lockedAt": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "authoringIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "producer"],
+      "properties": {
+        "mode": {"enum": ["agent", "replay", "deterministic", "migration"]},
+        "producer": {"$ref": "editorial://schema/common/v1#/$defs/producer"},
+        "responseHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"}
+      }
+    },
+    "supersedes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lockId", "lockHash"],
+      "properties": {
+        "lockId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "lockHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"}
+      }
+    }
+  }
+}

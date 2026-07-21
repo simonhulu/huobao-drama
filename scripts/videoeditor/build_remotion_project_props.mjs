@@ -11,6 +11,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildMagnatesProps as buildCanonicalMagnatesProps } from './magnates_props_core.mjs'
 
 const root = path.resolve(import.meta.dirname, '../..')
 const args = process.argv.slice(2)
@@ -21,6 +22,7 @@ const MAGNATES_RECIPE_IDS = new Set([
   'magnates-editorial',
   'magnates_editorial',
   'magnates-remotion-recipe-v1',
+  'magnates-remotion-recipe-v2',
 ])
 const MAGNATES_RENDERERS = new Set([
   'remotion-magnates-editorial',
@@ -825,7 +827,7 @@ function writePropsArtifact(outputPath, props) {
   fs.writeFileSync(outputPath, `${JSON.stringify(props, null, 2)}\n`)
 }
 
-function buildMagnatesProps(recipe, snapshot, allAssets, projectId, sourceEpisode, outputPath) {
+function buildLegacyMagnatesProps(recipe, snapshot, allAssets, projectId, sourceEpisode, outputPath) {
   const normalizedRecipe = normalizeMagnatesRecipe(recipe, sourceEpisode.title || snapshot.project?.title || '')
   const audioAsset = allAssets.find((asset) => asset.assetType === 'audio' && asset.status === 'completed' && staticUrl(asset.localPath))
   const audioDurationMs = numberOr(audioAsset?.durationMs, 0)
@@ -856,6 +858,40 @@ function buildMagnatesProps(recipe, snapshot, allAssets, projectId, sourceEpisod
     sourceProjectUpdatedAt: snapshot.project?.updatedAt || null,
     shots: normalizedRecipe.shots,
   }
+  writePropsArtifact(outputPath, props)
+  return props
+}
+
+/**
+ * Compatibility shell dispatch. Canonical v2 recipes go through the pure
+ * production core; v1 remains an explicitly legacy mapper for one release.
+ * The legacy branch is intentionally kept imperative because it fetches the
+ * backend snapshot and writes the historical props artifact.
+ */
+function buildMagnatesProps(recipe, snapshot, allAssets, projectId, sourceEpisode, outputPath) {
+  const schemaVersion = String(recipe?.schemaVersion || recipe?.recipe?.schemaVersion || '')
+  if (schemaVersion !== 'magnates-remotion-recipe-v2') {
+    return buildLegacyMagnatesProps(recipe, snapshot, allAssets, projectId, sourceEpisode, outputPath)
+  }
+  const inventory = {
+    assets: (Array.isArray(allAssets) ? allAssets : []).map((asset) => ({
+      assetId: String(asset?.assetKey || asset?.id || ''),
+      // The pure core receives the staged inventory path, never an API URL.
+      // URL/public-path adaptation belongs to the renderer boundary.
+      stagedPath: String(asset?.localPath || ''),
+      kind: asset?.assetType === 'video' || asset?.assetType === 'stock_video' ? 'video' : undefined,
+      verified: asset?.status === undefined || asset?.status === 'completed' || asset?.verified === true,
+    })).filter((asset) => asset.assetId && asset.stagedPath),
+  }
+  const target = { profileId: 'youtube-720p', width: 1280, height: 720, fps: 30 }
+  const props = buildCanonicalMagnatesProps({
+    recipe,
+    assetInventory: inventory,
+    target,
+    metadata: {
+      sourceEpisodeId: sourceEpisode?.id == null ? undefined : String(sourceEpisode.id),
+    },
+  })
   writePropsArtifact(outputPath, props)
   return props
 }

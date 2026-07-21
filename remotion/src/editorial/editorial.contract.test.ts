@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cameraTransform } from "./camera";
+import { dimensionPx, positionCss, textWidth } from "./coordinates";
 import type { EditorialShot } from "./types";
 import {
   buildTimeline,
@@ -142,4 +143,15 @@ test("camera hold is stable and pan/tilt stays inside crop headroom", () => {
       assert.ok(scale >= 1.045, `${preset} scale ${scale} may reveal an edge`);
     }
   }
+});
+
+test("v2 cue geometry stays normalized in logical design space", () => {
+  assert.equal(positionCss(0.1, 0.08, "normalized"), "10%");
+  assert.equal(positionCss(undefined, 0.08, "normalized"), "8%");
+  assert.equal(dimensionPx(0.5, 280, "x", "normalized"), 640);
+  assert.equal(dimensionPx(0.25, 3, "y", "normalized"), 180);
+  assert.equal(textWidth(0.8, "normalized"), "80%");
+  assert.equal(positionCss(8, 8, "legacy"), "8%" );
+  assert.equal(dimensionPx(360, 280, "x", "legacy"), 360);
+  assert.equal(textWidth(360, "legacy"), 360);
 });

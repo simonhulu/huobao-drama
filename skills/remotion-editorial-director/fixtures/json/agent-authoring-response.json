@@ -1,0 +1,77 @@
+{
+  "schemaVersion": "editorial://schema/agent-response/v1",
+  "responseId": "response-authoring-001",
+  "requestId": "request-authoring-001",
+  "requestHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "runId": "run-fixture-001",
+  "stage": "AUTHORING",
+  "attemptId": "attempt-authoring-001",
+  "status": "ok",
+  "payload": {
+    "authoringResult": {
+      "schemaVersion": "editorial://schema/authoring-result/v1",
+      "recipeCandidate": {
+        "schemaVersion": "magnates-remotion-recipe-v2",
+        "durationInFrames": 30,
+        "fps": 30,
+        "shots": [
+          {
+            "id": "shot-authoring-001",
+            "durationInFrames": 30,
+            "background": {
+              "assetId": "asset-market-chart",
+              "fit": "cover"
+            },
+            "semanticRole": "reversal",
+            "camera": {
+              "preset": "hold"
+            }
+          }
+        ]
+      },
+      "traceByNodeId": {
+        "shot:shot-authoring-001:timing": {
+          "semanticUnitIds": ["unit-001"],
+          "grammarRuleIds": ["reversal-punch"],
+          "evidenceClaimIds": ["evidence-market-reversal"],
+          "assetIds": ["asset-market-chart"],
+          "rationale": "The shot covers the complete timed reversal statement.",
+          "fallback": "hold"
+        },
+        "shot:shot-authoring-001:background": {
+          "semanticUnitIds": ["unit-001"],
+          "grammarRuleIds": ["reversal-punch"],
+          "evidenceClaimIds": ["evidence-market-reversal"],
+          "assetIds": ["asset-market-chart"],
+          "rationale": "The verified market chart directly represents the named subject.",
+          "fallback": "hold"
+        },
+        "shot:shot-authoring-001:camera": {
+          "semanticUnitIds": ["unit-001"],
+          "grammarRuleIds": ["reversal-punch"],
+          "evidenceClaimIds": [],
+          "assetIds": ["asset-market-chart"],
+          "rationale": "A stable hold is the conservative grammar default.",
+          "fallback": "hold"
+        }
+      }
+    }
+  },
+  "modelMetadata": {
+    "provider": "host-codex",
+    "model": "gpt-5.5",
+    "sessionId": "session-fixture-001",
+    "promptTemplateVersion": "authoring-v1",
+    "promptHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "temperature": 0,
+    "seedSupported": false,
+    "rawResponseHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "parserVersion": "1.0.0",
+    "costKnown": false,
+    "usage": {
+      "inputTokens": 100,
+      "outputTokens": 200
+    }
+  },
+  "createdAt": "2026-07-22T10:01:00.000Z"
+}

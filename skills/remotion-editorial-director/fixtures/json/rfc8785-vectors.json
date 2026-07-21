@@ -1,0 +1,43 @@
+[
+  {
+    "name": "object-key-order",
+    "input": {"b": 2, "a": 1},
+    "canonical": "{\"a\":1,\"b\":2}",
+    "sha256": "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+  },
+  {
+    "name": "rfc-numbers-and-literals",
+    "input": {
+      "numbers": [333333333.3333333, 1e+30, 4.5, 0.002, 1e-27],
+      "string": "€$\u000f\nA'B\"\\\"/",
+      "literals": [null, true, false]
+    },
+    "canonical": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA'B\\\"\\\\\\\"/\"}",
+    "sha256": "6d77565c0fe51d7346bd5debb08f2eebbe9bde01eade30b34e2011f360f91b0e"
+  },
+  {
+    "name": "utf16-key-order",
+    "input": {
+      "\r": "Carriage Return",
+      "1": "One",
+      "€": "Euro",
+      "😀": "Emoji",
+      "\u0080": "Control",
+      "ö": "Latin Small Letter O With Diaeresis"
+    },
+    "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\":\"Control\",\"ö\":\"Latin Small Letter O With Diaeresis\",\"€\":\"Euro\",\"😀\":\"Emoji\"}",
+    "sha256": "4af8d6f80809fbd33fd96eb6de709c72ec5d03cd04467675e7cc9f1f83c1313a"
+  },
+  {
+    "name": "negative-zero",
+    "input": {"negativeZero": -0, "positiveZero": 0},
+    "canonical": "{\"negativeZero\":0,\"positiveZero\":0}",
+    "sha256": "b0c2c07db4207dcf5a56bc72cec90fd46bf8c44406ccc432e3a2d67dc39504f1"
+  },
+  {
+    "name": "nested-values",
+    "input": {"z": [3, {"b": "two", "a": "one"}], "a": {"y": false, "x": null}},
+    "canonical": "{\"a\":{\"x\":null,\"y\":false},\"z\":[3,{\"a\":\"one\",\"b\":\"two\"}]}",
+    "sha256": "d7cf3288f81efd92343ed68e646abfbad898f25873d15ee2b5f9e8f92eed05f2"
+  }
+]

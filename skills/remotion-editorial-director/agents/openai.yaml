@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remotion Editorial Director"
+  short_description: "Evidence-backed Remotion editing and production"
+  default_prompt: "Use $remotion-editorial-director to analyze this narration and produce a traceable Remotion edit."

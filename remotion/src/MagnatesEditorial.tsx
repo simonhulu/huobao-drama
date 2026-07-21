@@ -9,7 +9,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { cameraLayerStyle } from "./editorial/camera";
-import { buildTimeline, clamp, totalDurationInFrames, validateTimeline } from "./editorial/timing";
+import { buildTimeline, clamp, isFrameVisible, totalDurationInFrames, validateTimeline } from "./editorial/timing";
 import {
   incomingTransitionStyle,
   isBridgeTransition,
@@ -23,7 +23,11 @@ import type {
   EditorialShot,
   EditorialTextCue,
   MagnatesEditorialProps,
+  MagnatesEditorialPreviewProps,
 } from "./editorial/types";
+import { EditorialTelemetryProvider, InstrumentedLayer } from "./editorial/instrumentation";
+import { dimensionPx, positionCss, textWidth } from "./editorial/coordinates";
+import type { EditorialCoordinateMode } from "./editorial/types";
 
 export type { MagnatesEditorialProps } from "./editorial/types";
 
@@ -34,8 +38,35 @@ const AMBER = "#f2b84b";
 const TEAL = "#67d7c6";
 const FONT = 'Arial, "Helvetica Neue", sans-serif';
 
-function visible(frame: number, start: number, end: number) {
-  return frame >= start - 1 && frame <= end + 1;
+const OBJECT_POSITIONS: Record<string, string> = {
+  center: "center",
+  top: "center top",
+  bottom: "center bottom",
+  left: "left center",
+  right: "right center",
+  top_left: "left top",
+  top_right: "right top",
+  bottom_left: "left bottom",
+  bottom_right: "right bottom",
+};
+
+const CONTROLLED_FILTERS: Record<string, string> = {
+  none: "none",
+  monochrome: "grayscale(1)",
+  warm: "sepia(0.24) saturate(1.18) hue-rotate(-8deg)",
+  cool: "saturate(0.86) hue-rotate(10deg)",
+  high_contrast: "contrast(1.18) saturate(0.94)",
+  soft_blur: "blur(1.5px) saturate(0.9)",
+};
+
+function cssObjectPosition(position: string | undefined) {
+  return position ? (OBJECT_POSITIONS[position] ?? position) : "center";
+}
+
+function cssAssetFilter(filter: string | undefined) {
+  return filter === undefined
+    ? "brightness(0.72) saturate(0.82) contrast(1.04)"
+    : (CONTROLLED_FILTERS[filter] ?? filter);
 }
 
 function assetStyle(asset: EditorialAsset): React.CSSProperties {
@@ -45,8 +76,8 @@ function assetStyle(asset: EditorialAsset): React.CSSProperties {
     width: "106%",
     height: "106%",
     objectFit: asset.fit ?? "cover",
-    objectPosition: asset.position ?? "center",
-    filter: asset.filter ?? "brightness(0.72) saturate(0.82) contrast(1.04)",
+    objectPosition: cssObjectPosition(asset.position),
+    filter: cssAssetFilter(asset.filter),
   };
 }
 
@@ -67,11 +98,11 @@ function EchoPlate({ asset, style }: { asset: EditorialAsset; style: React.CSSPr
   return <Img src={asset.src} style={style} />;
 }
 
-function EditorialText({ cue, frame }: { cue: EditorialTextCue; frame: number }) {
-  if (!visible(frame, cue.startFrame, cue.endFrame)) return null;
+function EditorialText({ cue, frame, coordinateMode }: { cue: EditorialTextCue; frame: number; coordinateMode: EditorialCoordinateMode }) {
+  if (!isFrameVisible(frame, cue.startFrame, cue.endFrame)) return null;
   const style = textCueStyle(cue, frame);
-  const x = cue.x ?? 8;
-  const y = cue.y ?? 72;
+  const x = positionCss(cue.x, coordinateMode === "normalized" ? 0.08 : 8, coordinateMode);
+  const y = positionCss(cue.y, coordinateMode === "normalized" ? 0.72 : 72, coordinateMode);
   const text = cue.entry === "counter" || cue.type === "counter"
     ? counterText(cue, frame)
     : cueText(cue, frame);
@@ -79,11 +110,12 @@ function EditorialText({ cue, frame }: { cue: EditorialTextCue; frame: number })
     <div
       style={{
         position: "absolute",
-        left: typeof x === "number" ? `${x}%` : x,
-        top: typeof y === "number" ? `${y}%` : y,
+        left: x,
+        top: y,
         zIndex: 70,
         pointerEvents: "none",
         ...style,
+        width: textWidth(cue.width, coordinateMode),
       }}
     >
       {cue.label ? (
@@ -105,8 +137,8 @@ function EditorialText({ cue, frame }: { cue: EditorialTextCue; frame: number })
   );
 }
 
-function GraphicCue({ cue, frame }: { cue: EditorialGraphicCue; frame: number }) {
-  if (!visible(frame, cue.startFrame, cue.endFrame)) return null;
+function GraphicCue({ cue, frame, coordinateMode }: { cue: EditorialGraphicCue; frame: number; coordinateMode: EditorialCoordinateMode }) {
+  if (!isFrameVisible(frame, cue.startFrame, cue.endFrame)) return null;
   const p = cueProgress(frame, {
     subject: cue.subject,
     startFrame: cue.startFrame,
@@ -114,10 +146,19 @@ function GraphicCue({ cue, frame }: { cue: EditorialGraphicCue; frame: number })
   });
   const color = cue.color ?? PURPLE;
   const secondaryColor = cue.secondaryColor ?? "rgba(244,240,231,0.5)";
-  const left = `${cue.x ?? 8}%`;
-  const top = `${cue.y ?? 68}%`;
-  const width = cue.width ?? 280;
-  const height = cue.height ?? 3;
+  const left = positionCss(cue.x, coordinateMode === "normalized" ? 0.08 : 8, coordinateMode);
+  const top = positionCss(cue.y, coordinateMode === "normalized" ? 0.68 : 68, coordinateMode);
+  const width = dimensionPx(cue.width, 280, "x", coordinateMode);
+  const defaultHeight = cue.kind === "globe"
+    ? (cue.width === undefined ? 280 : width)
+    : cue.kind === "monitor"
+      ? 170
+      : cue.kind === "badge"
+        ? 34
+        : cue.kind === "divider"
+          ? 240
+          : 3;
+  const height = dimensionPx(cue.height, defaultHeight, "y", coordinateMode);
   const common: React.CSSProperties = {
     position: "absolute",
     left,
@@ -149,7 +190,7 @@ function GraphicCue({ cue, frame }: { cue: EditorialGraphicCue; frame: number })
         style={{
           ...common,
           width: 2,
-          height: cue.height ?? 240,
+          height,
           backgroundColor: color,
           transform: `scaleY(${p})`,
           transformOrigin: "top center",
@@ -183,7 +224,7 @@ function GraphicCue({ cue, frame }: { cue: EditorialGraphicCue; frame: number })
           left,
           top,
           width,
-          height: cue.height ?? 170,
+          height,
           border: `2px solid ${secondaryColor}`,
           background: "rgba(6, 8, 12, 0.45)",
           transform: `translateY(${(1 - p) * 16}px) scale(${0.94 + p * 0.06})`,
@@ -202,7 +243,7 @@ function GraphicCue({ cue, frame }: { cue: EditorialGraphicCue; frame: number })
         style={{
           ...common,
           width,
-          height: cue.height ?? 34,
+          height,
           padding: "8px 12px",
           boxSizing: "border-box",
           color: PAPER,
@@ -221,7 +262,7 @@ function GraphicCue({ cue, frame }: { cue: EditorialGraphicCue; frame: number })
     );
   }
 
-  const size = Math.min(width, cue.height ?? width);
+  const size = Math.min(width, height || width);
   return (
     <div
       style={{
@@ -266,10 +307,11 @@ function BridgeGraphic({ kind, progress, accent, direction = "in" }: { kind: str
   );
 }
 
-function EditorialShot({ shot, incomingOffsetFrames }: { shot: EditorialShot; incomingOffsetFrames: number }) {
+function EditorialShot({ shot, incomingOffsetFrames, frameOffset, coordinateMode }: { shot: EditorialShot; incomingOffsetFrames: number; frameOffset: number; coordinateMode: EditorialCoordinateMode }) {
   const frame = useCurrentFrame();
-  const duration = Math.max(1, shot.durationInFrames);
-  const actualFrame = clamp(frame - incomingOffsetFrames, 0, duration);
+  const duration = shot.durationInFrames;
+  const localFrame = frame - incomingOffsetFrames;
+  const actualFrame = clamp(localFrame, 0, duration - 1);
   const incomingStyle = incomingTransitionStyle(shot.transitionIn, frame, incomingOffsetFrames);
   const outgoingStyle = outgoingTransitionStyle(shot.transitionOut, actualFrame, duration);
   const bridgeFrames = transitionFrames(shot.transitionIn);
@@ -302,15 +344,53 @@ function EditorialShot({ shot, incomingOffsetFrames }: { shot: EditorialShot; in
     <AbsoluteFill style={{ backgroundColor: INK, ...transitionStyle }}>
       <div style={{ position: "absolute", inset: 0, overflow: "hidden", backgroundColor: INK }}>
         <div style={{ position: "absolute", inset: 0, ...cameraStyle }}>
-          <BackgroundPlate asset={shot.background} />
+          <InstrumentedLayer
+            layerId={`shot:${shot.id}:background`}
+            startFrame={0}
+            endFrame={duration + incomingOffsetFrames}
+            frameOffset={frameOffset}
+            assetId={shot.background.assetId}
+            decodeStatus="decoded"
+            style={{ position: "absolute", inset: 0 }}
+          >
+            <BackgroundPlate asset={shot.background} />
+          </InstrumentedLayer>
           {shot.tint ? <AbsoluteFill style={{ backgroundColor: shot.tint }} /> : null}
         </div>
         {incomingDistortionProgress > 0 ? <DistortionEcho asset={shot.background} progress={incomingDistortionProgress} /> : null}
         {outgoingDistortionProgress > 0 ? <DistortionEcho asset={shot.background} progress={outgoingDistortionProgress} /> : null}
         <BridgeGraphic kind={incomingClass} progress={bridgeProgress} accent={shot.transitionIn?.accent ?? PURPLE} />
         <BridgeGraphic kind={outgoingClass} progress={outgoingProgress} accent={shot.transitionOut?.accent ?? shot.transitionIn?.accent ?? PURPLE} direction="out" />
-        {(shot.graphics ?? []).map((cue) => <GraphicCue cue={cue} frame={actualFrame} key={`${shot.id}-${cue.subject}-${cue.startFrame}`} />)}
-        {(shot.texts ?? []).map((cue) => <EditorialText cue={cue} frame={actualFrame} key={`${shot.id}-${cue.subject}-${cue.startFrame}`} />)}
+        {(shot.graphics ?? []).map((cue, cueIndex) => {
+          const cueId = cue.id ?? `${shot.id}:graphic:${cueIndex}`;
+          return (
+            <InstrumentedLayer
+              key={cueId}
+              layerId={`cue:${cueId}:root`}
+              startFrame={incomingOffsetFrames + cue.startFrame}
+              endFrame={incomingOffsetFrames + cue.endFrame}
+              frameOffset={frameOffset}
+              style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+            >
+              <GraphicCue cue={cue} frame={localFrame} coordinateMode={coordinateMode} />
+            </InstrumentedLayer>
+          );
+        })}
+        {(shot.texts ?? []).map((cue, cueIndex) => {
+          const cueId = cue.id ?? `${shot.id}:text:${cueIndex}`;
+          return (
+            <InstrumentedLayer
+              key={cueId}
+              layerId={`cue:${cueId}:root`}
+              startFrame={incomingOffsetFrames + cue.startFrame}
+              endFrame={incomingOffsetFrames + cue.endFrame}
+              frameOffset={frameOffset}
+              style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+            >
+              <EditorialText cue={cue} frame={localFrame} coordinateMode={coordinateMode} />
+            </InstrumentedLayer>
+          );
+        })}
         {shot.sourceLabel ? (
           <div style={{ position: "absolute", left: 42, top: 30, zIndex: 80, color: "rgba(244,240,231,0.64)", fontFamily: FONT, fontSize: 12, letterSpacing: 2.2, textTransform: "uppercase" }}>
             {shot.sourceLabel}
@@ -422,38 +502,94 @@ export const defaultMagnatesEditorialShots: EditorialShot[] = [
   },
 ];
 
-export const MagnatesEditorial: React.FC<MagnatesEditorialProps> = ({ shots, durationInFrames, audioUrl }) => {
-  const { fps } = useVideoConfig();
-  const resolvedShots = shots.length > 0 ? shots : defaultMagnatesEditorialShots;
-  const total = totalDurationInFrames(resolvedShots);
-  const requestedDuration = durationInFrames || total;
-  const validationErrors = validateTimeline(resolvedShots, requestedDuration);
-  if (validationErrors.length > 0) {
+function renderEditorial({ shots, durationInFrames, fps, audioUrl, targetProfileId, coordinateMode }: {
+  shots: EditorialShot[];
+  durationInFrames: number;
+  fps: number;
+  audioUrl?: string | null;
+  targetProfileId: "youtube-720p" | "youtube-1080p";
+  coordinateMode: EditorialCoordinateMode;
+}) {
+  const target = targetProfileId === "youtube-1080p"
+    ? { scale: 1.5 }
+    : { scale: 1 };
+  const total = totalDurationInFrames(shots);
+  const validationErrors = validateTimeline(shots, durationInFrames);
+  if (validationErrors.length > 0 || total !== durationInFrames) {
     throw new Error(`Invalid Magnates editorial recipe:\n${validationErrors.join("\n")}`);
   }
-  const timeline = buildTimeline(resolvedShots, fps);
-  const baseShots = resolvedShots.map((shot, index) => {
-    if (shot.background.src) return shot;
-    const defaults = ["war-map/portrait.png", "war-map/background.png", "grid-ep500/sb1_cell1.png", "grid-ep500/sb1_cell2.png", "cutout-poc/subject.png"];
-    return { ...shot, background: { ...shot.background, src: staticFile(defaults[index % defaults.length]) } };
-  });
-  const effectiveDuration = Math.min(durationInFrames || total, total);
+  const timeline = buildTimeline(shots, fps);
   return (
-    <AbsoluteFill style={{ backgroundColor: INK, overflow: "hidden" }}>
-      {audioUrl ? <Audio src={audioUrl} /> : null}
-      {timeline.map((item, index) => {
-        const shot = baseShots[index];
-        const from = Math.max(0, item.startFrame - item.incomingOffsetFrames);
-        const offset = item.startFrame - from;
-        const duration = Math.min(shot.durationInFrames + offset, Math.max(1, effectiveDuration - from));
-        if (duration <= 0) return null;
-        return (
-          <Sequence key={shot.id} from={from} durationInFrames={duration}>
-            <EditorialShot shot={shot} incomingOffsetFrames={offset} />
-          </Sequence>
-        );
-      })}
-      {resolvedShots.length === 0 ? <AbsoluteFill style={{ backgroundColor: INK }} /> : null}
-    </AbsoluteFill>
+    <EditorialTelemetryProvider>
+      <AbsoluteFill style={{ backgroundColor: INK, overflow: "hidden" }}>
+        {audioUrl ? <Audio src={audioUrl} /> : null}
+        <div style={{ position: "absolute", left: 0, top: 0, width: 1280, height: 720, transform: `scale(${target.scale})`, transformOrigin: "top left", overflow: "hidden" }}>
+          {timeline.map((item) => {
+            const shot = item.shot;
+            const from = Math.max(0, item.startFrame - item.incomingOffsetFrames);
+            const offset = item.startFrame - from;
+            const duration = shot.durationInFrames + offset;
+            return (
+              <Sequence key={shot.id} from={from} durationInFrames={duration}>
+                <EditorialShot shot={shot} incomingOffsetFrames={offset} frameOffset={from} coordinateMode={coordinateMode} />
+              </Sequence>
+            );
+          })}
+        </div>
+      </AbsoluteFill>
+    </EditorialTelemetryProvider>
   );
+}
+
+export const MagnatesEditorial: React.FC<MagnatesEditorialProps> = (props) => {
+  if (props.schemaVersion !== 2 || props.recipeSchemaVersion !== "magnates-remotion-recipe-v2") {
+    throw new Error("MagnatesEditorial production requires canonical magnates-remotion-recipe-v2 props");
+  }
+  if (props.compositionId !== "MagnatesEditorial" || props.kind !== "magnates-editorial-recipe-props" || props.visualMode !== "magnates-editorial") {
+    throw new Error("MagnatesEditorial production props identity is incomplete");
+  }
+  const expected = props.targetProfileId === "youtube-1080p"
+    ? { width: 1920, height: 1080 }
+    : props.targetProfileId === "youtube-720p"
+      ? { width: 1280, height: 720 }
+      : null;
+  if (!expected || props.width !== expected.width || props.height !== expected.height || props.logicalWidth !== 1280 || props.logicalHeight !== 720) {
+    throw new Error("MagnatesEditorial production props target profile does not match its exact dimensions");
+  }
+  if (!Array.isArray(props.shots) || props.shots.length === 0 || !Number.isInteger(props.durationInFrames) || props.durationInFrames < 1) {
+    throw new Error("MagnatesEditorial production props require a non-empty, timed shot list");
+  }
+  for (const shot of props.shots) {
+    if (!shot.background?.src || !shot.background.assetId || /^(?:https?:|data:)/i.test(shot.background.src)) {
+      throw new Error(`MagnatesEditorial shot ${shot.id || "(unknown)"} has no verified staged background asset`);
+    }
+    for (const cue of [...(shot.texts ?? []), ...(shot.graphics ?? [])]) {
+      if (!cue.id || !cue.subjectId) throw new Error(`MagnatesEditorial shot ${shot.id || "(unknown)"} contains an unidentified cue`);
+    }
+  }
+  const { fps } = useVideoConfig();
+  if (fps !== props.fps) throw new Error(`MagnatesEditorial fps ${fps} does not match props fps ${props.fps}`);
+  return renderEditorial({
+    shots: props.shots,
+    durationInFrames: props.durationInFrames,
+    fps: props.fps,
+    audioUrl: props.audioUrl,
+    targetProfileId: props.targetProfileId,
+    coordinateMode: "normalized",
+  });
+};
+
+export const MagnatesEditorialPreview: React.FC<MagnatesEditorialPreviewProps> = ({ shots, durationInFrames, fps = 30, audioUrl }) => {
+  const previewShots = (shots?.length ? shots : defaultMagnatesEditorialShots).map((shot, index) => shot.background.src
+    ? shot
+    : { ...shot, background: { ...shot.background, src: staticFile(["war-map/portrait.png", "war-map/background.png", "grid-ep500/sb1_cell1.png", "grid-ep500/sb1_cell2.png", "cutout-poc/subject.png"][index % 5]) } });
+  const total = totalDurationInFrames(previewShots);
+  return renderEditorial({
+    shots: previewShots,
+    durationInFrames: durationInFrames ?? total,
+    fps,
+    audioUrl,
+    targetProfileId: "youtube-720p",
+    coordinateMode: "legacy",
+  });
 };

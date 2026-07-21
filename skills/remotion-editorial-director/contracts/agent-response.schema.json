@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/agent-response/v1",
+  "title": "Editorial agent response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "responseId",
+    "requestId",
+    "requestHash",
+    "runId",
+    "stage",
+    "attemptId",
+    "status",
+    "payload",
+    "modelMetadata",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/agent-response/v1"},
+    "responseId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "requestId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "requestHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "runId": {"type": "string", "pattern": "^run-[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "stage": {"enum": ["AUTHORING", "REVIEW"]},
+    "attemptId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "status": {"enum": ["ok", "needs_review"]},
+    "payload": {},
+    "modelMetadata": {"$ref": "#/$defs/modelMetadata"},
+    "createdAt": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"stage": {"const": "AUTHORING"}, "status": {"const": "ok"}},
+        "required": ["stage", "status"]
+      },
+      "then": {"properties": {"payload": {"$ref": "#/$defs/authoringSuccess"}}}
+    },
+    {
+      "if": {
+        "properties": {"stage": {"const": "REVIEW"}, "status": {"const": "ok"}},
+        "required": ["stage", "status"]
+      },
+      "then": {"properties": {"payload": {"$ref": "#/$defs/reviewSuccess"}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "needs_review"}}, "required": ["status"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/needsReview"}}}
+    }
+  ],
+  "$defs": {
+    "authoringSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authoringResult"],
+      "properties": {
+        "authoringResult": {"$ref": "editorial://schema/authoring-result/v1"}
+      }
+    },
+    "reviewSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["techniqueAnnotations"],
+      "properties": {
+        "techniqueAnnotations": {"$ref": "editorial://schema/technique-annotations/v1"}
+      }
+    },
+    "needsReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reasonCodes", "summary"],
+      "properties": {
+        "reasonCodes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}
+        },
+        "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "unresolvedNodeIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        }
+      }
+    },
+    "modelMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "model",
+        "sessionId",
+        "promptTemplateVersion",
+        "promptHash",
+        "temperature",
+        "seedSupported",
+        "rawResponseHash",
+        "parserVersion",
+        "costKnown"
+      ],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1, "maxLength": 120},
+        "model": {"type": "string", "minLength": 1, "maxLength": 240},
+        "sessionId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "promptTemplateVersion": {"type": "string", "minLength": 1, "maxLength": 120},
+        "promptHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "seedSupported": {"type": "boolean"},
+        "seed": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "rawResponseHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+        "parserVersion": {"type": "string", "minLength": 1, "maxLength": 120},
+        "costKnown": {"type": "boolean"},
+        "usage": {"$ref": "#/$defs/usage"}
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputTokens", "outputTokens"],
+      "properties": {
+        "inputTokens": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "outputTokens": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    }
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "magnates-remotion-recipe-v2",
+  "durationInFrames": 90,
+  "fps": 30,
+  "title": "Identity-first production fixture",
+  "shots": [
+    {
+      "id": "shot-001",
+      "durationInFrames": 90,
+      "background": {
+        "assetId": "asset-market-chart",
+        "fit": "cover",
+        "position": "center",
+        "filter": "high_contrast"
+      },
+      "semanticRole": "reversal",
+      "camera": {
+        "preset": "push_in",
+        "intensity": 0.35,
+        "focus": {"x": 0.5, "y": 0.45},
+        "startScale": 1,
+        "endScale": 1.08
+      },
+      "transitionIn": {"class": "hard_cut", "frames": 0},
+      "transitionOut": {"class": "dissolve", "frames": 10},
+      "texts": [
+        {
+          "id": "cue-title-001",
+          "type": "text",
+          "subject": "Market reversal",
+          "subjectId": "claim-market-reversal",
+          "text": "Then the evidence reversed the claim",
+          "startFrame": 6,
+          "endFrame": 54,
+          "entry": "fade",
+          "exit": "fade",
+          "x": 0.1,
+          "y": 0.12,
+          "width": 0.8,
+          "align": "center",
+          "fontSize": 64,
+          "weight": 700,
+          "color": "#FFFFFF"
+        },
+        {
+          "id": "cue-counter-001",
+          "type": "counter",
+          "subject": "Market decline",
+          "subjectId": "metric-market-decline",
+          "startFrame": 30,
+          "endFrame": 78,
+          "entry": "counter",
+          "exit": "fade",
+          "metricId": "metric-market-decline",
+          "unit": "%",
+          "period": "2020-2024",
+          "from": 0,
+          "to": 42,
+          "decimals": 0,
+          "suffix": "%",
+          "label": "Decline"
+        }
+      ],
+      "graphics": [
+        {
+          "id": "graphic-divider-001",
+          "kind": "divider",
+          "subject": "Before and after",
+          "subjectId": "claim-market-reversal",
+          "startFrame": 18,
+          "endFrame": 78,
+          "x": 0.5,
+          "y": 0.2,
+          "width": 0.01,
+          "height": 0.6,
+          "color": "#E2E8F0"
+        }
+      ],
+      "tint": "#101820CC",
+      "grain": 0.08,
+      "sourceLabel": "Local fixture"
+    }
+  ]
+}

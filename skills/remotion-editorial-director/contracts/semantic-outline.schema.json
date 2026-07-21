@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/semantic-outline/v1",
+  "title": "Narration semantic outline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "outlineId", "units", "entities", "claims", "metrics"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/semantic-outline/v1"},
+    "outlineId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "units": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/semanticUnit"}},
+    "entities": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
+    "claims": {"type": "array", "items": {"$ref": "#/$defs/claim"}},
+    "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}}
+  },
+  "$defs": {
+    "semanticUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semanticUnitId",
+        "startSeconds",
+        "endSeconds",
+        "text",
+        "narrativeRole",
+        "entityIds",
+        "claimIds",
+        "emphasis",
+        "uncertainty",
+        "assetRequirements"
+      ],
+      "properties": {
+        "semanticUnitId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "startSeconds": {"type": "number", "minimum": 0},
+        "endSeconds": {"type": "number", "exclusiveMinimum": 0},
+        "text": {"type": "string", "minLength": 1, "maxLength": 10000},
+        "narrativeRole": {"enum": ["hook", "establishing", "mechanism", "comparison", "reversal", "crisis", "resolution"]},
+        "entityIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}},
+        "claimIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}},
+        "emphasis": {"type": "number", "minimum": 0, "maximum": 1},
+        "uncertainty": {"type": "number", "minimum": 0, "maximum": 1},
+        "assetRequirements": {"type": "array", "uniqueItems": true, "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}}
+      }
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entityId", "label", "kind"],
+      "properties": {
+        "entityId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 240},
+        "kind": {"enum": ["person", "organization", "place", "product", "event", "concept"]}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimId", "text", "sourceNote", "evidenceClaimIds"],
+      "properties": {
+        "claimId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "sourceNote": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "evidenceClaimIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}}
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metricId", "claimId", "unit", "period", "sourceNote"],
+      "properties": {
+        "metricId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "claimId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "unit": {"type": "string", "minLength": 1, "maxLength": 40},
+        "period": {"type": "string", "minLength": 1, "maxLength": 80},
+        "sourceNote": {"type": "string", "minLength": 1, "maxLength": 2000}
+      }
+    }
+  }
+}

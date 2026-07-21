@@ -1,0 +1,185 @@
+{
+  "registryVersion": 1,
+  "schemas": [
+    {
+      "name": "common",
+      "file": "common.schema.json",
+      "id": "editorial://schema/common/v1",
+      "role": "internal"
+    },
+    {
+      "name": "inputManifest",
+      "file": "input-manifest.schema.json",
+      "id": "editorial://schema/input-manifest/v1",
+      "role": "production"
+    },
+    {
+      "name": "timedTranscript",
+      "file": "timed-transcript.schema.json",
+      "id": "editorial://schema/timed-transcript/v1",
+      "role": "production"
+    },
+    {
+      "name": "run",
+      "file": "run.schema.json",
+      "id": "editorial://schema/run/v1",
+      "role": "production"
+    },
+    {
+      "name": "semanticOutline",
+      "file": "semantic-outline.schema.json",
+      "id": "editorial://schema/semantic-outline/v1",
+      "role": "production"
+    },
+    {
+      "name": "agentRequest",
+      "file": "agent-request.schema.json",
+      "id": "editorial://schema/agent-request/v1",
+      "role": "production"
+    },
+    {
+      "name": "agentResponse",
+      "file": "agent-response.schema.json",
+      "id": "editorial://schema/agent-response/v1",
+      "role": "production"
+    },
+    {
+      "name": "authoringResult",
+      "file": "authoring-result.schema.json",
+      "id": "editorial://schema/authoring-result/v1",
+      "role": "production"
+    },
+    {
+      "name": "corpusEvidence",
+      "file": "corpus-evidence.schema.json",
+      "id": "editorial://schema/corpus-evidence/v1",
+      "role": "production"
+    },
+    {
+      "name": "boundarySamples",
+      "file": "boundary-samples.schema.json",
+      "id": "editorial://schema/boundary-samples/v1",
+      "role": "production"
+    },
+    {
+      "name": "evidence",
+      "file": "evidence.schema.json",
+      "id": "editorial://schema/evidence/v1",
+      "role": "production"
+    },
+    {
+      "name": "techniqueAnnotations",
+      "file": "technique-annotations.schema.json",
+      "id": "editorial://schema/technique-annotations/v1",
+      "role": "production"
+    },
+    {
+      "name": "assetInventory",
+      "file": "asset-inventory.schema.json",
+      "id": "editorial://schema/asset-inventory/v1",
+      "role": "production"
+    },
+    {
+      "name": "validationReport",
+      "file": "validation-report.schema.json",
+      "id": "editorial://schema/validation-report/v1",
+      "role": "production"
+    },
+    {
+      "name": "recipeLock",
+      "file": "recipe-lock.schema.json",
+      "id": "editorial://schema/recipe-lock/v1",
+      "role": "production"
+    },
+    {
+      "name": "recipeV1",
+      "file": "magnates-remotion-recipe-v1.schema.json",
+      "id": "https://huobao.local/schemas/magnates-media-recipe-v1.json",
+      "role": "migration-input-only"
+    },
+    {
+      "name": "recipeV2",
+      "file": "magnates-remotion-recipe-v2.schema.json",
+      "id": "editorial://schema/magnates-remotion-recipe/v2",
+      "role": "production"
+    },
+    {
+      "name": "artifactEnvelope",
+      "file": "artifact-envelope.schema.json",
+      "id": "editorial://schema/artifact-envelope/v1",
+      "role": "production"
+    },
+    {
+      "name": "adapterConfig",
+      "file": "adapter-config.schema.json",
+      "id": "editorial://schema/adapter-config/v1",
+      "role": "production"
+    },
+    {
+      "name": "adapterCapabilities",
+      "file": "adapter-capabilities.schema.json",
+      "id": "editorial://schema/adapter-capabilities/v1",
+      "role": "production"
+    },
+    {
+      "name": "adapterRequest",
+      "file": "adapter-request.schema.json",
+      "id": "editorial://schema/adapter-request/v1",
+      "role": "production"
+    },
+    {
+      "name": "adapterResponse",
+      "file": "adapter-response.schema.json",
+      "id": "editorial://schema/adapter-response/v1",
+      "role": "production"
+    },
+    {
+      "name": "rendererEnvironmentLock",
+      "file": "renderer-environment-lock.schema.json",
+      "id": "editorial://schema/renderer-environment-lock/v1",
+      "role": "production"
+    },
+    {
+      "name": "remotionProps",
+      "file": "remotion-props.schema.json",
+      "id": "editorial://schema/remotion-props/v1",
+      "role": "production"
+    },
+    {
+      "name": "renderManifest",
+      "file": "render-manifest.schema.json",
+      "id": "editorial://schema/render-manifest/v1",
+      "role": "production"
+    },
+    {
+      "name": "inspectReport",
+      "file": "inspect-report.schema.json",
+      "id": "editorial://schema/inspect-report/v1",
+      "role": "production"
+    },
+    {
+      "name": "layoutTelemetry",
+      "file": "layout-telemetry.schema.json",
+      "id": "editorial://schema/layout-telemetry/v1",
+      "role": "production"
+    },
+    {
+      "name": "qaReport",
+      "file": "qa-report.schema.json",
+      "id": "editorial://schema/qa-report/v1",
+      "role": "production"
+    },
+    {
+      "name": "calibrationPolicy",
+      "file": "calibration-policy.schema.json",
+      "id": "editorial://schema/calibration-policy/v1",
+      "role": "production"
+    },
+    {
+      "name": "errorCodes",
+      "file": "error-codes.schema.json",
+      "id": "editorial://schema/error-codes/v1",
+      "role": "production"
+    }
+  ]
+}

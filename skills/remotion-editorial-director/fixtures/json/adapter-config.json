@@ -1,0 +1,7 @@
+{
+  "adapterProtocolVersion": 1,
+  "command": ["node", "scripts/videoeditor/remotion_editorial_adapter.mjs"],
+  "workspace": ".",
+  "compositionId": "MagnatesEditorial",
+  "environmentVariables": ["REMOTION_CACHE_DIR"]
+}

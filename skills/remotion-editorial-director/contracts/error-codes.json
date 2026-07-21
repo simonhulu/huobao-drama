@@ -1,0 +1,117 @@
+{
+  "registryVersion": 1,
+  "errors": [
+    {
+      "code": "INTERNAL_ERROR",
+      "category": "internal",
+      "exitCode": 1,
+      "allowedStages": ["ANY"],
+      "defaultRetryable": false,
+      "detailsPolicy": "redacted"
+    },
+    {
+      "code": "INVALID_INPUT",
+      "category": "invalid_input",
+      "exitCode": 2,
+      "allowedStages": ["ANY"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "SCHEMA_VALIDATION_FAILED",
+      "category": "invalid_input",
+      "exitCode": 2,
+      "allowedStages": ["ANY"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "PROTOCOL_VERSION_MISMATCH",
+      "category": "protocol_mismatch",
+      "exitCode": 3,
+      "allowedStages": ["ADAPTER_READY", "PROPS_BUILT", "RENDERED", "INSPECTED"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "ENVIRONMENT_LOCK_MISMATCH",
+      "category": "protocol_mismatch",
+      "exitCode": 3,
+      "allowedStages": ["ADAPTER_READY", "RENDERED"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "TARGET_UNSUPPORTED",
+      "category": "protocol_mismatch",
+      "exitCode": 3,
+      "allowedStages": ["ADAPTER_READY"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "ASSET_FAILURE",
+      "category": "asset_failure",
+      "exitCode": 4,
+      "allowedStages": ["INTAKE_LOCKED", "RECIPE_VALIDATED", "PROPS_BUILT", "RENDERED"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "ASSET_HASH_MISMATCH",
+      "category": "asset_failure",
+      "exitCode": 4,
+      "allowedStages": ["INTAKE_LOCKED", "PROPS_BUILT", "RENDERED", "INSPECTED"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "ADAPTER_OPERATION_FAILED",
+      "category": "adapter_failure",
+      "exitCode": 5,
+      "allowedStages": ["PROPS_BUILT", "RENDERED"],
+      "defaultRetryable": true,
+      "detailsPolicy": "redacted"
+    },
+    {
+      "code": "ADAPTER_TIMEOUT",
+      "category": "adapter_failure",
+      "exitCode": 5,
+      "allowedStages": ["ADAPTER_READY", "PROPS_BUILT", "RENDERED", "INSPECTED"],
+      "defaultRetryable": true,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "ADAPTER_INSPECTION_FAILED",
+      "category": "inspection_failure",
+      "exitCode": 6,
+      "allowedStages": ["INSPECTED"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    },
+    {
+      "code": "MALFORMED_OUTPUT",
+      "category": "protocol_failure",
+      "exitCode": 7,
+      "allowedStages": ["ADAPTER_READY", "PROPS_BUILT", "RENDERED", "INSPECTED"],
+      "defaultRetryable": false,
+      "detailsPolicy": "redacted"
+    },
+    {
+      "code": "PROTOCOL_VIOLATION",
+      "category": "protocol_failure",
+      "exitCode": 7,
+      "allowedStages": ["ADAPTER_READY", "PROPS_BUILT", "RENDERED", "INSPECTED"],
+      "defaultRetryable": false,
+      "detailsPolicy": "redacted"
+    },
+    {
+      "code": "CANCELLED",
+      "category": "cancelled",
+      "exitCode": 130,
+      "allowedStages": ["ANY"],
+      "defaultRetryable": false,
+      "detailsPolicy": "user_safe"
+    }
+  ]
+}

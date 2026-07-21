@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/adapter-config/v1",
+  "title": "Editorial adapter configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["adapterProtocolVersion", "command", "workspace", "compositionId"],
+  "properties": {
+    "adapterProtocolVersion": {"const": 1},
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+    },
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "not": {"pattern": "^[A-Za-z][A-Za-z0-9+.-]*:"}
+    },
+    "compositionId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "environmentVariables": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 64,
+      "items": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$"}
+    }
+  }
+}

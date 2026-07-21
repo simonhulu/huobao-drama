@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "editorial://schema/artifact-envelope/v1",
+  "runId": "run-fixture-001",
+  "artifactType": "recipe-v2",
+  "createdAt": "2026-07-22T10:00:00.000Z",
+  "producer": {"name": "contract-fixture", "version": "1.0.0"},
+  "inputHashes": {
+    "narration": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "assets": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "payload": {
+    "schemaVersion": "magnates-remotion-recipe-v2",
+    "durationInFrames": 30,
+    "fps": 30,
+    "shots": [
+      {
+        "id": "shot-artifact-001",
+        "durationInFrames": 30,
+        "background": {"assetId": "asset-background-001", "fit": "cover"},
+        "semanticRole": "hook",
+        "camera": {"preset": "hold"}
+      }
+    ]
+  },
+  "contentHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

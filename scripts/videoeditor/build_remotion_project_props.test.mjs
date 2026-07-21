@@ -9,8 +9,24 @@ import test from 'node:test'
 
 const root = path.resolve(import.meta.dirname, '../..')
 const builder = path.join(root, 'scripts/videoeditor/build_remotion_project_props.mjs')
-const imagePath = 'static/images/20dc6b9f-e26e-4b1e-9013-5cfcefe063ce.png'
-const audioPath = 'static/audio/5d40dcc1-6ab7-4301-9029-9c7913e8a87a.m4a'
+const fixtureRoot = path.join(root, 'data', 'temp')
+fs.mkdirSync(fixtureRoot, { recursive: true })
+const fixtureDir = fs.mkdtempSync(path.join(fixtureRoot, 'videoeditor-props-fixture-'))
+const imagePath = path.relative(root, path.join(fixtureDir, 'fixture.png'))
+const audioPath = path.relative(root, path.join(fixtureDir, 'fixture.m4a'))
+
+// Keep the contract tests independent of generated project media. The props
+// builder only needs deterministic local files at this layer; media decode is
+// owned by the later adapter/media-QA stage.
+fs.writeFileSync(
+  path.join(fixtureDir, 'fixture.png'),
+  Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+)
+fs.writeFileSync(path.join(fixtureDir, 'fixture.m4a'), Buffer.from('portable-audio-fixture'))
+
+test.after(() => {
+  fs.rmSync(fixtureDir, { recursive: true, force: true })
+})
 
 function snapshotFor(shots, metadata = null) {
   return {
@@ -163,7 +179,7 @@ test('explicit Magnates recipe builds typed props with real asset URLs', async (
   assert.equal(result.props.kind, 'magnates-editorial-recipe-props')
   assert.equal(result.props.durationInFrames, 60)
   assert.equal(result.props.shots.length, 2)
-  assert.match(result.props.shots[0].background.src, /127\.0\.0\.1:\d+\/static\/images\//)
+  assert.match(result.props.shots[0].background.src, /127\.0\.0\.1:\d+\/temp\/videoeditor-props-fixture-/)
   assert.equal(result.props.shots[0].camera.preset, 'push_in')
   assert.equal(result.props.shots[0].transitionIn.class, 'matte_transition')
   assert.equal(result.props.shots[0].texts[0].entry, 'type_on')

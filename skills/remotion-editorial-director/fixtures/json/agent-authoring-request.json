@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "editorial://schema/agent-request/v1",
+  "requestId": "request-authoring-001",
+  "runId": "run-fixture-001",
+  "stage": "AUTHORING",
+  "attemptId": "attempt-authoring-001",
+  "createdAt": "2026-07-22T10:00:00.000Z",
+  "inputHashes": {
+    "semanticOutline": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "assetInventory": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "payload": {
+    "semanticOutline": {
+      "artifactType": "semantic-outline",
+      "path": "/tmp/editorial-run/semantic-outline.json",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schemaId": "editorial://schema/semantic-outline/v1"
+    },
+    "assetInventory": {
+      "artifactType": "asset-inventory",
+      "path": "/tmp/editorial-run/asset-inventory.json",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "schemaId": "editorial://schema/asset-inventory/v1"
+    },
+    "evidence": {
+      "artifactType": "evidence",
+      "path": "/tmp/editorial-run/evidence.json",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "schemaId": "editorial://schema/evidence/v1"
+    },
+    "grammarRuleIds": ["reversal-punch"],
+    "target": {
+      "profileId": "youtube-1080p",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/validation-report/v1",
+  "title": "Editorial recipe validation report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "recipeSchemaVersion",
+    "recipeHash",
+    "authoringResultHash",
+    "valid",
+    "checks",
+    "validatedAt",
+    "validator"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/validation-report/v1"},
+    "recipeSchemaVersion": {"const": "magnates-remotion-recipe-v2"},
+    "recipeHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "authoringResultHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "valid": {"type": "boolean"},
+    "checks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/check"}},
+    "validatedAt": {"type": "string", "format": "date-time"},
+    "validator": {"$ref": "editorial://schema/common/v1#/$defs/producer"}
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkId", "status", "severity", "instancePath", "message"],
+      "properties": {
+        "checkId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "status": {"enum": ["pass", "fail"]},
+        "severity": {"enum": ["error", "warning"]},
+        "instancePath": {"type": "string", "maxLength": 1000},
+        "message": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "expected": {"type": "string", "maxLength": 2000},
+        "observed": {"type": "string", "maxLength": 2000}
+      }
+    }
+  }
+}

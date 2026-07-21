@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/agent-request/v1",
+  "title": "Editorial agent request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "runId",
+    "stage",
+    "attemptId",
+    "createdAt",
+    "inputHashes",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/agent-request/v1"},
+    "requestId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "runId": {"type": "string", "pattern": "^run-[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "stage": {"enum": ["AUTHORING", "REVIEW"]},
+    "attemptId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "inputHashes": {"$ref": "editorial://schema/common/v1#/$defs/hashMap"},
+    "payload": {}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"stage": {"const": "AUTHORING"}}, "required": ["stage"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/authoringPayload"}}}
+    },
+    {
+      "if": {"properties": {"stage": {"const": "REVIEW"}}, "required": ["stage"]},
+      "then": {"properties": {"payload": {"$ref": "#/$defs/reviewPayload"}}}
+    }
+  ],
+  "$defs": {
+    "authoringPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticOutline", "assetInventory", "grammarRuleIds", "target"],
+      "properties": {
+        "semanticOutline": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"},
+        "assetInventory": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"},
+        "evidence": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"},
+        "grammarRuleIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "target": {"$ref": "editorial://schema/common/v1#/$defs/targetProfile"}
+      }
+    },
+    "reviewPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["corpusEvidence", "boundarySamples", "semanticOutline", "techniqueIds"],
+      "properties": {
+        "corpusEvidence": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"},
+        "boundarySamples": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"},
+        "semanticOutline": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"},
+        "techniqueIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/technique-annotations/v1#/$defs/techniqueId"}
+        }
+      }
+    }
+  }
+}
