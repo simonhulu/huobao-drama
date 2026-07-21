@@ -148,6 +148,12 @@ export function scheduleExtractAfterRewrite(dramaId: number, episodeId: number) 
 }
 
 export function scheduleVoiceAssignAfterExtract(dramaId: number, episodeId: number): CreationTask | null {
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  // narration_only 模式下只有解说配音，没有角色原声对白，不需要分配角色音色。
+  if (ep?.dialogueMode === 'narration_only') {
+    return null
+  }
+
   // 如果 drama 下所有非删除角色都已分配音色，则跳过本次调度
   const chars = db.select().from(schema.characters)
     .where(eq(schema.characters.dramaId, dramaId)).all()
@@ -202,6 +208,18 @@ export function resetDramaEpisodes(dramaId: number) {
     .set({ totalEpisodes: 0, totalDuration: 0, updatedAt: now() })
     .where(eq(schema.dramas.id, dramaId))
     .run()
+}
+
+export function scheduleIntroComposeForEpisode(dramaId: number, episodeId: number): CreationTask {
+  return createTask({
+    type: 'intro.compose',
+    dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    priority: AUTO_STRUCTURE_TASK_PRIORITY,
+    payload: { episode_id: episodeId },
+  })
 }
 
 export function scheduleBreakdownAndNarrationForEpisode(dramaId: number, episodeId: number) {
@@ -264,7 +282,10 @@ export function scheduleBreakdownAndNarrationForEpisode(dramaId: number, episode
     addTaskDependency(narrator.id, splitter.id)
   }
 
-  return { breaker, splitter, narrator }
+  const intro = scheduleIntroComposeForEpisode(dramaId, episodeId)
+  addTaskDependency(intro.id, narrator?.id ?? splitter.id)
+
+  return { breaker, splitter, narrator, intro }
 }
 
 export function scheduleHookDesignAndIntroRecap(dramaId: number, episodeId: number) {
@@ -329,6 +350,18 @@ export function scheduleDirectScriptPipeline(dramaId: number, episodeId: number)
   const dialogueMode = ep?.dialogueMode || 'narration_only'
   const retentionInstruction = formatRetentionInstruction(ep)
 
+  // direct_script 先预生成整集 TTS 并拿到句级时间戳，拆镜时按真实音频时长设定 duration
+  const preTTS = createTask({
+    type: 'tts.pre_generate',
+    dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    priority: AUTO_STRUCTURE_TASK_PRIORITY,
+    idempotencyKey: `tts.pre_generate:direct_script:${dramaId}:${episodeId}`,
+    payload: { episode_id: episodeId, drama_id: dramaId },
+  })
+
   const breaker = createTask({
     type: 'agent.run',
     dramaId,
@@ -347,8 +380,13 @@ export function scheduleDirectScriptPipeline(dramaId: number, episodeId: number)
     },
   })
 
+  addTaskDependency(breaker.id, preTTS.id)
+
   // direct_script 的原文就是最终 TTS 内容；这里绝不创建 narrator 改写任务。
-  return { breaker, narrator: null }
+  const intro = scheduleIntroComposeForEpisode(dramaId, episodeId)
+  addTaskDependency(intro.id, breaker.id)
+
+  return { preTTS, breaker, narrator: null, intro }
 }
 
 export function scheduleStoryboardBreakerForDirectScript(dramaId: number, episodeId: number) {

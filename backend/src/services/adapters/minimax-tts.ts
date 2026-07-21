@@ -65,7 +65,6 @@ export class MiniMaxTTSAdapter implements TTSProviderAdapter {
         speed: params.speed ?? 1,
         vol: 1,
         pitch: 0,
-        emotion: params.emotion || 'happy',
       },
       audio_setting: {
         sample_rate: 32000,
@@ -74,6 +73,12 @@ export class MiniMaxTTSAdapter implements TTSProviderAdapter {
         channel: 1,
       },
       subtitle_enable: params.subtitleEnable ?? false,
+    }
+
+    // MiniMax can infer emotion from the text. Forcing "happy" here makes
+    // suspense, grief, and historical narration sound tonally wrong.
+    if (params.emotion) {
+      body.voice_setting.emotion = params.emotion
     }
 
     if (body.subtitle_enable) {

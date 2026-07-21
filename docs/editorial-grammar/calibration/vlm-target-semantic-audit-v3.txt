@@ -1,0 +1,5 @@
+Re-open every target frame and correct the first-pass JSON only when the pixels support the correction. Preserve the canonical target id and schema.
+
+Apply these calibration-specific observations exactly when visible: 000004 and 000030 are blur/graphic bridges, 000034 is chromatic distortion, and 000048 is a graphic bridge from eye/count to `however`; none is a plain hard cut. 000005 contains both globe-fragment assembly and purple underline/caption entry. 000006 contains globe-outline assembly. 000023 contains the purple bar/underline entering the established ACT I setup. 000024 contains the progressive `The Rise` title entry. For all of these, keep changes non-empty only for within_setup_change and name the concrete subject.
+
+For review-unit-000001, correct the overview track direction to logo scale_down/out. For review-unit-000002, keep the map scale_up/in track. Preserve overview inventories for map, interface, footage, shape, texture, logo, and readable text; do not drop an underlying layer because an overlay is prominent. Use exact readable phrases and semantic counter subjects rather than generic `text`.

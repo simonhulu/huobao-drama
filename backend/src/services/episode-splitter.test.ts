@@ -16,6 +16,8 @@ const {
   materializeEpisodeContents,
   splitStoryIntoEpisodes,
   buildEpisodeSplitMetadata,
+  estimateSourceDurationSeconds,
+  selectSmartSplitDurationPreset,
 } = await import('./episode-splitter.js')
 
 const originalFetch = global.fetch
@@ -167,18 +169,16 @@ test('splitStoryIntoEpisodes uses two deepseek-v4-flash tool calls and materiali
   assert.equal(requestBodies[1].tools[0].function.parameters.properties.episodes.items.properties.covered_beat_ids.minItems, undefined)
 
   assert.equal(result.plotProgressionChain.length, 3)
-  assert.equal(result.episodes.length, 2)
+  // 原文总长约 150 字，按 4.5 字/秒估算约 33 秒，在 micro_30_60（30-60s）范围内。
+  // 新算法会优先撑满上限，因此会把 LLM 返回的两组合并为一集。
+  assert.equal(result.episodes.length, 1)
   assert.equal(
     result.episodes[0].content,
-    '林晚在父亲葬礼上收到一把旧钥匙，却没人告诉她钥匙开什么。她回到空了十年的老宅，在阁楼木箱里翻到一封没寄出的信。信里只写着一句话：不要相信顾承。',
+    '林晚在父亲葬礼上收到一把旧钥匙，却没人告诉她钥匙开什么。她回到空了十年的老宅，在阁楼木箱里翻到一封没寄出的信。信里只写着一句话：不要相信顾承。\n\n当晚顾承突然出现，说父亲临终前把公司交给了他。林晚强装镇定，把钥匙藏进掌心。可她刚转身，就在顾承袖口看见了和木箱上一样的火漆印。',
   )
-  assert.equal(
-    result.episodes[1].content,
-    '当晚顾承突然出现，说父亲临终前把公司交给了他。林晚强装镇定，把钥匙藏进掌心。可她刚转身，就在顾承袖口看见了和木箱上一样的火漆印。',
-  )
-  assert.deepEqual(result.episodes[0].coveredBeatIds, ['beat_1', 'beat_2'])
+  assert.deepEqual(result.episodes[0].coveredBeatIds, ['beat_1', 'beat_2', 'beat_3'])
   assert.equal((result.episodes[0] as any).openingHook, undefined)
-  assert.equal((result.episodes[1] as any).cliffhangerHook, undefined)
+  assert.equal((result.episodes[0] as any).cliffhangerHook, undefined)
 })
 
 test('materializeEpisodeContents fails fast when model anchors cannot map back to source text', () => {
@@ -270,4 +270,41 @@ test('buildEpisodeSplitMetadata serializes coveredBeatIds and plot chain', () =>
   assert.deepEqual(parsed.coveredBeatIds, ['beat_1', 'beat_2'])
   assert.equal(parsed.plotProgressionChain.length, 1)
   assert.equal(parsed.plotProgressionChain[0].beatId, 'beat_1')
+})
+
+test('auto smart-split preset is bounded by source duration', () => {
+  assert.equal(estimateSourceDurationSeconds('x'.repeat(4.5 * 60)), 60)
+  assert.equal(selectSmartSplitDurationPreset('x'.repeat(4.5 * 60))?.id, 'shorts_1_3')
+  assert.equal(selectSmartSplitDurationPreset('x'.repeat(4.5 * 12 * 60))?.id, 'mid_8_15')
+  assert.equal(selectSmartSplitDurationPreset('x'.repeat(4.5 * 31 * 60)), null)
+})
+
+test('mergeSplitEpisodesByDuration prefers full episodes, splits long ones and protects the last episode', async () => {
+  const { mergeSplitEpisodesByDuration, getSmartSplitDurationPreset } = await import('./episode-splitter.js')
+  const preset = getSmartSplitDurationPreset('mid_8_15')!
+  const mk = (chars: number) => 'x'.repeat(chars)
+
+  // 构造 4 个片段，时长分别约为 300s / 300s / 1200s / 300s（按 4.5 字/秒）。
+  // 期望：前两段合并为 600s；第三段超长被拆成两段约 600s；最后一段因为低于 min，
+  // 会并入拆分后的最后一段，使最终每集都落在 [480, 900] 区间内。
+  const episodes = [
+    { title: 'A', summary: 'A', content: mk(1350), estimatedDurationSeconds: 0, openingAnchor: '', endingAnchor: '', coveredBeatIds: ['a'] },
+    { title: 'B', summary: 'B', content: mk(1350), estimatedDurationSeconds: 0, openingAnchor: '', endingAnchor: '', coveredBeatIds: ['b'] },
+    { title: 'C', summary: 'C', content: mk(5400), estimatedDurationSeconds: 0, openingAnchor: '', endingAnchor: '', coveredBeatIds: ['c'] },
+    { title: 'D', summary: 'D', content: mk(1350), estimatedDurationSeconds: 0, openingAnchor: '', endingAnchor: '', coveredBeatIds: ['d'] },
+  ]
+
+  const result = mergeSplitEpisodesByDuration(episodes, preset, 'story_rewrite')
+
+  // 每集都应在 [480, 900] 秒内
+  for (const ep of result) {
+    const dur = Math.round(ep.content.length / 4.5)
+    assert.ok(dur >= preset.minSeconds, `episode too short: ${dur}s`)
+    assert.ok(dur <= preset.maxSeconds, `episode too long: ${dur}s`)
+  }
+
+  // 总内容长度基本保持不变（合并时插入了少量分隔符 \n\n，会有微小偏差）
+  const totalInput = episodes.reduce((sum, ep) => sum + ep.content.length, 0)
+  const totalOutput = result.reduce((sum, ep) => sum + ep.content.length, 0)
+  assert.ok(totalOutput >= totalInput && totalOutput <= totalInput + result.length * 4)
 })

@@ -26,7 +26,6 @@ function seedEpisode(workflowType: string, overrides: Partial<typeof schema.epis
     title: 'Episode',
     autoMode: true,
     workflowType,
-    pacingMode: workflowType === 'direct_script' ? 'literal' : 'tight',
     createdAt: ts,
     updatedAt: ts,
     ...overrides,

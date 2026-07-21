@@ -3,12 +3,20 @@ import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
-import { createTask, addTaskDependency } from '../services/tasks/store.js'
+import { createTask, addTaskDependency, getTask } from '../services/tasks/store.js'
 import { scheduleAutoStartForEpisode, resetEpisodeStoryboards, scheduleBreakdownAndNarrationForEpisode, scheduleDirectScriptPipeline } from '../services/tasks/auto-pipeline.js'
+import { scheduleCoverGeneration } from '../services/tasks/handlers/cover-generate.js'
+import { confirmPublishWeChatChannels } from '../services/tasks/handlers/publish-wechat-channels.js'
+import { confirmPublishDouyin } from '../services/tasks/handlers/publish-douyin.js'
+import { enhanceCoverPrompt } from '../services/cover-prompt-enhance.js'
+import { extractCoverDesign } from '../services/cover-design-extractor.js'
 import { allowsNarratorAgent, getEpisodeVisualStyle, usesOriginalTextForNarration } from '../services/episode-mode.js'
 import { resolveStoryboardNarrationTextForTTS, restoreOriginalTextNarrations } from '../services/narration-generation.js'
 import { logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { parseDialogueForTTS, isIgnorableTTS, toAbsPath, resolveNarratorVoice } from '../services/ffmpeg-compose.js'
+import { normalizeTtsText } from '../utils/tts-text.js'
+import { DEFAULT_NARRATION_VOICE_ID } from '../services/narration-defaults.js'
+import { serializePositioning } from '../services/media-accounts.js'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 
@@ -44,10 +52,14 @@ app.post('/', async (c) => {
     videoConfigId: body.video_config_id ?? null,
     audioConfigId: body.audio_config_id ?? null,
     aspectRatio: body.aspect_ratio ?? null,
+    coverPrompt: body.cover_prompt ?? null,
+    creativeBriefJson: body.creative_brief !== undefined || body.creative_brief_json !== undefined
+      ? serializePositioning(body.creative_brief ?? body.creative_brief_json ?? {})
+      : null,
     renderMode: body.render_mode ?? 'image_story',
     autoMode: auto,
     enableAiRewrite: isTruthy(body.enable_ai_rewrite) || body.enable_ai_rewrite === undefined,
-    narrationVoiceId: body.narration_voice_id ?? 'DaniangzhuVoice01',
+    narrationVoiceId: body.narration_voice_id ?? DEFAULT_NARRATION_VOICE_ID,
     createdAt: ts,
     updatedAt: ts,
   }).run()
@@ -62,6 +74,16 @@ app.post('/', async (c) => {
     autoStarted = true
   }
 
+  let coverTaskId: number | null = null
+  if (ep.coverPrompt?.trim()) {
+    try {
+      const coverTask = scheduleCoverGeneration(ep.id, { prompt: ep.coverPrompt.trim() })
+      coverTaskId = coverTask.id
+    } catch (coverErr: any) {
+      console.error('[POST /episodes] schedule cover generation failed:', coverErr.message)
+    }
+  }
+
   return success(c, {
     id: ep.id,
     drama_id: ep.dramaId,
@@ -74,6 +96,7 @@ app.post('/', async (c) => {
     render_mode: ep.renderMode,
     auto_started: autoStarted,
     initial_task_id: initialTaskId,
+    cover_task_id: coverTaskId,
   })
 })
 
@@ -82,7 +105,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'render_mode', 'auto_mode', 'enable_ai_rewrite', 'narration_voice_id', 'narration_speed', 'pacing_mode', 'dialogue_mode', 'narration_mode', 'subtitle_enabled', 'subtitle_font', 'subtitle_color', 'subtitle_size', 'subtitle_position', 'subtitle_margin', 'subtitle_margin_v', 'subtitle_background_color', 'subtitle_stroke_color', 'subtitle_stroke_width', 'opening_hook', 'cliffhanger_hook', 'recap_script', 'series_hook']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'render_mode', 'auto_mode', 'enable_ai_rewrite', 'narration_voice_id', 'narration_speed', 'dialogue_mode', 'narration_mode', 'subtitle_enabled', 'subtitle_font', 'subtitle_color', 'subtitle_size', 'subtitle_position', 'subtitle_margin', 'subtitle_margin_v', 'subtitle_background_color', 'subtitle_stroke_color', 'subtitle_stroke_width', 'opening_hook', 'cliffhanger_hook', 'recap_script', 'series_hook', 'cover_prompt', 'cover_design', 'creative_brief', 'creative_brief_json']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -91,8 +114,8 @@ app.put('/:id', async (c) => {
 
   // Map snake_case to camelCase for drizzle
   const drizzleUpdates: Record<string, any> = { updatedAt: now() }
-  if ('content' in updates) drizzleUpdates.content = updates.content
-  if ('script_content' in updates) drizzleUpdates.scriptContent = updates.script_content
+  if ('content' in updates) drizzleUpdates.content = typeof updates.content === 'string' ? normalizeTtsText(updates.content) : updates.content
+  if ('script_content' in updates) drizzleUpdates.scriptContent = typeof updates.script_content === 'string' ? normalizeTtsText(updates.script_content) : updates.script_content
   if ('title' in updates) drizzleUpdates.title = updates.title
   if ('description' in updates) drizzleUpdates.description = updates.description
   if ('status' in updates) drizzleUpdates.status = updates.status
@@ -104,7 +127,6 @@ app.put('/:id', async (c) => {
     const speed = Number(updates.narration_speed)
     drizzleUpdates.narrationSpeed = Number.isFinite(speed) && speed >= 0.8 && speed <= 2.5 ? speed : 1.0
   }
-  if ('pacing_mode' in updates) drizzleUpdates.pacingMode = updates.pacing_mode || 'tight'
   if ('dialogue_mode' in updates) drizzleUpdates.dialogueMode = updates.dialogue_mode || 'narration_only'
   if ('narration_mode' in updates) drizzleUpdates.narrationMode = updates.narration_mode || 'rewrite'
   if ('subtitle_enabled' in updates) drizzleUpdates.subtitleEnabled = isTruthy(updates.subtitle_enabled)
@@ -121,8 +143,44 @@ app.put('/:id', async (c) => {
   if ('cliffhanger_hook' in updates) drizzleUpdates.cliffhanger = updates.cliffhanger_hook || null
   if ('recap_script' in updates) drizzleUpdates.recapScript = updates.recap_script || null
   if ('series_hook' in updates) drizzleUpdates.seriesHook = updates.series_hook || null
-
+  if ('creative_brief' in updates || 'creative_brief_json' in updates) {
+    drizzleUpdates.creativeBriefJson = serializePositioning(updates.creative_brief ?? updates.creative_brief_json ?? {})
+  }
   const [epBefore] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if ('cover_prompt' in updates) drizzleUpdates.coverPrompt = updates.cover_prompt || null
+
+  let extractedCoverDesign = null
+  const hasExplicitCoverDesign = 'cover_design' in updates
+  if (hasExplicitCoverDesign) {
+    if (updates.cover_design === null) {
+      drizzleUpdates.coverDesignJson = null
+    } else {
+      extractedCoverDesign = extractCoverDesign(updates.cover_design, {
+        episodeTitle: epBefore?.title,
+        episodeNumber: epBefore?.episodeNumber,
+        fallbackPrompt: updates.cover_prompt || epBefore?.coverPrompt || undefined,
+      })
+      drizzleUpdates.coverDesignJson = extractedCoverDesign
+        ? JSON.stringify(extractedCoverDesign)
+        : (updates.cover_design ? JSON.stringify(updates.cover_design) : null)
+      if (extractedCoverDesign?.ai_prompt?.trim() && !('cover_prompt' in updates)) {
+        drizzleUpdates.coverPrompt = extractedCoverDesign.ai_prompt.trim()
+      }
+    }
+  } else if (!hasExplicitCoverDesign && typeof updates.script_content === 'string') {
+    extractedCoverDesign = extractCoverDesign(updates.script_content, {
+      episodeTitle: epBefore?.title,
+      episodeNumber: epBefore?.episodeNumber,
+      fallbackPrompt: epBefore?.coverPrompt || undefined,
+    })
+    if (extractedCoverDesign) {
+      drizzleUpdates.coverDesignJson = JSON.stringify(extractedCoverDesign)
+      if (extractedCoverDesign.ai_prompt?.trim()) {
+        drizzleUpdates.coverPrompt = extractedCoverDesign.ai_prompt.trim()
+      }
+    }
+  }
+
   await db.update(schema.episodes).set(drizzleUpdates).where(eq(schema.episodes.id, id))
 
   // Changing narration mode invalidates generated audio/composed videos and may restore verbatim text.
@@ -160,10 +218,10 @@ app.put('/:id', async (c) => {
       .where(eq(schema.storyboards.episodeId, id))
   }
 
-  // Changing pacing/dialogue resets storyboards. direct_script reruns only its literal breaker;
+  // Changing dialogue resets storyboards. direct_script reruns only its breaker;
   // story_rewrite may continue breaker -> splitter -> narrator depending on narration_mode.
   let pacingTask: { breaker: { id: number }; splitter?: { id: number } | null; narrator?: { id: number } | null } | null = null
-  if ('pacing_mode' in updates || 'dialogue_mode' in updates) {
+  if ('dialogue_mode' in updates) {
     const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
     if (ep) {
       resetEpisodeStoryboards(id)
@@ -187,6 +245,8 @@ app.put('/:id', async (c) => {
   return success(c, {
     auto_started: autoStarted,
     initial_task_id: initialTaskId,
+    cover_design_saved: !!extractedCoverDesign,
+    cover_design: extractedCoverDesign,
     pacing_regenerated: !!pacingTask,
     pacing_task_ids: pacingTask
       ? { breaker: pacingTask.breaker.id, splitter: pacingTask.splitter?.id ?? null, narrator: pacingTask.narrator?.id ?? null }
@@ -731,6 +791,312 @@ app.post('/bulk-delete', async (c) => {
   const remainingCount = renumberEpisodesAndUpdateDrama(dramaId)
 
   return success(c, { deleted: ids.length, remaining_count: remainingCount })
+})
+
+// POST /episodes/:id/generate-covers — 生成 4:3 与 3:4 两张封面图
+app.post('/:id/generate-covers', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+
+  const coverDesign = typeof body?.cover_design === 'object' && body.cover_design !== null
+    ? body.cover_design as Record<string, unknown>
+    : undefined
+
+  if (coverDesign) {
+    db.update(schema.episodes)
+      .set({ coverDesignJson: JSON.stringify(coverDesign), updatedAt: now() })
+      .where(eq(schema.episodes.id, episodeId))
+      .run()
+  }
+
+  try {
+    const frameType = typeof body?.frame_type === 'string' ? body.frame_type : undefined
+    const task = scheduleCoverGeneration(episodeId, {
+      prompt: typeof body?.prompt === 'string' ? body.prompt : undefined,
+      configId: typeof body?.config_id === 'number' ? body.config_id : undefined,
+      frameType,
+      coverDesign: coverDesign as any,
+    })
+    return success(c, { task_id: task.id, status: task.status })
+  } catch (err: any) {
+    return badRequest(c, err?.message || 'Failed to schedule cover generation')
+  }
+})
+
+// GET /episodes/:id/covers — 获取本集封面生成状态
+app.get('/:id/covers', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+
+  const generations = db.select().from(schema.imageGenerations)
+    .where(eq(schema.imageGenerations.episodeId, episodeId))
+    .all()
+    .filter(g => g.imageType === 'cover' || g.imageType === 'cover_base')
+
+  return success(c, {
+    cover_prompt: ep.coverPrompt,
+    cover_design_json: ep.coverDesignJson ? JSON.parse(ep.coverDesignJson) : null,
+    cover_4x3_url: ep.coverImage4x3Url,
+    cover_3x4_url: ep.coverImage3x4Url,
+    cover_4x3_gen_id: ep.coverImage4x3GenId,
+    cover_3x4_gen_id: ep.coverImage3x4GenId,
+    generations: generations.map(g => ({
+      id: g.id,
+      frame_type: g.frameType,
+      status: g.status,
+      image_url: g.imageUrl,
+      local_path: g.localPath,
+      prompt: g.prompt,
+    })),
+  })
+})
+
+// POST /episodes/:id/enhance-cover-prompt — AI 优化本集封面提示词
+app.post('/:id/enhance-cover-prompt', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+
+  const roughPrompt = typeof body?.prompt === 'string' ? body.prompt : ep.coverPrompt
+  if (!roughPrompt?.trim()) return badRequest(c, 'prompt is required')
+
+  const [drama] = ep.dramaId
+    ? db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+    : [null]
+
+  try {
+    const result = await enhanceCoverPrompt({
+      roughPrompt: roughPrompt.trim(),
+      episodeTitle: ep.title,
+      episodeContent: ep.content || undefined,
+      episodeSynopsis: ep.description || undefined,
+      dramaTitle: drama?.title,
+      dramaStyle: drama?.style || undefined,
+    })
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err?.message || 'Failed to enhance cover prompt')
+  }
+})
+
+// POST /episodes/enhance-cover-prompt — AI 优化创建前的封面提示词
+app.post('/enhance-cover-prompt', async (c) => {
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>))
+  const roughPrompt = typeof body?.prompt === 'string' ? body.prompt : ''
+  if (!roughPrompt.trim()) return badRequest(c, 'prompt is required')
+
+  const dramaId = typeof body?.drama_id === 'number' ? body.drama_id : null
+  const [drama] = dramaId
+    ? db.select().from(schema.dramas).where(eq(schema.dramas.id, dramaId)).all()
+    : [null]
+
+  try {
+    const result = await enhanceCoverPrompt({
+      roughPrompt: roughPrompt.trim(),
+      dramaTitle: drama?.title,
+      dramaStyle: drama?.style || undefined,
+    })
+    return success(c, result)
+  } catch (err: any) {
+    return badRequest(c, err?.message || 'Failed to enhance cover prompt')
+  }
+})
+
+// GET /episodes/:id/publish-records — 获取 episode 的外部平台发布记录
+app.get('/:id/publish-records', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+
+  const rows = db.select().from(schema.episodePublishRecords)
+    .where(eq(schema.episodePublishRecords.episodeId, id))
+    .orderBy(schema.episodePublishRecords.updatedAt)
+    .all()
+  return success(c, toSnakeCaseArray(rows))
+})
+
+// POST /episodes/:id/publish/douyin — 提交到抖音创作者平台
+app.post('/:id/publish/douyin', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({})) as { require_confirm?: boolean; publish?: boolean }
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+  if (!ep.videoUrl) return badRequest(c, 'Episode video is not ready')
+  if (!ep.coverImage4x3Url) return badRequest(c, 'Episode 4:3 cover is not ready')
+  if (!ep.coverImage3x4Url) return badRequest(c, 'Episode 3:4 cover is not ready')
+
+  const platform = 'douyin'
+  const existing = db.select().from(schema.episodePublishRecords)
+    .where(eq(schema.episodePublishRecords.episodeId, id))
+    .all()
+    .find(r => r.platform === platform)
+
+  const existingTask = existing?.taskId ? getTask(existing.taskId) : null
+  if (existing && existingTask && (existingTask.status === 'queued' || existingTask.status === 'running')) {
+    return success(c, { record_id: existing.id, task_id: existing.taskId })
+  }
+
+  const ts = now()
+  let recordId: number
+  if (existing) {
+    db.update(schema.episodePublishRecords)
+      .set({ status: 'pending', errorMessage: null, updatedAt: ts })
+      .where(eq(schema.episodePublishRecords.id, existing.id))
+      .run()
+    recordId = existing.id
+  } else {
+    const res = db.insert(schema.episodePublishRecords).values({
+      episodeId: id,
+      platform,
+      status: 'pending',
+      createdAt: ts,
+      updatedAt: ts,
+    }).run()
+    recordId = Number(res.lastInsertRowid)
+  }
+
+  const payload: Record<string, unknown> = { episode_id: id }
+  if (typeof body.require_confirm === 'boolean') payload.require_confirm = body.require_confirm
+  if (typeof body.publish === 'boolean') payload.publish = body.publish
+
+  const task = createTask({
+    type: 'publish.douyin',
+    dramaId: ep.dramaId,
+    episodeId: id,
+    scopeType: 'episode',
+    scopeId: id,
+    idempotencyKey: `publish.douyin:episode:${id}`,
+    payload,
+    maxAttempts: 2,
+  })
+
+  db.update(schema.episodePublishRecords)
+    .set({ taskId: task.id, updatedAt: now() })
+    .where(eq(schema.episodePublishRecords.id, recordId))
+    .run()
+
+  return success(c, { record_id: recordId, task_id: task.id })
+})
+
+// POST /episodes/:id/publish/douyin/confirm — 人工确认发布
+app.post('/:id/publish/douyin/confirm', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>))
+  const taskId = typeof body?.task_id === 'number' ? body.task_id : null
+  if (!taskId) return badRequest(c, 'task_id is required')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+
+  const record = db.select().from(schema.episodePublishRecords)
+    .where(eq(schema.episodePublishRecords.episodeId, id))
+    .all()
+    .find(r => r.platform === 'douyin')
+
+  if (!record || record.status !== 'awaiting_confirm') {
+    return badRequest(c, '没有等待确认的抖音发布任务')
+  }
+
+  try {
+    confirmPublishDouyin(taskId)
+    return success(c, { confirmed: true, task_id: taskId })
+  } catch (err: any) {
+    return badRequest(c, err?.message || '确认失败')
+  }
+})
+
+// POST /episodes/:id/publish/wechat-channels — 提交到微信视频号草稿箱
+app.post('/:id/publish/wechat-channels', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({})) as { short_title?: string; require_confirm?: boolean }
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+  if (!ep.videoUrl) return badRequest(c, 'Episode video is not ready')
+  if (!ep.coverImage3x4Url) return badRequest(c, 'Episode 3:4 cover is not ready')
+  if (!ep.coverImage4x3Url) return badRequest(c, 'Episode 4:3 cover is not ready')
+
+  const platform = 'wechat_channels'
+  const existing = db.select().from(schema.episodePublishRecords)
+    .where(eq(schema.episodePublishRecords.episodeId, id))
+    .all()
+    .find(r => r.platform === platform)
+
+  const existingTask = existing?.taskId ? getTask(existing.taskId) : null
+  if (existing && existingTask && (existingTask.status === 'queued' || existingTask.status === 'running')) {
+    return success(c, { record_id: existing.id, task_id: existing.taskId })
+  }
+
+  const ts = now()
+  let recordId: number
+  if (existing) {
+    db.update(schema.episodePublishRecords)
+      .set({ status: 'pending', errorMessage: null, updatedAt: ts })
+      .where(eq(schema.episodePublishRecords.id, existing.id))
+      .run()
+    recordId = existing.id
+  } else {
+    const res = db.insert(schema.episodePublishRecords).values({
+      episodeId: id,
+      platform,
+      status: 'pending',
+      createdAt: ts,
+      updatedAt: ts,
+    }).run()
+    recordId = Number(res.lastInsertRowid)
+  }
+
+  const payload: Record<string, unknown> = { episode_id: id }
+  if (body.short_title) payload.short_title = body.short_title
+  if (typeof body.require_confirm === 'boolean') payload.require_confirm = body.require_confirm
+
+  const task = createTask({
+    type: 'publish.wechat_channels',
+    dramaId: ep.dramaId,
+    episodeId: id,
+    scopeType: 'episode',
+    scopeId: id,
+    idempotencyKey: `publish.wechat_channels:episode:${id}`,
+    payload,
+    maxAttempts: 1,
+  })
+
+  db.update(schema.episodePublishRecords)
+    .set({ taskId: task.id, updatedAt: now() })
+    .where(eq(schema.episodePublishRecords.id, recordId))
+    .run()
+
+  return success(c, { record_id: recordId, task_id: task.id })
+})
+
+// POST /episodes/:id/publish/wechat-channels/confirm — 人工确认保存草稿
+app.post('/:id/publish/wechat-channels/confirm', async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>))
+  const taskId = typeof body?.task_id === 'number' ? body.task_id : null
+  if (!taskId) return badRequest(c, 'task_id is required')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+
+  const record = db.select().from(schema.episodePublishRecords)
+    .where(eq(schema.episodePublishRecords.episodeId, id))
+    .all()
+    .find(r => r.platform === 'wechat_channels')
+
+  if (!record || record.status !== 'awaiting_confirm') {
+    return badRequest(c, '没有等待确认的视频号发布任务')
+  }
+
+  try {
+    confirmPublishWeChatChannels(taskId)
+    return success(c, { confirmed: true, task_id: taskId })
+  } catch (err: any) {
+    return badRequest(c, err?.message || '确认失败')
+  }
 })
 
 export default app

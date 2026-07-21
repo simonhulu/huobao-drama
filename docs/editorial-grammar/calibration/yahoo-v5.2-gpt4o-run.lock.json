@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "editorial-vlm-calibration-run-lock-v1",
+  "sourceId": "yahoo",
+  "calibrationId": "yahoo-v5.2-gpt4o-20260721",
+  "runSpecSha256": "44f065900cdf07e40859abbcd557176def98ade2bd0f815c18c8375fccbc94e4",
+  "frozenAt": "2026-07-21T10:27:21.649Z"
+}

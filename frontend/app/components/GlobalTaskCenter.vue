@@ -31,7 +31,7 @@ const {
   startUpdates,
   cancelTaskWithToast,
   retryTaskWithToast,
-} = useTasks({ pollMs: 3000 })
+} = useTasks({ pollMs: 3000, activeOnly: true })
 
 onMounted(() => {
   loadTasks()

@@ -6,6 +6,8 @@ export type ImageErrorCode =
   | 'content_policy_violation'
   | 'bad_request'
   | 'auth_failed'
+  | 'egaki_login_required'
+  | 'egaki_proxy_failed'
   | 'payment_required'
   | 'not_found'
   | 'stale_worker'
@@ -46,19 +48,67 @@ const ERROR_MESSAGES_ZH: Record<ImageErrorCode, string> = {
   content_policy_violation: '图片内容触发平台安全策略，请修改提示词后重试',
   bad_request: '生成参数有误，请检查提示词或配置',
   auth_failed: 'AI 服务认证失败，请检查 API Key',
+  egaki_login_required: 'ChatGPT 登录已失效，请运行 egaki login --provider chatgpt',
+  egaki_proxy_failed: 'ChatGPT 连接失败，请检查代理配置',
   payment_required: 'AI 服务账户余额不足，请充值后继续',
   not_found: '生成任务未找到或服务不可用',
   stale_worker: '任务执行中断，已重新排队',
   unknown_error: '生成出错，正在尝试恢复',
 }
 
+function isEgakiChatGptError(message: string): boolean {
+  const lower = message.toLowerCase()
+  return lower.includes('egaki-chatgpt') || lower.includes('egaki chatgpt') || lower.includes('chatgpt.com')
+}
+
+function isEgakiLoginRequired(message: string): boolean {
+  const lower = message.toLowerCase()
+  return lower.includes('egaki login --provider chatgpt')
+    || lower.includes('missing chatgpt account metadata')
+    || lower.includes('chatgpt account metadata')
+    || lower.includes('chatgpt oauth')
+    || lower.includes('not logged in')
+    || lower.includes('login required')
+    || lower.includes('token expired')
+    || lower.includes('invalid_grant')
+}
+
+function isEgakiProxyFailure(message: string): boolean {
+  const lower = message.toLowerCase()
+  return isEgakiChatGptError(message) && (
+    lower.includes('fetch failed')
+    || lower.includes('connect timeout')
+    || lower.includes('connection timeout')
+    || lower.includes('econnrefused')
+    || lower.includes('econnreset')
+    || lower.includes('etimedout')
+    || lower.includes('enotfound')
+    || lower.includes('socket')
+    || lower.includes('proxy')
+    || lower.includes('undici')
+  )
+}
+
+function isEgakiRateLimited(message: string): boolean {
+  const lower = message.toLowerCase()
+  return isEgakiChatGptError(message) && (
+    lower.includes('429')
+    || lower.includes('rate limit')
+    || lower.includes('too many requests')
+    || lower.includes('too many concurrent')
+    || lower.includes('throttl')
+  )
+}
+
 function isContentPolicyViolation(message: string): boolean {
   const lower = message.toLowerCase()
   return lower.includes('violated our relevant policies')
     || lower.includes('content policy')
+    || lower.includes('safety policy')
     || lower.includes('safety system')
     || lower.includes('content moderation')
     || lower.includes('policy violation')
+    || lower.includes('filtered by')
     || lower.includes('内容政策')
     || lower.includes('内容审核')
     || lower.includes('安全策略')
@@ -76,6 +126,15 @@ export function classifyImageError(error: unknown): ErrorClassification {
   }
 
   if (error instanceof AiProviderError) {
+    if (isEgakiLoginRequired(error.message)) {
+      return { code: 'egaki_login_required', retryable: false, userMessageZh: ERROR_MESSAGES_ZH.egaki_login_required, isProviderError: true }
+    }
+    if (isEgakiRateLimited(error.message)) {
+      return { code: 'rate_limited', retryable: true, userMessageZh: ERROR_MESSAGES_ZH.rate_limited, isProviderError: true, retryAfterSeconds: error.retryAfterSeconds }
+    }
+    if (isEgakiProxyFailure(error.message)) {
+      return { code: 'egaki_proxy_failed', retryable: true, userMessageZh: ERROR_MESSAGES_ZH.egaki_proxy_failed, isProviderError: true }
+    }
     if (error.status === 0 && error.message.toLowerCase().includes('circuit breaker')) {
       return { code: 'circuit_open', retryable: true, userMessageZh: ERROR_MESSAGES_ZH.circuit_open, isProviderError: false }
     }
@@ -92,6 +151,18 @@ export function classifyImageError(error: unknown): ErrorClassification {
 
   const message = error instanceof Error ? error.message : String(error)
   const lower = message.toLowerCase()
+
+  if (isEgakiLoginRequired(message)) {
+    return { code: 'egaki_login_required', retryable: false, userMessageZh: ERROR_MESSAGES_ZH.egaki_login_required, isProviderError: true }
+  }
+
+  if (isEgakiRateLimited(message)) {
+    return { code: 'rate_limited', retryable: true, userMessageZh: ERROR_MESSAGES_ZH.rate_limited, isProviderError: true }
+  }
+
+  if (isEgakiProxyFailure(message)) {
+    return { code: 'egaki_proxy_failed', retryable: true, userMessageZh: ERROR_MESSAGES_ZH.egaki_proxy_failed, isProviderError: true }
+  }
 
   if (lower.includes('circuit_open') || lower.includes('circuit open')) {
     return { code: 'circuit_open', retryable: true, userMessageZh: ERROR_MESSAGES_ZH.circuit_open, isProviderError: false }

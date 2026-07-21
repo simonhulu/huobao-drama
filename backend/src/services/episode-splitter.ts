@@ -160,7 +160,7 @@ export interface SmartSplitInput {
   sourceText: string
   durationPresetId: string
   style?: SmartSplitStyle
-  pacingMode?: string
+  productionMode?: 'direct_script' | 'story_rewrite'
 }
 
 export interface PlotProgressionBeat {
@@ -195,15 +195,44 @@ export interface SmartSplitResult {
 export interface EpisodeSplitMetadata {
   coveredBeatIds: string[]
   plotProgressionChain: PlotProgressionBeat[]
+  openingAnchor?: string
+  endingAnchor?: string
+  intake?: {
+    durationPreset: Pick<SmartSplitDurationPreset, 'id' | 'label' | 'minSeconds' | 'maxSeconds' | 'recommendedSeconds'>
+    sourceDurationSeconds: number
+    estimatedEpisodeCount: number
+  }
+}
+
+export interface EpisodeSplitMetadataOptions {
+  durationPreset?: SmartSplitDurationPreset
+  sourceDurationSeconds?: number
+  estimatedEpisodeCount?: number
 }
 
 export function buildEpisodeSplitMetadata(
-  episode: { coveredBeatIds: string[] },
+  episode: { coveredBeatIds: string[]; openingAnchor?: string; endingAnchor?: string },
   plotChain: PlotProgressionBeat[],
+  options: EpisodeSplitMetadataOptions = {},
 ): string {
   const payload: EpisodeSplitMetadata = {
     coveredBeatIds: episode.coveredBeatIds,
     plotProgressionChain: plotChain,
+    ...(episode.openingAnchor ? { openingAnchor: episode.openingAnchor } : {}),
+    ...(episode.endingAnchor ? { endingAnchor: episode.endingAnchor } : {}),
+  }
+  if (options.durationPreset) {
+    payload.intake = {
+      durationPreset: {
+        id: options.durationPreset.id,
+        label: options.durationPreset.label,
+        minSeconds: options.durationPreset.minSeconds,
+        maxSeconds: options.durationPreset.maxSeconds,
+        recommendedSeconds: options.durationPreset.recommendedSeconds,
+      },
+      sourceDurationSeconds: Math.max(0, Math.round(options.sourceDurationSeconds ?? 0)),
+      estimatedEpisodeCount: Math.max(1, Math.round(options.estimatedEpisodeCount ?? 1)),
+    }
   }
   return JSON.stringify(payload)
 }
@@ -238,6 +267,25 @@ function getSmartSplitUrl() {
 
 export function getSmartSplitDurationPreset(id: string) {
   return SMART_SPLIT_DURATION_PRESETS.find((preset) => preset.id === id) || null
+}
+
+export function estimateSourceDurationSeconds(sourceText: string) {
+  const effectiveChars = sourceText.replace(/\s+/g, '').length
+  return Math.max(1, Math.round(effectiveChars / 4.5))
+}
+
+/**
+ * Select a bounded episode profile when the caller asks the factory to make
+ * the editorial decision from the source length. Platform or account briefs
+ * can still override this with an explicit preset id.
+ */
+export function selectSmartSplitDurationPreset(sourceText: string) {
+  const estimatedSeconds = estimateSourceDurationSeconds(sourceText)
+  if (estimatedSeconds <= 180) return getSmartSplitDurationPreset('shorts_1_3')
+  if (estimatedSeconds <= 480) return getSmartSplitDurationPreset('mid_3_8')
+  if (estimatedSeconds <= 900) return getSmartSplitDurationPreset('mid_8_15')
+  if (estimatedSeconds <= 1800) return getSmartSplitDurationPreset('long_15_30')
+  return null
 }
 
 function isAiMangaDramaMode(preset: SmartSplitDurationPreset, style?: SmartSplitStyle) {
@@ -337,7 +385,8 @@ function buildEpisodeSplitUserPrompt(
   const aiManga = isAiMangaDramaMode(preset, input.style)
   return [
     `剧名：${input.dramaTitle?.trim() || '未命名项目'}`,
-    `目标分集时长：${preset.label}（${preset.minSeconds}-${preset.maxSeconds} 秒，建议每集约 ${preset.recommendedSeconds} 秒）。允许 10 分钟以上的长集，不要硬拆。`,
+    `目标分集时长：${preset.label}（${preset.minSeconds}-${preset.maxSeconds} 秒，建议每集约 ${preset.recommendedSeconds} 秒）。`,
+    `请尽量让每一集都落在 ${preset.minSeconds}-${preset.maxSeconds} 秒区间内，避免一集过长、另一集过短；任何一集都不得低于 ${preset.minSeconds} 秒。`,
     `分集风格：${aiManga ? 'AI 漫剧（高密度、快节奏、以情节和情绪为推进方式）' : '标准短剧（故事保真，保留完整上下文）'}`,
     '已确定的剧情推进链：',
     JSON.stringify(plotProgressionChain, null, 2),
@@ -479,31 +528,181 @@ export function materializeEpisodeContents(
   })
 }
 
-function estimateTextDuration(content: string, pacingMode: string): number {
-  const charsPerSecond = pacingMode === 'extreme' ? 4.5 : pacingMode === 'tight' ? 3.2 : 2.2
-  return Math.max(10, Math.round(content.length / charsPerSecond))
+function estimateTextDuration(content: string, _productionMode?: string): number {
+  // 中文旁白/TTS 实测语速约 4.5 字/秒。
+  // 文稿在导入前已由用户定好节奏，系统不再通过 pacingMode 二次加速/减速。
+  // 精稿导入时可能带有大量对齐空格/换行，必须先剔除空白再估算，否则时长会被放大数倍。
+  const charsPerSecond = 4.5
+  const effectiveChars = (content || '').replace(/\s+/g, '').length
+  return Math.max(10, Math.round(effectiveChars / charsPerSecond))
 }
 
-function mergeSplitEpisodesByDuration(
-  episodes: MaterializedSmartSplitEpisode[],
-  pacingMode: string,
+function mergeGroup(
+  group: MaterializedSmartSplitEpisode[],
   preset: SmartSplitDurationPreset,
+  productionMode?: string,
+): MaterializedSmartSplitEpisode {
+  const first = group[0]
+  const last = group[group.length - 1]
+  const content = group.map((ep) => ep.content).join('\n\n')
+  const summary = group.map((ep) => ep.summary).join('；')
+  const duration = estimateTextDuration(content, productionMode)
+  return {
+    ...first,
+    content,
+    summary,
+    endingAnchor: last.endingAnchor,
+    coveredBeatIds: group.flatMap((ep) => ep.coveredBeatIds),
+    estimatedDurationSeconds: Math.min(preset.maxSeconds, Math.max(preset.minSeconds, duration)),
+  }
+}
+
+function splitLongEpisode(
+  episode: MaterializedSmartSplitEpisode,
+  preset: SmartSplitDurationPreset,
+  productionMode?: string,
+): MaterializedSmartSplitEpisode[] {
+  const duration = estimateTextDuration(episode.content, productionMode)
+  if (duration <= preset.maxSeconds) return [episode]
+
+  const numParts = Math.ceil(duration / preset.maxSeconds)
+  const totalChars = episode.content.length
+  const baseChars = Math.floor(totalChars / numParts)
+  const result: MaterializedSmartSplitEpisode[] = []
+
+  for (let i = 0; i < numParts; i++) {
+    const start = i * baseChars
+    const end = i === numParts - 1 ? totalChars : (i + 1) * baseChars
+    const partContent = episode.content.slice(start, end).trim()
+    if (!partContent) continue
+    result.push({
+      ...episode,
+      content: partContent,
+      estimatedDurationSeconds: Math.min(
+        preset.maxSeconds,
+        Math.max(preset.minSeconds, estimateTextDuration(partContent, productionMode)),
+      ),
+    })
+  }
+
+  return result
+}
+
+function splitContentBySentences(content: string): string[] {
+  return content
+    .replace(/([。！？；\.\!\?\;])/g, '$1\n')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function tryBorrowFromPrevious(
+  prev: MaterializedSmartSplitEpisode,
+  last: MaterializedSmartSplitEpisode,
+  preset: SmartSplitDurationPreset,
+  productionMode?: string,
+  granularity: 'paragraph' | 'sentence' = 'paragraph',
+): MaterializedSmartSplitEpisode[] | null {
+  const delimiter = granularity === 'paragraph' ? '\n\n' : ''
+  const units =
+    granularity === 'paragraph'
+      ? prev.content.split(/\n\n+/)
+      : splitContentBySentences(prev.content)
+  if (units.length <= 1) return null
+
+  let borrowed = ''
+  let remaining = [...units]
+  while (remaining.length > 1) {
+    const moved = remaining.pop()!
+    borrowed = borrowed ? `${moved}${delimiter}${borrowed}` : moved
+    const newLastContent = borrowed ? `${borrowed}${delimiter}${last.content}` : `${borrowed}${last.content}`
+    const newPrevContent = remaining.join(delimiter)
+    const newLastDuration = estimateTextDuration(newLastContent, productionMode)
+    const newPrevDuration = estimateTextDuration(newPrevContent, productionMode)
+    if (newLastDuration >= preset.minSeconds && newPrevDuration >= preset.minSeconds) {
+      const newPrev: MaterializedSmartSplitEpisode = {
+        ...prev,
+        content: newPrevContent,
+        endingAnchor: moved.slice(-120),
+        estimatedDurationSeconds: Math.min(
+          preset.maxSeconds,
+          Math.max(preset.minSeconds, newPrevDuration),
+        ),
+      }
+      const newLast: MaterializedSmartSplitEpisode = {
+        ...last,
+        content: newLastContent,
+        openingAnchor: moved.slice(0, 120),
+        estimatedDurationSeconds: Math.min(
+          preset.maxSeconds,
+          Math.max(preset.minSeconds, newLastDuration),
+        ),
+      }
+      return [newPrev, newLast]
+    }
+  }
+  return null
+}
+
+function protectLastEpisode(
+  episodes: MaterializedSmartSplitEpisode[],
+  preset: SmartSplitDurationPreset,
+  productionMode?: string,
+): MaterializedSmartSplitEpisode[] {
+  if (episodes.length < 2) return episodes
+
+  const last = episodes[episodes.length - 1]
+  let lastDuration = estimateTextDuration(last.content, productionMode)
+  if (lastDuration >= preset.minSeconds) return episodes
+
+  const prev = episodes[episodes.length - 2]
+  const prevDuration = estimateTextDuration(prev.content, productionMode)
+
+  if (prevDuration + lastDuration <= preset.maxSeconds) {
+    // 直接合并到前一集
+    const merged = mergeGroup([prev, last], preset, productionMode)
+    return [...episodes.slice(0, -2), merged]
+  }
+
+  // 无法直接合并：先尝试从上一集末尾借一个段落给最后一集
+  const paragraphResult = tryBorrowFromPrevious(prev, last, preset, productionMode, 'paragraph')
+  if (paragraphResult) {
+    return [...episodes.slice(0, -2), ...paragraphResult]
+  }
+
+  // 段落粒度不够细：降级到句子粒度再试一次
+  const sentenceResult = tryBorrowFromPrevious(prev, last, preset, productionMode, 'sentence')
+  if (sentenceResult) {
+    return [...episodes.slice(0, -2), ...sentenceResult]
+  }
+
+  return episodes
+}
+
+function greedyMergeEpisodes(
+  episodes: MaterializedSmartSplitEpisode[],
+  preset: SmartSplitDurationPreset,
+  productionMode?: string,
 ): MaterializedSmartSplitEpisode[] {
   if (episodes.length <= 1) return episodes
+
   const merged: MaterializedSmartSplitEpisode[] = []
   let current: MaterializedSmartSplitEpisode | null = null
   let currentDuration = 0
 
   function pushCurrent() {
     if (!current) return
-    current.estimatedDurationSeconds = Math.min(preset.maxSeconds, Math.max(preset.minSeconds, currentDuration))
+    current.estimatedDurationSeconds = Math.min(
+      preset.maxSeconds,
+      Math.max(preset.minSeconds, currentDuration),
+    )
     merged.push(current)
     current = null
     currentDuration = 0
   }
 
   for (const ep of episodes) {
-    const epDuration = estimateTextDuration(ep.content, pacingMode)
+    const epDuration = estimateTextDuration(ep.content, productionMode)
     if (!current) {
       current = { ...ep }
       currentDuration = epDuration
@@ -524,23 +723,67 @@ function mergeSplitEpisodesByDuration(
   }
   pushCurrent()
 
-  // If the final group is too short and we can merge it back into the previous one without wildly exceeding max, do so.
-  if (merged.length >= 2) {
-    const last = merged[merged.length - 1]
-    const prev = merged[merged.length - 2]
-    const lastDuration = estimateTextDuration(last.content, pacingMode)
-    const prevDuration = estimateTextDuration(prev.content, pacingMode)
-    if (lastDuration < preset.minSeconds && prevDuration + lastDuration <= preset.maxSeconds) {
-      prev.content = `${prev.content}\n\n${last.content}`
-      prev.summary = `${prev.summary}；${last.summary}`
-      prev.endingAnchor = last.endingAnchor
-      prev.coveredBeatIds = [...prev.coveredBeatIds, ...last.coveredBeatIds]
-      prev.estimatedDurationSeconds = Math.min(preset.maxSeconds, prevDuration + lastDuration)
-      merged.pop()
+  return merged
+}
+
+export function mergeSplitEpisodesByDuration(
+  episodes: MaterializedSmartSplitEpisode[],
+  preset: SmartSplitDurationPreset,
+  productionMode?: string,
+): MaterializedSmartSplitEpisode[] {
+  if (episodes.length === 0) return []
+
+  // 第一步：先把所有超长集拆成接近 max 的段，让后续合并有更小粒度。
+  let expanded = episodes.flatMap((ep) => splitLongEpisode(ep, preset, productionMode))
+  if (expanded.length === 0) return []
+  if (expanded.length === 1) {
+    return protectLastEpisode(expanded, preset, productionMode)
+  }
+
+  const durations = expanded.map((ep) => estimateTextDuration(ep.content, productionMode))
+  const n = expanded.length
+
+  // 第二步：DP 分组。
+  // dp[i] 表示前 i 个片段的最优分组代价；parent[i] 记录上一刀位置。
+  // 代价 = 每组 (max - duration)^2 之和，鼓励每集尽量接近上限。
+  const dp = new Array(n + 1).fill(Infinity)
+  const parent = new Array(n + 1).fill(-1)
+  dp[0] = 0
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = 0; j < i; j++) {
+      const groupDuration = durations.slice(j, i).reduce((a, b) => a + b, 0)
+      if (groupDuration < preset.minSeconds) continue
+      if (groupDuration > preset.maxSeconds) continue
+      const cost = dp[j] + Math.pow(preset.maxSeconds - groupDuration, 2)
+      if (cost < dp[i]) {
+        dp[i] = cost
+        parent[i] = j
+      }
     }
   }
 
-  return merged
+  let result: MaterializedSmartSplitEpisode[]
+
+  if (dp[n] === Infinity) {
+    // DP 找不到合法分组（极少见），退化为贪心合并
+    result = greedyMergeEpisodes(expanded, preset, productionMode)
+  } else {
+    // 重建分组
+    const groups: MaterializedSmartSplitEpisode[][] = []
+    let i = n
+    while (i > 0) {
+      const j = parent[i]
+      groups.unshift(expanded.slice(j, i))
+      i = j
+    }
+    result = groups.map((group) => mergeGroup(group, preset, productionMode))
+  }
+
+  // 第三步：保护最后一集
+  result = protectLastEpisode(result, preset, productionMode)
+
+  return result
 }
 
 function getMaxTokens() {
@@ -601,15 +844,9 @@ export async function splitStoryIntoEpisodes(input: SmartSplitInput): Promise<Sm
   const durationPreset = getSmartSplitDurationPreset(input.durationPresetId)
   if (!durationPreset) throw new Error(`Unknown duration preset: ${input.durationPresetId}`)
 
-  const pacingMode = input.pacingMode || 'standard'
-  const pacingFactor = pacingMode === 'extreme' ? 2.0 : pacingMode === 'tight' ? 1.5 : 1.0
-  const style = input.style || (pacingMode === 'extreme' || pacingMode === 'tight' ? 'ai_manga_drama' : 'default')
-  const effectivePreset: SmartSplitDurationPreset = {
-    ...durationPreset,
-    minSeconds: Math.round(durationPreset.minSeconds * pacingFactor),
-    maxSeconds: Math.round(durationPreset.maxSeconds * pacingFactor),
-    recommendedSeconds: Math.round(durationPreset.recommendedSeconds * pacingFactor),
-  }
+  // 分集不再根据 pacingMode 放大/缩小时长范围；文稿在导入前已处理完成。
+  const style = input.style || 'default'
+  const effectivePreset: SmartSplitDurationPreset = { ...durationPreset }
 
   const { textConfig, url, strictMode } = getSmartSplitUrl()
   const model = process.env.SMART_EPISODE_SPLIT_MODEL || SMART_SPLIT_MODEL
@@ -653,7 +890,7 @@ export async function splitStoryIntoEpisodes(input: SmartSplitInput): Promise<Sm
     coveredBeatIds: episode.covered_beat_ids,
   })))
 
-  episodes = mergeSplitEpisodesByDuration(episodes, pacingMode, effectivePreset)
+  episodes = mergeSplitEpisodesByDuration(episodes, effectivePreset, input.productionMode)
 
   const hook = splitEpisodesPayload.series_hook || episodes[0]?.title || input.dramaTitle || '精彩故事即将展开'
 

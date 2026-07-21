@@ -10,6 +10,7 @@ import {
 } from './store.js'
 import { getTaskHandler, listRegisteredTaskTypes } from './registry.js'
 import { recoverExpiredRunningTasks } from './recovery.js'
+import { db } from '../../db/index.js'
 import { logTaskError } from '../../utils/task-logger.js'
 import { classifyImageError, computeRetryDelay } from '../../utils/error-taxonomy.js'
 import { reconcileImageGenerationState, syncImageGenerationTaskState } from '../image-generation-sync.js'
@@ -31,6 +32,7 @@ export interface RunWorkerOnceOptions {
   cancelPollMs?: number
   signal?: AbortSignal
   nowMs?: number
+  types?: string[]
 }
 
 function createTaskContext(task: CreationTask, signal: AbortSignal): TaskContext {
@@ -68,7 +70,7 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
   const leaseMs = options.leaseMs ?? 60_000
   const heartbeatMs = options.heartbeatMs ?? Math.max(1_000, Math.floor(leaseMs / 2))
   const cancelPollMs = options.cancelPollMs ?? 1_000
-  const handlers = listRegisteredTaskTypes()
+  const handlers = options.types ?? listRegisteredTaskTypes()
   if (!handlers.length) return false
   const task = acquireNextQueuedTask({
     workerId: options.workerId,
@@ -77,6 +79,11 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
     types: handlers,
   })
   if (!task) return false
+
+  // acquireNextQueuedTask changes the task row to running directly. Mirror
+  // that transition immediately so Remotion asset polling does not remain at
+  // queued while the provider request is already in flight.
+  syncImageGenerationTaskState(db, task)
 
   const handler = getTaskHandler(task.type)
   if (!handler) {
@@ -170,11 +177,23 @@ export interface TaskWorkerLoopOptions extends RunWorkerOnceOptions {
   concurrency?: number
   recoverOnStart?: boolean
   onError?: (error: unknown) => void
+  /**
+   * If provided, this worker pool only processes the listed task types.
+   * Defaults to all registered task types.
+   */
+  types?: string[]
+  /**
+   * If false, this pool does not run global maintenance (expired-task recovery,
+   * heartbeat pruning, image-generation reconciliation). Use this for secondary
+   * pools so maintenance jobs do not run multiple times.
+   */
+  runMaintenance?: boolean
 }
 
 export function startTaskWorkerLoop(options: TaskWorkerLoopOptions) {
   const intervalMs = options.intervalMs ?? 1_000
   const concurrency = Math.max(1, Math.floor(options.concurrency ?? 1))
+  const runMaintenance = options.runMaintenance !== false
   let stopped = false
   const timers = new Set<ReturnType<typeof setTimeout>>()
   let reconcileTimer: ReturnType<typeof setInterval> | null = null
@@ -193,28 +212,30 @@ export function startTaskWorkerLoop(options: TaskWorkerLoopOptions) {
     for (const workerId of workerIds) recordWorkerHeartbeat(workerId)
   }, getHeartbeatIntervalMs())
 
-  if (options.recoverOnStart !== false) {
+  if (runMaintenance && options.recoverOnStart !== false) {
     recoverExpiredRunningTasks()
   }
 
-  reconcileTimer = setInterval(() => {
-    if (stopped) return
-    try {
-      reconcileImageGenerationState()
-    } catch (error) {
-      options.onError?.(error)
-    }
-  }, RECONCILE_INTERVAL_MS)
+  if (runMaintenance) {
+    reconcileTimer = setInterval(() => {
+      if (stopped) return
+      try {
+        reconcileImageGenerationState()
+      } catch (error) {
+        options.onError?.(error)
+      }
+    }, RECONCILE_INTERVAL_MS)
 
-  workerRecoveryTimer = setInterval(() => {
-    if (stopped) return
-    try {
-      pruneStaleWorkerHeartbeats()
-      recoverExpiredRunningTasks()
-    } catch (error) {
-      options.onError?.(error)
-    }
-  }, WORKER_RECOVERY_INTERVAL_MS)
+    workerRecoveryTimer = setInterval(() => {
+      if (stopped) return
+      try {
+        pruneStaleWorkerHeartbeats()
+        recoverExpiredRunningTasks()
+      } catch (error) {
+        options.onError?.(error)
+      }
+    }, WORKER_RECOVERY_INTERVAL_MS)
+  }
 
   const tick = async (lane: number) => {
     if (stopped) return

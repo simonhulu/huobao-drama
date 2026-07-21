@@ -14,3 +14,11 @@ export function getVideoEncoderOptions(): string[] {
 export function getVideoEncoderName(): string {
   return os.platform() === 'darwin' ? 'h264_videotoolbox' : 'libx264'
 }
+
+/**
+ * 解码加速参数：macOS 用 VideoToolbox 硬解（-hwaccel videotoolbox），其他平台不启用。
+ * 仅用于输入是视频文件的 ffmpeg 调用（图片/lavfi 输入不要加）。
+ */
+export function getVideoDecodeOptions(): string[] {
+  return os.platform() === 'darwin' ? ['-hwaccel', 'videotoolbox'] : []
+}

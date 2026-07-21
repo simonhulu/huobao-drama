@@ -10,8 +10,16 @@ import { promisify } from 'util'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { fileURLToPath } from 'url'
+import { buildEgakiChildEnv } from '../services/egaki-chatgpt-image.js'
+import { maskSecret } from '../services/secret-crypto.js'
+import { buildRightCodeTaskUrl } from '../services/adapters/rightcode-image.js'
 
 const execFileAsync = promisify(execFile)
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const repoRoot = path.resolve(__dirname, '../../..')
+const DEFAULT_EGAKI_BIN = path.join(repoRoot, 'backend/node_modules/.bin/egaki')
+const DEFAULT_EGAKI_PROXY_BOOTSTRAP = path.join(repoRoot, 'backend/scripts/egaki-undici-proxy.mjs')
 
 function parseSettings(settings: unknown): { success: true; value: any } | { success: false; error: string } {
   if (settings == null) return { success: true, value: null }
@@ -66,6 +74,39 @@ function validateImageAdapterSettings(settings: any): string | null {
 
 const app = new Hono()
 
+function redactSecretText(value: string, secret?: string) {
+  if (!secret) return value
+  return value.split(secret).join('***')
+}
+
+const SENSITIVE_SETTING_KEY = /^(?:authorization|proxy-authorization|api[-_]?key|x[-_]?api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|client[-_]?secret|password)$/i
+const TEMPLATE_VALUE = /\{\{[^{}]+\}\}/
+
+function redactSecretInValue(value: unknown, secret?: string, fieldName = ''): unknown {
+  if (value == null) return value
+  if (SENSITIVE_SETTING_KEY.test(fieldName)) {
+    if (typeof value === 'string' && TEMPLATE_VALUE.test(value) && (!secret || !value.includes(secret))) return value
+    return '***'
+  }
+  if (typeof value === 'string') return redactSecretText(value, secret)
+  if (Array.isArray(value)) return value.map(item => redactSecretInValue(item, secret))
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, redactSecretInValue(child, secret, key)]))
+  }
+  return value
+}
+
+function serializeConfig(row: typeof schema.aiServiceConfigs.$inferSelect) {
+  const { apiKey, ...safeRow } = row
+  return {
+    ...toSnakeCase(safeRow),
+    api_key_configured: Boolean(apiKey),
+    api_key_hint: maskSecret(apiKey),
+    model: row.model ? JSON.parse(row.model) : [],
+    settings: row.settings ? redactSecretInValue(JSON.parse(row.settings), apiKey) : null,
+  }
+}
+
 const HUOBAO_PRESET_SERVICES = [
   { serviceType: 'text', label: '文本', provider: 'chatfire', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-preview', priority: 100 },
   { serviceType: 'image', label: '图片', provider: 'gemini', baseUrl: 'https://api.chatfire.site', model: 'gemini-3-pro-image-preview', priority: 99 },
@@ -110,6 +151,15 @@ function viduHeaders(apiKey?: string, withJson = false) {
 function buildProbe(serviceType: string, provider: string, baseUrl: string, model?: string, apiKey?: string) {
   const p = provider.toLowerCase()
   const m = model || ''
+
+  if (p === 'rightcode' || p === 'rightcodes' || p === 'right') {
+    return {
+      method: 'GET',
+      url: buildRightCodeTaskUrl(baseUrl, 'connection-probe'),
+      headers: bearerHeaders(apiKey),
+      body: undefined,
+    }
+  }
 
   if (p === 'gemini') {
     const url = new URL(joinProviderUrl(baseUrl, '/v1beta', `/models/${m || 'gemini-2.5-flash'}:generateContent`))
@@ -180,17 +230,65 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
   }
 }
 
+async function probeEgakiChatGpt() {
+  const egakiBin = process.env.EGAKI_BIN || DEFAULT_EGAKI_BIN
+  if (!fs.existsSync(egakiBin)) {
+    return {
+      ok: false,
+      reachable: false,
+      status: 0,
+      status_text: 'egaki CLI missing',
+      method: 'LOCAL',
+      url: 'egaki login --show',
+      message: `未找到 egaki CLI: ${egakiBin}`,
+      response_preview: '',
+    }
+  }
+
+  try {
+    const { stdout, stderr } = await execFileAsync(egakiBin, ['login', '--show'], {
+      env: buildEgakiChildEnv(process.env, process.env.EGAKI_PROXY_BOOTSTRAP || DEFAULT_EGAKI_PROXY_BOOTSTRAP),
+      timeout: 30_000,
+      maxBuffer: 64_000,
+    })
+    const output = `${stdout}\n${stderr}`
+    const hasChatGpt = /chatgpt/i.test(output)
+    const hasUsableAuth = /(signed|login|token|plan|account|chatgpt)/i.test(output)
+    return {
+      ok: hasChatGpt || hasUsableAuth,
+      reachable: true,
+      status: 0,
+      status_text: 'local probe complete',
+      method: 'LOCAL',
+      url: 'egaki login --show',
+      message: hasChatGpt || hasUsableAuth
+        ? 'egaki CLI 可执行，ChatGPT 登录状态可读取'
+        : 'egaki CLI 可执行，但未确认 ChatGPT 登录状态；请运行 egaki login --provider chatgpt',
+      response_preview: 'egaki login --show output redacted',
+    }
+  } catch (error: any) {
+    return {
+      ok: false,
+      reachable: false,
+      status: 0,
+      status_text: 'local probe failed',
+      method: 'LOCAL',
+      url: 'egaki login --show',
+      message: error?.message?.includes('timed out')
+        ? 'egaki 登录状态检查超时，请确认代理和 ChatGPT 登录状态'
+        : 'egaki 登录状态不可用，请运行 egaki login --provider chatgpt',
+      response_preview: '',
+    }
+  }
+}
+
 // GET /ai-configs?service_type=text
 app.get('/', async (c) => {
   const serviceType = c.req.query('service_type')
   let rows = db.select().from(schema.aiServiceConfigs).all()
   if (serviceType) rows = rows.filter(r => r.serviceType === serviceType)
 
-  const parsed = rows.map(r => ({
-    ...toSnakeCase(r),
-    model: r.model ? JSON.parse(r.model) : [],
-    settings: r.settings ? JSON.parse(r.settings) : null,
-  }))
+  const parsed = rows.map(serializeConfig)
   return success(c, parsed)
 })
 
@@ -229,11 +327,7 @@ app.post('/', async (c) => {
   const [row] = db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.id, Number(res.lastInsertRowid))).all()
 
-  return created(c, {
-    ...toSnakeCase(row),
-    model: row.model ? JSON.parse(row.model) : [],
-    settings: row.settings ? JSON.parse(row.settings) : null,
-  })
+  return created(c, serializeConfig(row))
 })
 
 // POST /ai-configs/huobao-preset
@@ -298,10 +392,7 @@ app.post('/huobao-preset', async (c) => {
     }
   }
 
-  const configs = db.select().from(schema.aiServiceConfigs).all().map(row => ({
-    ...toSnakeCase(row),
-    model: row.model ? JSON.parse(row.model) : [],
-  }))
+  const configs = db.select().from(schema.aiServiceConfigs).all().map(serializeConfig)
   const agents = db.select().from(schema.agentConfigs).all().map(row => toSnakeCase(row))
 
   logTaskSuccess('AIConfig', 'huobao-preset-applied', {
@@ -319,17 +410,36 @@ app.post('/huobao-preset', async (c) => {
 // POST /ai-configs/test
 app.post('/test', async (c) => {
   const body = await c.req.json()
-  if (!body.service_type || !body.provider || !body.base_url) {
+  const configId = Number(body.config_id)
+  const [storedConfig] = Number.isInteger(configId) && configId > 0
+    ? db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, configId)).all()
+    : []
+  if (configId && !storedConfig) return notFound(c, '配置不存在')
+
+  const serviceType = storedConfig?.serviceType || body.service_type
+  const providerName = storedConfig?.provider || body.provider
+  const baseUrl = storedConfig?.baseUrl || body.base_url
+  const apiKey = storedConfig?.apiKey || body.api_key
+  const configModel = storedConfig?.model ? JSON.parse(storedConfig.model) : body.model
+  const provider = String(providerName || '').toLowerCase()
+  if (!serviceType || !providerName || (provider !== 'egaki-chatgpt' && !baseUrl)) {
     return badRequest(c, 'service_type, provider and base_url are required')
   }
 
-  const model = Array.isArray(body.model) ? body.model[0] : body.model
-  const probe = buildProbe(body.service_type, body.provider, body.base_url, model, body.api_key)
+  if (serviceType === 'image' && provider === 'egaki-chatgpt') {
+    const payload = await probeEgakiChatGpt()
+    if (payload.ok) logTaskSuccess('AIConfig', 'egaki-chatgpt-probe-done', { reachable: payload.reachable })
+    else logTaskError('AIConfig', 'egaki-chatgpt-probe-failed', { message: payload.message })
+    return success(c, payload)
+  }
+
+  const model = Array.isArray(configModel) ? configModel[0] : configModel
+  const probe = buildProbe(serviceType, providerName, baseUrl, model, apiKey)
   const probeUrl = redactUrl(probe.url)
 
   logTaskProgress('AIConfig', 'probe-start', {
-    serviceType: body.service_type,
-    provider: body.provider,
+    serviceType,
+    provider: providerName,
     method: probe.method,
     url: probeUrl,
   })
@@ -342,6 +452,7 @@ app.post('/test', async (c) => {
     })
     const text = await resp.text()
     const reachable = [200, 204, 400, 401, 403].includes(resp.status)
+      || ((provider === 'rightcode' || provider === 'rightcodes' || provider === 'right') && resp.status === 404)
     const payload = {
       ok: resp.ok,
       reachable,
@@ -352,34 +463,35 @@ app.post('/test', async (c) => {
       message: reachable
         ? (resp.ok ? '端点可访问，认证与路径基本正常' : '端点已响应，请根据状态码判断认证或路径是否正确')
         : '端点未按预期响应，请检查 Base URL 和代理前缀',
-      response_preview: text.slice(0, 240),
+      response_preview: redactSecretText(text.slice(0, 240), apiKey),
     }
     if (reachable) {
       logTaskSuccess('AIConfig', 'probe-done', {
-        provider: body.provider,
+        provider: providerName,
         status: resp.status,
         url: probeUrl,
       })
     } else {
       logTaskError('AIConfig', 'probe-unexpected', {
-        provider: body.provider,
+        provider: providerName,
         status: resp.status,
         url: probeUrl,
       })
     }
     return success(c, payload)
   } catch (error: any) {
+    const safeErrorMessage = redactSecretText(error.message || '请求失败', apiKey)
     logTaskError('AIConfig', 'probe-failed', {
-      provider: body.provider,
+      provider: providerName,
       url: probeUrl,
-      error: error.message,
+      error: safeErrorMessage,
     })
     return success(c, {
       ok: false,
       reachable: false,
       method: probe.method,
       url: probeUrl,
-      message: error.message || '请求失败',
+      message: safeErrorMessage,
       response_preview: '',
     })
   }
@@ -390,11 +502,7 @@ app.get('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const [row] = db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id)).all()
   if (!row) return notFound(c)
-  return success(c, {
-    ...toSnakeCase(row),
-    model: row.model ? JSON.parse(row.model) : [],
-    settings: row.settings ? JSON.parse(row.settings) : null,
-  })
+  return success(c, serializeConfig(row))
 })
 
 // PUT /ai-configs/:id
@@ -406,7 +514,8 @@ app.put('/:id', async (c) => {
   if ('provider' in body) updates.provider = body.provider
   if ('name' in body) updates.name = body.name
   if ('base_url' in body) updates.baseUrl = body.base_url
-  if ('api_key' in body) updates.apiKey = body.api_key
+  if (body.clear_api_key === true) updates.apiKey = ''
+  else if (typeof body.api_key === 'string' && body.api_key.trim()) updates.apiKey = body.api_key.trim()
   if ('model' in body) updates.model = JSON.stringify(body.model)
   if ('priority' in body) updates.priority = body.priority
   if ('is_active' in body) updates.isActive = body.is_active

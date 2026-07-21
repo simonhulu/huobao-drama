@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { badRequest, success } from '../utils/response.js'
 import { cleanDirectScript, type HookStyle, type RetentionMode } from '../services/direct-script-cleaner.js'
 import { optimizeScriptForRetention } from '../services/retention-script-optimizer.js'
+import { normalizeTtsText } from '../utils/tts-text.js'
 
 const app = new Hono()
 type CleanMode = 'faithful' | 'retention'
@@ -32,22 +33,23 @@ app.post('/clean', async (c) => {
     const retentionMode: RetentionMode = cleanMode === 'retention' ? 'tight' : 'standard'
     const hookStyle = parseHookStyle(body.hook_style)
 
-    const cleaned = await cleanDirectScript(content, { retentionMode: 'standard', hookStyle })
+    const cleaned = normalizeTtsText(await cleanDirectScript(content, { retentionMode: 'standard', hookStyle }))
     if (cleanMode === 'retention') {
       const optimized = await optimizeScriptForRetention(cleaned, {
         retentionMode,
         hookStyle,
       })
+      const productionScript = normalizeTtsText(optimized.productionScript)
       return success(c, {
         original_length: content.length,
         cleaned_length: cleaned.length,
-        production_length: optimized.productionScript.length,
+        production_length: productionScript.length,
         clean_mode: cleanMode,
         retention_mode: retentionMode,
         hook_style: hookStyle,
-        clean_script: optimized.cleanScript,
-        production_script: optimized.productionScript,
-        content: optimized.productionScript,
+        clean_script: normalizeTtsText(optimized.cleanScript),
+        production_script: productionScript,
+        content: productionScript,
         opening_hook: optimized.openingHook || null,
         cliffhanger: optimized.cliffhanger || null,
         retention_beats: optimized.retentionBeats || null,

@@ -15,7 +15,7 @@ const {
   scheduleTTSForEpisode,
 } = await import('./auto-pipeline.js')
 
-test('scheduleDirectScriptPipeline creates only breaker for direct-script source text', () => {
+test('scheduleDirectScriptPipeline schedules pre-TTS before breaker for direct-script source text', () => {
   const ts = new Date().toISOString()
   const dramaId = Number(db.insert(schema.dramas).values({
     title: 'FS Drama',
@@ -28,18 +28,23 @@ test('scheduleDirectScriptPipeline creates only breaker for direct-script source
     episodeNumber: 1,
     title: 'FS Episode',
     workflowType: 'direct_script',
-    pacingMode: 'literal',
     createdAt: ts,
     updatedAt: ts,
   }).run().lastInsertRowid)
 
-  const { breaker, narrator } = scheduleDirectScriptPipeline(dramaId, episodeId)
+  const { preTTS, breaker, narrator } = scheduleDirectScriptPipeline(dramaId, episodeId)
 
+  assert.ok(preTTS, 'direct_script should schedule pre-TTS task')
+  assert.equal(preTTS.type, 'tts.pre_generate')
   assert.equal(breaker.type, 'agent.run')
   assert.equal(narrator, null, 'direct_script uses original text for TTS and must not create narrator tasks')
 
   assert.equal(breaker.payload.agent_type, 'storyboard_breaker')
   assert.ok(String(breaker.payload.message).includes('精稿直出'))
+
+  const deps = db.select().from(schema.creationTaskDependencies).all()
+    .filter(row => row.taskId === breaker.id)
+  assert.ok(deps.some(row => row.dependsOnTaskId === preTTS.id), 'breaker should depend on pre-TTS')
 
   const allTasks = db.select().from(schema.creationTasks).all().filter(row => row.episodeId === episodeId)
   const narratorTasks = allTasks.filter(row => row.payloadJson?.includes('"agent_type":"narrator"'))

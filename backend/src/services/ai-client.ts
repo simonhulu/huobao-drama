@@ -42,7 +42,7 @@ function getImageHttpsProxy(): string | undefined {
 }
 
 function getProxyEnabledProviders(): Set<string> {
-  return new Set((process.env.IMAGE_PROXY_ENABLED_PROVIDERS || 'apimart,chatfire,right,rightcodes')
+  return new Set((process.env.IMAGE_PROXY_ENABLED_PROVIDERS || 'apimart,chatfire,rightcode,right,rightcodes')
     .toLowerCase()
     .split(',')
     .map((s) => s.trim())

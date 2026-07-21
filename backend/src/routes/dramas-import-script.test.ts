@@ -83,6 +83,8 @@ test('POST /:id/import-script creates a direct-script episode and schedules extr
   assert.equal(json.data.episodes.length, 1)
   assert.equal(json.data.episodes[0].title, '秦统一六国')
   assert.equal(typeof json.data.episodes[0].initial_task_id, 'number')
+  assert.ok(Array.isArray(json.data.cover_task_ids))
+  assert.equal(json.data.cover_task_ids.length, 1)
 
   const rows = db.select().from(schema.episodes)
     .where(eq(schema.episodes.dramaId, dramaId))
@@ -92,7 +94,6 @@ test('POST /:id/import-script creates a direct-script episode and schedules extr
 
   const ep = rows[0]!
   assert.equal(ep.workflowType, 'direct_script')
-  assert.equal(ep.pacingMode, 'literal')
   assert.equal(ep.enableAiRewrite, false)
   assert.equal(ep.scriptContent, scriptContent)
   assert.equal(ep.content, scriptContent)
@@ -138,13 +139,15 @@ test('POST /:id/import-script splits by segment markers and creates multiple dir
 
   assert.equal(response.status, 201)
   assert.equal(json.data.segment_count, 3)
+  assert.ok(Array.isArray(json.data.cover_task_ids))
+  assert.equal(json.data.cover_task_ids.length, 3)
 
   const rows = db.select().from(schema.episodes)
     .where(eq(schema.episodes.dramaId, dramaId))
     .orderBy(schema.episodes.episodeNumber)
     .all()
   assert.equal(rows.length, 3)
-  assert.ok(rows.every(r => r.workflowType === 'direct_script' && r.pacingMode === 'literal' && r.enableAiRewrite === false))
+  assert.ok(rows.every(r => r.workflowType === 'direct_script' && r.enableAiRewrite === false))
   assert.equal(rows[0].title, '纪录片 1')
   assert.equal(rows[1].title, '纪录片 2')
   assert.equal(rows[2].title, '纪录片 3')
@@ -212,4 +215,41 @@ test('POST /:id/import-script rejects empty script_content', async () => {
 
   assert.equal(response.status, 400)
   assert.match(json.message, /script_content/)
+})
+
+test('POST /:id/import-script normalizes TTS-unfriendly characters', async () => {
+  const dramaId = seedDrama()
+  seedConfig('image', 'image')
+  seedConfig('video', 'video')
+  seedConfig('audio', 'audio')
+
+  const scriptContent = '赵姬的人生，从这一刻开始翻盘。\n\n   但她翻盘，不等于自由。   \n\n   ────────────────────────────────────────────────────────────────────────────────                 \n\n   回到秦国的赵姬，先是太子妃。'
+
+  const response = await dramasRoute.request(`/${dramaId}/import-script`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: '赵姬',
+      script_content: scriptContent,
+      image_config_id: 1,
+      video_config_id: 2,
+      audio_config_id: 3,
+    }),
+  })
+  const json = await response.json()
+
+  assert.equal(response.status, 201)
+  assert.equal(json.data.segment_count, 1)
+
+  const rows = db.select().from(schema.episodes)
+    .where(eq(schema.episodes.dramaId, dramaId))
+    .all()
+  assert.equal(rows.length, 1)
+
+  const ep = rows[0]!
+  const expected = '赵姬的人生，从这一刻开始翻盘。 但她翻盘，不等于自由。 回到秦国的赵姬，先是太子妃。'
+  assert.equal(ep.scriptContent, expected)
+  assert.equal(ep.content, expected)
+  assert.ok(!ep.scriptContent.includes('─'), 'decorative lines should be removed')
+  assert.ok(!ep.scriptContent.includes('\n'), 'extra newlines should be collapsed')
 })

@@ -241,6 +241,7 @@ export function taskTitle(task: CreationTask | undefined | null) {
     'tts.character_sample': '角色试听',
     'grid.generate': '宫格生成',
     'grid.split': '宫格切分',
+    'cover.generate': '封面生成',
     'compose.storyboard': '镜头合成',
     'compose.episode': '批量合成',
     'merge.episode': '全集拼接',

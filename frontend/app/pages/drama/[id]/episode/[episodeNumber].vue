@@ -14,7 +14,7 @@
           <span class="studio-episode-chip">第 {{ episodeNumber }} 集</span>
           <div class="studio-meta-row">
             <span class="studio-meta-pill">{{ currentSubStageLabel }}</span>
-            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/12</span>
+            <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/13</span>
             <span class="studio-meta-inline">{{ chars.length }} 角色 · {{ sbs.length }} 镜头</span>
           </div>
         </div>
@@ -30,9 +30,9 @@
             <Settings2 :size="13" />
             设置
           </button>
-          <button class="btn btn-primary" @click="panel = mergeUrl ? 'export' : (sbs.length ? 'production' : 'script')">
+          <button class="btn btn-primary" @click="panel = mergeUrl ? 'export' : (sbs.length && composedCount === sbs.length && !(openingHook && cliffhanger) ? 'intro' : (sbs.length ? 'production' : 'script'))">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            {{ mergeUrl ? '查看成片' : (sbs.length ? '继续制作' : '开始制作') }}
+            {{ mergeUrl ? '查看成片' : (sbs.length && composedCount === sbs.length && !(openingHook && cliffhanger) ? '制作片头片尾' : (sbs.length ? '继续制作' : '开始制作')) }}
           </button>
         </div>
       </div>
@@ -79,10 +79,6 @@
                   <span>AI 改写</span>
                 </label>
               </div>
-            </div>
-            <div class="settings-control-row">
-              <span class="render-mode-label">叙事节奏</span>
-              <BaseSelect :model-value="pacingMode" :options="pacingModeOptions" class="drawer-select" @update:model-value="updatePacingMode" />
             </div>
             <div class="settings-control-row">
               <span class="render-mode-label">对白模式</span>
@@ -190,10 +186,10 @@
         <div class="progress-wrap">
           <div class="progress-head">
             <span class="progress-label">制作进度</span>
-            <span class="progress-val">{{ pipelineProgress }}/12</span>
+            <span class="progress-val">{{ pipelineProgress }}/13</span>
           </div>
           <div class="progress-track">
-            <div class="progress-fill" :style="{ width: (pipelineProgress / 12 * 100) + '%' }"></div>
+            <div class="progress-fill" :style="{ width: (pipelineProgress / 13 * 100) + '%' }"></div>
           </div>
         </div>
         <div class="sidebar-jumper" v-if="sidebarJumpSteps.length">
@@ -241,19 +237,18 @@
       <div v-if="panel === 'intro'" class="content-panel intro-panel">
         <div class="intro-section">
           <div class="intro-section-head">
-            <span class="intro-section-title">本集钩子与前情提要文案</span>
+            <span class="intro-section-title">本集开头/结尾文案</span>
             <div class="intro-section-actions">
               <button v-if="!hookEditing" class="btn btn-ghost btn-sm" @click="startEditHooks">编辑</button>
               <button v-else class="btn btn-primary btn-sm" @click="saveHooks">保存</button>
               <button class="btn btn-ghost btn-sm" :disabled="isTaskTypeRunning('hook.design')" @click="regenerateHooks">AI 重新生成</button>
             </div>
           </div>
+          <p class="intro-hint">这两段文案会作为下一集前情提要的素材：开场钩子引出本集，结尾悬念留住观众。</p>
           <div v-if="!hookEditing" class="hook-display">
             <div v-if="openingHook" class="hook-display-row"><span class="hook-display-label">开场钩子</span><span class="hook-display-text">{{ openingHook }}</span></div>
             <div v-if="cliffhanger" class="hook-display-row"><span class="hook-display-label">结尾悬念</span><span class="hook-display-text">{{ cliffhanger }}</span></div>
-            <div v-if="recapScript" class="hook-display-row"><span class="hook-display-label">前情提要</span><span class="hook-display-text">{{ recapScript }}</span></div>
-            <div v-if="seriesHook" class="hook-display-row"><span class="hook-display-label">系列钩子</span><span class="hook-display-text">{{ seriesHook }}</span></div>
-            <p v-if="!openingHook && !cliffhanger && !recapScript && !seriesHook" class="hook-empty">暂无钩子文案，点击「AI 重新生成」或「编辑」手动填写。</p>
+            <p v-if="!openingHook && !cliffhanger" class="hook-empty">暂无开头/结尾文案，点击「AI 重新生成」或「编辑」手动填写。</p>
           </div>
           <div v-else class="hook-form">
             <label class="field">
@@ -263,14 +258,6 @@
             <label class="field">
               <span class="field-label">结尾悬念</span>
               <textarea v-model="hookForm.cliffhanger_hook" class="textarea" rows="2" placeholder="集尾悬念文案" />
-            </label>
-            <label class="field">
-              <span class="field-label">前情提要文案</span>
-              <textarea v-model="hookForm.recap_script" class="textarea" rows="4" placeholder="用于生成前情提要视频的文案，第 2 集及以后生效" />
-            </label>
-            <label class="field">
-              <span class="field-label">系列钩子</span>
-              <input v-model="hookForm.series_hook" class="input" placeholder="贯穿全剧的系列钩子" />
             </label>
           </div>
         </div>
@@ -283,6 +270,13 @@
             <div class="intro-pre-item">
               <div class="intro-pre-row">
                 <span class="intro-pre-label">开场动画</span>
+                <BaseSelect
+                  :model-value="introTemplateId"
+                  :options="introTemplateOptions"
+                  placeholder="选择模板"
+                  class="intro-template-select"
+                  @update:model-value="updateIntroTemplate"
+                />
                 <span :class="['tag', introUrl ? 'tag-success' : '']">{{ introUrl ? '已生成' : '未生成' }}</span>
                 <button class="btn btn-ghost btn-sm" :disabled="isTaskTypeRunning('intro.compose')" @click="regenerateIntro">重新生成</button>
               </div>
@@ -295,6 +289,88 @@
                 <button class="btn btn-ghost btn-sm" :disabled="isTaskTypeRunning('recap.compose')" @click="regenerateRecap">重新生成</button>
               </div>
               <video v-if="recapUrl" :src="'/' + recapUrl" controls class="intro-pre-preview" preload="metadata" playsinline />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== COVER PANEL ===== -->
+      <div v-if="panel === 'cover'" class="content-panel cover-panel">
+        <div class="cover-panel-head">
+          <div class="step-indicator">
+            <Image :size="14" />
+            <span class="step-name">封面生成</span>
+          </div>
+          <span class="dim" style="font-size:12px">留空时按本集内容自动设计，再生成 4:3 与 3:4 两张封面</span>
+        </div>
+
+        <div class="cover-form">
+          <div class="cover-design-summary">
+            <div class="cover-design-summary-head">
+              <div class="cover-design-heading">
+                <span class="field-label">封面方案</span>
+                <span class="cover-design-source">{{ coverDesign ? '来自精稿' : '按本集内容自动设计' }}</span>
+              </div>
+              <span v-if="coverDesign" class="cover-design-type">{{ coverDesign.type || coverDesign.kicker || '推荐方案' }}</span>
+            </div>
+            <div v-if="coverDesign" class="cover-copy-grid">
+              <div v-if="coverDesign.kicker || coverDesign.type" class="cover-copy-item">
+                <span>栏目</span><strong>{{ coverDesign.kicker || coverDesign.type }}</strong>
+              </div>
+              <div v-if="coverDesign.main_title" class="cover-copy-item">
+                <span>主标题</span><strong>{{ coverDesign.main_title }}</strong>
+              </div>
+              <div v-if="coverDesign.sub_title" class="cover-copy-item cover-copy-item-wide">
+                <span>副标题</span><strong>{{ coverDesign.sub_title }}</strong>
+              </div>
+            </div>
+            <p v-if="coverDesign?.description" class="cover-design-description">{{ coverDesign.description }}</p>
+            <div v-else-if="!coverDesign" class="cover-design-empty">
+              <FileText :size="14" />
+              <span>精稿保存后，推荐封面方案会自动出现在这里</span>
+            </div>
+          </div>
+          <div class="cover-form-actions">
+            <span class="cover-form-note">{{ coverDesign ? '标题与无字底图提示词来自精稿方案' : '暂未提取精稿方案，将使用本集内容自动设计' }}</span>
+            <button class="btn btn-primary ml-auto" :disabled="coverGenerating" @click="generateCovers()">
+              <Loader2 v-if="coverGenerating" :size="12" class="animate-spin" />
+              <ImageIcon v-else :size="12" />
+              {{ coverGenerating ? '生成中...' : (coverDesign ? '按精稿方案生成封面' : '自动设计并生成封面') }}
+            </button>
+          </div>
+        </div>
+
+        <div class="cover-results">
+          <div class="cover-card">
+            <div class="cover-card-head">
+              <span class="cover-card-label">4:3 封面</span>
+              <button class="btn btn-xs" :disabled="coverGenerating" @click="generateCoverRatio('4:3')">
+                <Loader2 v-if="coverGeneratingRatio === '4:3'" :size="10" class="animate-spin" />
+                <span v-else>重新生成</span>
+              </button>
+            </div>
+            <div class="cover-frame ratio-4-3">
+              <img v-if="cover4x3Url" :src="normalizePlayableAssetUrl(cover4x3Url)" class="previewable-image" @click="openImageViewer(normalizePlayableAssetUrl(cover4x3Url), '4:3 封面')" />
+              <div v-else class="cover-empty">
+                <Image :size="28" />
+                <span>尚未生成 4:3 封面</span>
+              </div>
+            </div>
+          </div>
+          <div class="cover-card">
+            <div class="cover-card-head">
+              <span class="cover-card-label">3:4 封面</span>
+              <button class="btn btn-xs" :disabled="coverGenerating" @click="generateCoverRatio('3:4')">
+                <Loader2 v-if="coverGeneratingRatio === '3:4'" :size="10" class="animate-spin" />
+                <span v-else>重新生成</span>
+              </button>
+            </div>
+            <div class="cover-frame ratio-3-4">
+              <img v-if="cover3x4Url" :src="normalizePlayableAssetUrl(cover3x4Url)" class="previewable-image" @click="openImageViewer(normalizePlayableAssetUrl(cover3x4Url), '3:4 封面')" />
+              <div v-else class="cover-empty">
+                <Image :size="28" />
+                <span>尚未生成 3:4 封面</span>
+              </div>
             </div>
           </div>
         </div>
@@ -693,6 +769,7 @@
                       <div v-if="sb.imageUrl || sb.composedImage || sb.firstFrameImage" class="shot-dot has-img" title="已生成图片"></div>
                       <div v-if="sb.videoUrl || sb.composedVideoUrl" class="shot-dot has-video" title="已生成视频"></div>
                       <div v-if="sb.dialogue" class="shot-dot has-dialogue" title="有对白"></div>
+                      <div v-if="hasAnyTTS(sb)" class="shot-dot has-tts" title="有合成前 TTS"></div>
                       <div v-if="sb.bgm_audio_url || sb.bgmAudioUrl" class="shot-dot has-bgm" title="有配乐"></div>
                       <div v-if="sb.sfx_audio_url || sb.sfxAudioUrl" class="shot-dot has-sfx" title="有音效"></div>
                       <div v-if="sb.ambient_audio_url || sb.ambientAudioUrl" class="shot-dot has-ambient" title="有环境音"></div>
@@ -932,7 +1009,7 @@
                     <span class="field-label">{{ narrationFieldLabel }}</span>
                     <textarea :value="selectedSb.narration || ''" class="textarea" rows="3"
                       @blur="updateField(selectedSb, 'narration', $event.target.value)" :placeholder="narrationFieldPlaceholder" />
-                    <div class="narration-audio-row">
+                    <div v-if="!usesOriginalNarrationText" class="narration-audio-row">
                       <audio v-if="hasNarrationAudio(selectedSb)" :src="'/' + getNarrationAudioUrl(selectedSb)" controls preload="none" class="dub-audio" />
                       <button class="btn btn-sm" :disabled="isPendingShotTTS(selectedSb.id)" @click="genShotTTS(selectedSb)">
                         {{ isPendingShotTTS(selectedSb.id) ? '生成中' : hasNarrationAudio(selectedSb) ? '重新生成解说音频' : '生成解说音频' }}
@@ -960,8 +1037,15 @@
                       <span class="field-label">配乐提示词</span>
                       <textarea :value="selectedSb.bgm_prompt || selectedSb.bgmPrompt || ''" class="textarea" rows="3"
                         @blur="updateField(selectedSb, 'bgm_prompt', $event.target.value)" placeholder="如：压抑低频弦乐，缓慢推进" />
-                      <div v-if="selectedSb.bgm_audio_url || selectedSb.bgmAudioUrl" class="bgm-library-row">
-                        <audio :src="'/' + (selectedSb.bgm_audio_url || selectedSb.bgmAudioUrl)" controls preload="none" class="dub-audio" />
+                      <div v-if="selectedSb.bgm_audio_url || selectedSb.bgmAudioUrl || bgmCueInfo" class="bgm-library-row">
+                        <audio :src="'/' + (selectedSb.bgm_audio_url || selectedSb.bgmAudioUrl || bgmCueInfo?.path)" controls preload="none" class="dub-audio" />
+                      </div>
+                      <div v-if="bgmCueInfo" class="bgm-library-meta">
+                        <div class="bgm-meta-line">
+                          <span class="bgm-meta-pill source-local">集级配乐</span>
+                          <span v-if="bgmCueInfo.emotionBucket" class="bgm-meta-pill">{{ bgmCueInfo.emotionBucket }}</span>
+                          <span class="bgm-meta-pill">{{ bgmCueInfo.start.toFixed(1) }}s - {{ bgmCueInfo.end.toFixed(1) }}s</span>
+                        </div>
                       </div>
                       <div v-if="bgmLibraryInfo" class="bgm-library-meta">
                         <div class="bgm-meta-line">
@@ -1158,7 +1242,7 @@
               <span v-if="ttsActiveCount" class="tag tag-warning mono">排队 {{ ttsQueuedCount }} · 运行 {{ ttsRunningCount }}</span>
               <span v-if="ttsFailedCount" class="tag tag-error mono">失败 {{ ttsFailedCount }}</span>
               <span class="tag">{{ lockedAudioConfigLabel }}</span>
-              <div class="ml-auto flex gap-1">
+              <div v-if="!usesOriginalNarrationText" class="ml-auto flex gap-1">
                 <button class="btn btn-sm" @click="batchShotTTS">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
                   批量生成
@@ -1178,21 +1262,33 @@
               <div class="empty-desc">先在分镜里填写“角色名：台词”或“旁白：文案”，这里就会出现待生成的语音镜头。</div>
             </div>
 
-            <div v-else class="dub-grid">
-                <div v-for="(sb, i) in sbs.filter(hasDialogue)" :key="sb.id" class="card dub-card">
+            <div v-else-if="usesOriginalNarrationText" class="episode-tts-card">
+              <div class="episode-tts-head">
+                <div>
+                  <div class="episode-tts-title">整集原文 TTS</div>
+                  <div class="episode-tts-sub">完整原文一次发送到服务生成；这里播放的是合成前整集音频，可拖拽进度条检查停顿。</div>
+                </div>
+                <span class="tag" :class="hasEpisodePreTTS ? 'tag-success' : ''">{{ hasEpisodePreTTS ? '已生成' : '未生成' }}</span>
+              </div>
+              <audio v-if="hasEpisodePreTTS" :src="episodePreTTSUrl" controls preload="metadata" class="episode-tts-player" />
+              <div v-else class="dim" style="font-size:12px">尚未找到整集原文 TTS 文件。</div>
+            </div>
+
+            <div v-if="ttsEligibleCount && !usesOriginalNarrationText" class="dub-grid">
+                <div v-for="(sb, i) in ttsCandidates" :key="sb.id" class="card dub-card">
                   <div class="dub-head">
                     <div class="dub-copy">
                     <div class="dub-title">
                       <span class="frame-num">#{{ String(sb.storyboard_number || sb.storyboardNumber || i + 1).padStart(2, '0') }}</span>
-                      <span class="frame-badge">{{ getDialogueSpeaker(sb) }}</span>
+                      <span class="frame-badge">{{ getTTSSourceLabel(sb) }}</span>
                     </div>
-                    <div class="dub-desc">{{ getDialogueText(sb) || '未填写文本' }}</div>
+                    <div class="dub-desc">{{ getTTSTextPreview(sb) || '未填写文本' }}</div>
                     </div>
                     <span
                       class="tag"
-                      :class="isPendingShotTTS(sb.id) ? 'tag-warning' : hasTTS(sb) ? 'tag-success' : shotTTSError(sb.id) ? 'tag-error' : ''"
+                      :class="isPendingShotTTS(sb.id) ? 'tag-warning' : hasAnyTTS(sb) ? 'tag-success' : shotTTSError(sb.id) ? 'tag-error' : ''"
                     >
-                      {{ isPendingShotTTS(sb.id) ? '生成中' : hasTTS(sb) ? '已生成' : shotTTSError(sb.id) ? '失败' : '待生成' }}
+                      {{ isPendingShotTTS(sb.id) ? '生成中' : hasAnyTTS(sb) ? '已生成' : shotTTSError(sb.id) ? '失败' : '待生成' }}
                     </span>
                   </div>
                 <div class="dub-meta">
@@ -1201,9 +1297,9 @@
                   <span class="dim">{{ sb.location || '未设地点' }}</span>
                 </div>
                 <div class="dub-foot">
-                  <audio v-if="hasTTS(sb)" :src="'/' + getTTSUrl(sb)" controls preload="none" class="dub-audio" />
+                  <audio v-if="hasAnyTTS(sb)" :src="getPrimaryTTSUrl(sb)" controls preload="none" class="dub-audio" />
                   <div v-else class="dim" style="font-size:12px">{{ isPendingShotTTS(sb.id) ? '配音任务已加入队列' : '尚未生成语音文件' }}</div>
-                  <button class="btn btn-sm ml-auto" :disabled="isPendingShotTTS(sb.id)" @click="genShotTTS(sb)">{{ isPendingShotTTS(sb.id) ? '生成中' : hasTTS(sb) ? '重新生成' : '生成配音' }}</button>
+                  <button class="btn btn-sm ml-auto" :disabled="isPendingShotTTS(sb.id)" @click="genShotTTS(sb)">{{ isPendingShotTTS(sb.id) ? '生成中' : hasAnyTTS(sb) ? '重新生成' : '生成配音' }}</button>
                 </div>
                 <div v-if="shotTTSError(sb.id)" class="prod-error">{{ shotTTSError(sb.id) }}</div>
               </div>
@@ -1215,6 +1311,7 @@
             <div class="prod-section-bar">
               <span class="dim" style="font-size:12px">{{ sbs.length }} 个镜头</span>
               <span class="tag mono">{{ shotImgCount }}/{{ sbs.length }} 已有帧图</span>
+              <span class="tag mono">{{ gridCellsCount }}/{{ sbs.length }} 已有单图</span>
               <span class="tag">{{ lockedImageConfigLabel }}</span>
               <div class="ml-auto flex gap-1">
                 <BaseSelect v-model="frameMode" :options="frameModeOptions" placeholder="帧模式" searchable style="width:100px" />
@@ -1230,6 +1327,15 @@
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                   宫格图工具
                 </button>
+                <button class="btn btn-sm" :disabled="gridEpisodeBusy" @click="runGridEpisodeGenerate">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="3" width="7" height="18" rx="1"/><rect x="13" y="3" width="7" height="18" rx="1"/></svg>
+                  {{ gridEpisodeBusy ? '生产中…' : '单图生产' }}
+                </button>
+                <button class="btn btn-sm" :disabled="gridEpisodeBusy || !gridCellsCount" @click="runGridEpisodeRender">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                  单图渲染
+                </button>
+                <a v-if="gridCellsCount" class="btn btn-sm" :href="gridEpisodeVideoUrl" target="_blank" title="渲染完成后可打开成片 mp4">成片</a>
               </div>
             </div>
 
@@ -1653,7 +1759,7 @@
                   <div class="prod-dots">
                     <span :class="['dot', hasImg(sb) && 'ok', isFailedShotFrame(sb.id, 'first_frame') && 'fail']" /><span style="font-size:10px">{{ isImageStory ? '图' : '图' }}</span>
                     <span :class="['dot', hasVid(sb) && 'ok']" /><span style="font-size:10px">{{ isImageStory ? '视频(可选)' : '视频' }}</span>
-                    <span :class="['dot', hasTTS(sb) && 'ok']" /><span style="font-size:10px">配音</span>
+                    <span :class="['dot', hasAnyTTS(sb) && 'ok']" /><span style="font-size:10px">配音</span>
                     <span :class="['dot', hasComposed(sb) && 'ok', isPendingCompose(sb.id) && 'pending']" /><span style="font-size:10px">{{ isPendingCompose(sb.id) ? '合成中' : '合成' }}</span>
                   </div>
                   <div v-if="hasAudioCheckAssets(sb)" class="audio-check-list prod-audio-check" @click.stop>
@@ -1681,7 +1787,7 @@
       </div>
 
       <!-- ===== EXPORT PANEL ===== -->
-      <div v-else class="content-panel">
+      <div v-else-if="panel === 'export'" class="content-panel">
         <div v-if="!sbs.length" class="step-empty" style="flex:1">
           <div class="empty-visual">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -1703,10 +1809,60 @@
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                     重新拼接
                   </button>
-                  <a :href="mergeVideoSrc" download class="btn btn-primary">
+                  <a :href="mergeDownloadHref" download class="btn btn-primary">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                     下载视频
                   </a>
+                  <button
+                    v-if="!isAwaitingConfirmWeChat"
+                    class="btn btn-primary"
+                    :disabled="isPublishingWeChat"
+                    :title="draftUrlWeChat ? '已保存到视频号草稿箱' : '发布到微信视频号草稿箱'"
+                    @click="doPublishWeChatChannels"
+                  >
+                    <Loader2 v-if="isPublishingWeChat" :size="13" class="animate-spin" />
+                    <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                    {{ draftUrlWeChat ? '已发视频号' : '发视频号' }}
+                  </button>
+                  <button
+                    v-else
+                    class="btn btn-primary"
+                    @click="doConfirmPublishWeChatChannels"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    确认保存草稿
+                  </button>
+                  <button
+                    v-if="!isAwaitingConfirmDouyin"
+                    class="btn btn-primary"
+                    :disabled="isPublishingDouyin"
+                    :title="draftUrlDouyin ? '已保存到抖音草稿箱' : '保存到抖音草稿箱'"
+                    @click="doPublishDouyin"
+                  >
+                    <Loader2 v-if="isPublishingDouyin" :size="13" class="animate-spin" />
+                    <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                    {{ draftUrlDouyin ? '已存抖音草稿' : '存抖音草稿' }}
+                  </button>
+                  <button
+                    v-else
+                    class="btn btn-primary"
+                    @click="doConfirmPublishDouyin"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    确认保存抖音草稿
+                  </button>
+                </div>
+                <div v-if="draftUrlWeChat || publishErrorWeChat || isAwaitingConfirmWeChat || draftUrlDouyin || publishErrorDouyin || isAwaitingConfirmDouyin" class="publish-status-bar" style="margin-top:8px">
+                  <template v-if="draftUrlWeChat || publishErrorWeChat || isAwaitingConfirmWeChat">
+                    <a v-if="draftUrlWeChat" :href="draftUrlWeChat" target="_blank" class="publish-draft-link">打开视频号草稿</a>
+                    <span v-if="isAwaitingConfirmWeChat" class="publish-error-text">已自动填好视频号信息，请在浏览器中检查，确认后点击上方按钮保存草稿。</span>
+                    <span v-if="publishErrorWeChat && !isAwaitingConfirmWeChat" class="publish-error-text">{{ publishErrorWeChat }}</span>
+                  </template>
+                  <template v-if="draftUrlDouyin || publishErrorDouyin || isAwaitingConfirmDouyin">
+                    <a v-if="draftUrlDouyin" :href="draftUrlDouyin" target="_blank" class="publish-draft-link">打开抖音草稿</a>
+                    <span v-if="isAwaitingConfirmDouyin" class="publish-error-text">已自动填好抖音标题/简介/封面，请在浏览器中检查，确认后点击上方按钮保存草稿。</span>
+                    <span v-if="publishErrorDouyin && !isAwaitingConfirmDouyin" class="publish-error-text">{{ publishErrorDouyin }}</span>
+                  </template>
                 </div>
               </div>
             </template>
@@ -1736,6 +1892,29 @@
             </template>
           </div>
           <div class="export-list">
+            <div v-if="episodeBgmTrackInfos.length" class="export-bgm-section">
+              <div class="export-list-head">本集配乐</div>
+              <div class="export-bgm-list">
+                <div v-for="(item, idx) in episodeBgmTrackInfos" :key="idx" class="export-bgm-item">
+                  <div class="export-bgm-main">
+                    <span class="audio-check-label audio-check-bgm">BGM {{ idx + 1 }}</span>
+                    <span class="export-bgm-name" :title="item.info?.filename || item.path">{{ item.info?.filename || item.path }}</span>
+                  </div>
+                  <audio v-if="item.path" :src="'/' + item.path" controls preload="none" class="audio-check-player"></audio>
+                  <div v-if="item.info" class="bgm-library-meta" style="margin-top:6px">
+                    <div class="bgm-meta-line">
+                      <span class="bgm-meta-pill" :class="'source-' + item.info.source">{{ item.info.source }}</span>
+                      <span v-if="item.info.emotion_bucket" class="bgm-meta-pill">{{ item.info.emotion_bucket }}</span>
+                      <span v-if="item.info.intensity" class="bgm-meta-pill">{{ item.info.intensity }}</span>
+                      <span v-if="item.track?.role" class="bgm-meta-pill">{{ item.track.role === 'primary' ? '主情绪' : '副情绪' }}</span>
+                    </div>
+                    <div v-if="item.info.tags?.length" class="bgm-meta-tags">
+                      <span v-for="tag in item.info.tags" :key="tag" class="bgm-tag">{{ tag }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div class="export-list-head">镜头概览</div>
             <div class="export-list-body">
               <div v-for="(sb, i) in sbs" :key="sb.id" class="exp-row">
@@ -1911,9 +2090,9 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import {
-  Users, MapPin, Video, ImageIcon, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download, Loader2, Settings2, X, Sparkles,
+  Users, MapPin, Video, ImageIcon, Image, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download, Loader2, Settings2, X, Sparkles,
 } from 'lucide-vue-next'
-import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, ttsAPI, mergeAPI, gridAPI, aiConfigAPI, voicesAPI, libraryAPI, taskAPI } from '~/composables/useApi'
+import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, ttsAPI, mergeAPI, gridAPI, gridEpisodeAPI, aiConfigAPI, voicesAPI, libraryAPI, taskAPI, introTemplateAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import { useTasks } from '~/composables/useTasks'
 import BaseSelect from '~/components/BaseSelect.vue'
@@ -1963,12 +2142,6 @@ const autoMode = computed(() => episode.value?.auto_mode === true)
 const enableAiRewrite = computed(() => episode.value?.enable_ai_rewrite !== false)
 const narrationVoiceId = computed(() => episode.value?.narration_voice_id || '')
 const narrationSpeed = computed(() => episode.value?.narration_speed || 1.0)
-const pacingMode = computed(() => episode.value?.pacing_mode || 'tight')
-const pacingModeOptions = [
-  { label: '标准', value: 'standard' },
-  { label: '紧凑', value: 'tight' },
-  { label: '极速', value: 'extreme' },
-]
 const dialogueMode = computed(() => episode.value?.dialogue_mode || 'narration_only')
 const dialogueModeOptions = [
   { label: '无对白', value: 'narration_only' },
@@ -1996,19 +2169,56 @@ const subtitlePositionOptions = [
   { label: '居中', value: 'middle' },
   { label: '底部', value: 'bottom' },
 ]
+
+// Cover
+const cover4x3Url = ref('')
+const cover3x4Url = ref('')
+const coverGenerating = ref(false)
+const coverGeneratingRatio = ref(null)
+const coverDesign = computed(() => {
+  const value = episode.value?.cover_design_json || episode.value?.coverDesignJson
+  if (!value) return null
+  if (typeof value === 'object') return value
+  try { return JSON.parse(value) } catch { return null }
+})
 const subtitleGenerating = ref(false)
 const subtitlePreviewLoading = ref(false)
 const subtitlePreviewUrl = ref('')
 const firstSubtitleStoryboard = computed(() => sbs.value.find(s => (s.narration || s.dialogue)?.trim()) || null)
 const openingHook = computed(() => episode.value?.opening_hook || '')
 const cliffhanger = computed(() => episode.value?.cliffhanger || '')
-const recapScript = computed(() => episode.value?.recap_script || '')
-const seriesHook = computed(() => episode.value?.series_hook || '')
 const introUrl = computed(() => episode.value?.intro_video_url || '')
 const recapUrl = computed(() => episode.value?.recap_video_url || '')
+const introTemplates = ref([])
+const introTemplateId = computed(() => drama.value?.intro_template_id || drama.value?.introTemplateId || '')
+const introTemplateOptions = computed(() => introTemplates.value.map(t => ({ label: t.name, value: t.id })))
+
+// Publish to external platforms
+const publishRecords = ref([])
+const publishRecordsPollTimer = ref(null)
+const wechatPublishRecord = computed(() => publishRecords.value.find(r => r.platform === 'wechat_channels'))
+const douyinPublishRecord = computed(() => publishRecords.value.find(r => r.platform === 'douyin'))
+const isPublishingWeChat = computed(() => {
+  if (wechatPublishRecord.value?.status === 'running' || wechatPublishRecord.value?.status === 'pending') return true
+  return isTaskTypeRunning('publish.wechat_channels')
+})
+const isAwaitingConfirmWeChat = computed(() => wechatPublishRecord.value?.status === 'awaiting_confirm')
+const publishErrorWeChat = computed(() => wechatPublishRecord.value?.error_message || taskError('publish.wechat_channels')?.message || '')
+const draftUrlWeChat = computed(() => wechatPublishRecord.value?.draft_url || '')
+const awaitingConfirmTaskIdWeChat = computed(() => wechatPublishRecord.value?.task_id || null)
+const isPublishingDouyin = computed(() => {
+  if (douyinPublishRecord.value?.status === 'running' || douyinPublishRecord.value?.status === 'pending') return true
+  return isTaskTypeRunning('publish.douyin')
+})
+const isAwaitingConfirmDouyin = computed(() => douyinPublishRecord.value?.status === 'awaiting_confirm')
+const publishErrorDouyin = computed(() => douyinPublishRecord.value?.error_message || taskError('publish.douyin')?.message || '')
+const draftUrlDouyin = computed(() => douyinPublishRecord.value?.draft_url || '')
+const awaitingConfirmTaskIdDouyin = computed(() => douyinPublishRecord.value?.task_id || null)
+const isPublishing = computed(() => isPublishingWeChat.value || isPublishingDouyin.value)
+const isAwaitingConfirm = computed(() => isAwaitingConfirmWeChat.value || isAwaitingConfirmDouyin.value)
 const workflowType = computed(() => episode.value?.workflow_type || episode.value?.workflowType || '')
 const hookEditing = ref(false)
-const hookForm = reactive({ opening_hook: '', cliffhanger_hook: '', recap_script: '', series_hook: '' })
+const hookForm = reactive({ opening_hook: '', cliffhanger_hook: '' })
 const narrationMode = computed(() => episode.value?.narration_mode || episode.value?.narrationMode || '')
 // 业务契约：direct_script 的 narration 字段不是 AI 旁白，而是逐镜头原文 TTS 切片。
 // 只有 story_rewrite + rewrite 才允许调用 narrator 生成新的解说/旁白文案。
@@ -2018,6 +2228,9 @@ const narrationFieldLabel = computed(() => usesOriginalNarrationText.value ? '�
 const narrationFieldPlaceholder = computed(() => usesOriginalNarrationText.value
   ? '原文切片，仅用于 TTS；不要改写成第一人称'
   : 'AI 解说/旁白文案，作为镜头主音轨')
+const episodePreTTSPath = computed(() => episode.value?.pre_tts_audio_url || episode.value?.preTtsAudioUrl || '')
+const hasEpisodePreTTS = computed(() => !!episodePreTTSPath.value)
+const episodePreTTSUrl = computed(() => normalizePlayableAssetUrl(episodePreTTSPath.value))
 const {
   tasks: mediaTasks,
   loading: tasksLoading,
@@ -2038,6 +2251,14 @@ const mergeVideoSrc = computed(() => {
   const cacheKey = mergeData.value?.completed_at || mergeData.value?.created_at || ''
   return '/' + mergeUrl.value + (cacheKey ? `?v=${Date.parse(cacheKey) || cacheKey}` : '')
 })
+const mergeDownloadHref = computed(() => {
+  const id = episode.value?.id
+  if (!id) return ''
+  const path = `/api/v1/merge/episodes/${id}/download-video`
+  if (process.dev) return `http://127.0.0.1:5679${path}`
+  return path
+})
+
 let mergePollTimer = null
 function clearMergePoll() {
   if (mergePollTimer) {
@@ -2218,6 +2439,7 @@ function charImageStatusText(id) {
       aliyun: '阿里',
       chatfire: 'Chatfire',
       apimart: 'APIMart',
+      rightcode: 'RightCode',
     }
     return `${providerLabels[task.provider] || task.provider} 生成中`
   }
@@ -2242,11 +2464,67 @@ function handleImageViewerKeydown(event) {
 
 onMounted(() => {
   window.addEventListener('keydown', handleImageViewerKeydown)
+  loadGridCellsStatus().catch(() => {})
 })
+
+// ---- 每分镜单图生产（episode 级）----
+const gridCellsCount = ref(0)
+const gridEpisodeBusy = ref(false)
+const gridEpisodeVideoUrl = computed(() => `/static/remotion/grid-story-ep${epId.value}.mp4`)
+
+async function loadGridCellsStatus() {
+  if (!epId.value) return
+  const res = await gridEpisodeAPI.cells(epId.value)
+  const rows = res?.storyboards || []
+  gridCellsCount.value = rows.filter((r) =>
+    Array.isArray(r.cells) && r.cells.length === 1 && r.cells.every((c) => c?.src),
+  ).length
+}
+
+async function runGridEpisodeGenerate() {
+  if (gridEpisodeBusy.value) return
+  gridEpisodeBusy.value = true
+  try {
+    await gridEpisodeAPI.generate(epId.value, {})
+    toast.success('单图生产任务已创建（每个分镜一张16:9图片）')
+    const started = Date.now()
+    const timer = setInterval(async () => {
+      try {
+        await loadGridCellsStatus()
+        if (gridCellsCount.value >= sbs.value.length) {
+          clearInterval(timer)
+          gridEpisodeBusy.value = false
+          toast.success('单图生产完成')
+        } else if (Date.now() - started > 40 * 60_000) {
+          clearInterval(timer)
+          gridEpisodeBusy.value = false
+          toast.warning('等待超时，请稍后手动刷新状态')
+        }
+      } catch { /* keep polling */ }
+    }, 10_000)
+  } catch (e) {
+    toast.error(e?.message || '单图生产任务创建失败')
+    gridEpisodeBusy.value = false
+  }
+}
+
+async function runGridEpisodeRender() {
+  if (gridEpisodeBusy.value) return
+  gridEpisodeBusy.value = true
+  try {
+    await gridEpisodeAPI.render(epId.value)
+    toast.success('渲染任务已创建（约 30-60 分钟），完成后点"成片"打开')
+  } catch (e) {
+    toast.error(e?.message || '渲染任务创建失败')
+  } finally {
+    gridEpisodeBusy.value = false
+  }
+}
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleImageViewerKeydown)
   clearMergePoll()
+  stopPublishRecordsPolling()
 })
 
 function isPendingSceneImage(id) {
@@ -2582,6 +2860,8 @@ function stepRunning(key) {
         && (hasActiveMediaTask('compose.storyboard') || hasActiveMediaTask('compose.episode'))
     case 'export:merge':
       return !mergeUrl.value && isMergeTaskRunning()
+    case 'cover:generate':
+      return !mainStageDone('cover') && hasActiveMediaTask('cover.generate')
     default:
       return false
   }
@@ -2611,9 +2891,9 @@ const canGoNext = computed(() => {
   return false
 })
 function goPrevStep() { if (scriptStep.value > 0) scriptStep.value-- }
-function goNextStep() {
+async function goNextStep() {
   if (scriptStep.value === 0 && localRaw.value.trim()) { saveRaw() }
-  if (scriptStep.value === 1 && localScript.value.trim()) { saveScr() }
+  if (scriptStep.value === 1 && localScript.value.trim() && !(await saveScr())) return
   if (scriptStep.value === 4) { panel.value = 'production'; return }
   if (canGoNext.value) scriptStep.value++
 }
@@ -2935,10 +3215,11 @@ async function doGridSplit() {
 
 const charImgCount = computed(() => visualChars.value.filter(c => c.image_url || c.imageUrl).length)
 const sceneImgCount = computed(() => scenes.value.filter(s => s.image_url || s.imageUrl).length)
-const ttsEligibleCount = computed(() => sbs.value.filter(s => hasDialogue(s)).length)
-const ttsGeneratedCount = computed(() => sbs.value.filter(s => hasDialogue(s) && hasTTS(s)).length)
+const ttsCandidates = computed(() => sbs.value.filter(hasTTSText))
+const ttsEligibleCount = computed(() => ttsCandidates.value.length)
+const ttsGeneratedCount = computed(() => ttsCandidates.value.filter(hasAnyTTS).length)
 const latestTTSTasks = computed(() => sbs.value
-  .filter(hasDialogue)
+  .filter(hasTTSText)
   .map(sb => shotTTSTask(sb.id))
   .filter(Boolean))
 const ttsQueuedCount = computed(() => latestTTSTasks.value.filter(t => String(t.status || '') === 'queued').length)
@@ -2986,21 +3267,15 @@ const prodTabDefs = computed(() => [
 ])
 
 const mainStageDefs = [
-  { id: 'intro', label: '开场/提要', desc: '钩子与开场前情提要', icon: Sparkles },
   { id: 'script', label: '剧本', desc: '内容改写与整理', icon: FileText },
   { id: 'assets', label: '资产', desc: '角色、场景与音色', icon: FolderKanban },
   { id: 'storyboard', label: '分镜', desc: '镜头制作与合成', icon: Clapperboard },
+  { id: 'intro', label: '开场/提要', desc: '开头、结尾与前情提要', icon: Sparkles },
+  { id: 'cover', label: '封面', desc: '封面照生成', icon: Image },
   { id: 'export', label: '导出', desc: '拼接与成片输出', icon: Download },
 ]
 
 const sidebarSections = computed(() => ([
-  {
-    id: 'intro',
-    label: '开场/提要',
-    items: [
-      { key: 'intro:hooks', label: '开头和结尾', desc: '', icon: Sparkles, done: !!(openingHook.value && cliffhanger.value) },
-    ],
-  },
   {
     id: 'script',
     label: '剧本',
@@ -3025,6 +3300,20 @@ const sidebarSections = computed(() => ([
     ],
   },
   {
+    id: 'intro',
+    label: '开场/提要',
+    items: [
+      { key: 'intro:hooks', label: '开头和结尾', desc: '', icon: Sparkles, done: !!(openingHook.value && cliffhanger.value) },
+    ],
+  },
+  {
+    id: 'cover',
+    label: '封面',
+    items: [
+      { key: 'cover:generate', label: '封面生成', desc: '', icon: Image, done: !!(cover4x3Url.value && cover3x4Url.value) },
+    ],
+  },
+  {
     id: 'export',
     label: '导出',
     items: [
@@ -3040,6 +3329,7 @@ const sidebarSections = computed(() => ([
 const activeMainStage = computed(() => {
   if (panel.value === 'intro') return 'intro'
   if (panel.value === 'export') return 'export'
+  if (panel.value === 'cover') return 'cover'
   if (panel.value === 'production') {
     return ['chars', 'scenes'].includes(prodTab.value) ? 'assets' : 'storyboard'
   }
@@ -3066,6 +3356,7 @@ function mainStageDone(stageId) {
       && videosReady
       && composedCount.value > 0
   }
+  if (stageId === 'cover') return !!(cover4x3Url.value && cover3x4Url.value)
   if (stageId === 'export') return !!mergeUrl.value
   return false
 }
@@ -3073,6 +3364,10 @@ function mainStageDone(stageId) {
 function goMainStage(stageId) {
   if (stageId === 'intro') {
     panel.value = 'intro'
+    return
+  }
+  if (stageId === 'cover') {
+    panel.value = 'cover'
     return
   }
   if (stageId === 'script') {
@@ -3134,6 +3429,11 @@ const activeSubSteps = computed(() => {
       { key: 'prod:compose', label: '视频合成', done: !!sbs.value.length && composedCount.value === sbs.value.length },
     ]
   }
+  if (activeMainStage.value === 'cover') {
+    return [
+      { key: 'cover:generate', label: '封面生成', done: !!(cover4x3Url.value && cover3x4Url.value) },
+    ]
+  }
   return [
     { key: 'export:merge', label: '拼接导出', done: !!mergeUrl.value },
   ]
@@ -3141,6 +3441,7 @@ const activeSubSteps = computed(() => {
 
 const activeSubStepKey = computed(() => {
   if (panel.value === 'intro') return 'intro:hooks'
+  if (panel.value === 'cover') return 'cover:generate'
   if (panel.value === 'script') {
     if (scriptStep.value === 0) return 'script:raw'
     if (scriptStep.value === 1) return 'script:rewrite'
@@ -3161,6 +3462,11 @@ const bubbleSteps = computed(() => {
   if (panel.value === 'intro') {
     return [
       { key: 'intro:hooks', label: '开头和结尾', done: !!(openingHook.value && cliffhanger.value) },
+    ]
+  }
+  if (panel.value === 'cover') {
+    return [
+      { key: 'cover:generate', label: '封面生成', done: !!(cover4x3Url.value && cover3x4Url.value) },
     ]
   }
   if (panel.value === 'script') {
@@ -3184,16 +3490,21 @@ const bubbleSteps = computed(() => {
 
 const activeBubbleKey = computed(() => {
   if (panel.value === 'intro') return activeSubStepKey.value
+  if (panel.value === 'cover') return activeSubStepKey.value
   if (panel.value === 'script') return activeSubStepKey.value
   if (panel.value === 'production') return `prod:${prodTab.value}`
   return ''
 })
 
-const showBottomBubble = computed(() => panel.value === 'intro' || panel.value === 'script' || panel.value === 'production')
+const showBottomBubble = computed(() => panel.value === 'intro' || panel.value === 'cover' || panel.value === 'script' || panel.value === 'production')
 
 function goSubStep(key) {
   if (key.startsWith('intro:')) {
     panel.value = 'intro'
+    return
+  }
+  if (key.startsWith('cover:')) {
+    panel.value = 'cover'
     return
   }
   if (key.startsWith('script:')) {
@@ -3218,7 +3529,6 @@ function goSubStep(key) {
 
 const pipelineProgress = computed(() => {
   let p = 0
-  if (openingHook.value && cliffhanger.value) p++
   if (rawContent.value) p++
   if (scriptContent.value) p++
   if (chars.value.length) p++
@@ -3228,12 +3538,15 @@ const pipelineProgress = computed(() => {
   if (sbs.value.some(s => s.composed_image || s.composedImage)) p++
   if (sbs.value.some(s => s.video_url || s.videoUrl)) p++
   if (sbs.value.length && composedCount.value === sbs.value.length) p++
+  if (cover4x3Url.value && cover3x4Url.value) p++
+  if (openingHook.value && cliffhanger.value) p++
   if (mergeUrl.value) p++
   return p
 })
 
 const currentStageLabel = computed(() => {
   if (panel.value === 'intro') return '开场/提要阶段 · 开头和结尾'
+  if (panel.value === 'cover') return '封面阶段 · 封面生成'
   if (panel.value === 'script') return `剧本阶段 · ${stepLabels[scriptStep.value]}`
   if (panel.value === 'production') return `制作阶段 · ${prodTabDefs.value[prodTabIdx.value]?.label || '制作'}`
   return mergeUrl.value ? '导出阶段 · 成片已生成' : '导出阶段 · 等待拼接'
@@ -3266,8 +3579,39 @@ function getVoiceProfile(voiceId) {
 }
 const selectedSb = ref(null)
 const bgmLibraryInfo = ref(null)
+const bgmCueInfo = ref(null)
 async function loadBgmLibraryInfo() {
-  const url = selectedSb.value?.bgm_audio_url || selectedSb.value?.bgmAudioUrl
+  bgmCueInfo.value = null
+  let url = selectedSb.value?.bgm_audio_url || selectedSb.value?.bgmAudioUrl
+
+  // 镜头自身没有 BGM 时， fallback 到集级 bgm_plan_json 的 cue
+  if (!url && selectedSb.value && episode.value?.bgm_plan_json) {
+    try {
+      const plan = typeof episode.value.bgm_plan_json === 'string'
+        ? JSON.parse(episode.value.bgm_plan_json)
+        : episode.value.bgm_plan_json
+      const cues = plan?.cues || []
+      const idx = sbs.value.findIndex(s => s.id === selectedSb.value.id)
+      if (idx >= 0) {
+        const cue = cues.find(c =>
+          (c.shot_start_index ?? c.shotStartIndex ?? 0) <= idx &&
+          idx <= (c.shot_end_index ?? c.shotEndIndex ?? 0)
+        )
+        if (cue?.bgm_path || cue?.bgmPath) {
+          url = cue.bgm_path || cue.bgmPath
+          bgmCueInfo.value = {
+            path: url,
+            start: cue.start ?? 0,
+            end: cue.end ?? 0,
+            emotionBucket: cue.emotion_bucket || cue.emotionBucket,
+          }
+        }
+      }
+    } catch {
+      // ignore malformed plan
+    }
+  }
+
   if (!url) {
     bgmLibraryInfo.value = null
     return
@@ -3278,6 +3622,33 @@ async function loadBgmLibraryInfo() {
     bgmLibraryInfo.value = null
   }
 }
+const episodeBgmTrackInfos = ref([])
+async function loadEpisodeBgmTrackInfos() {
+  episodeBgmTrackInfos.value = []
+  if (!episode.value?.bgm_plan_json) return
+  try {
+    const plan = typeof episode.value.bgm_plan_json === 'string'
+      ? JSON.parse(episode.value.bgm_plan_json)
+      : episode.value.bgm_plan_json
+    const tracks = plan?.tracks || []
+    const infos = await Promise.all(
+      tracks.map(async (track) => {
+        const path = track?.bgm_path || track?.bgmPath || track?.path
+        if (!path) return { track, info: null }
+        try {
+          const info = await libraryAPI.lookupMusic(path)
+          return { track, info, path }
+        } catch {
+          return { track, info: null, path }
+        }
+      })
+    )
+    episodeBgmTrackInfos.value = infos
+  } catch {
+    episodeBgmTrackInfos.value = []
+  }
+}
+
 const sfxLibraryInfo = ref(null)
 async function loadSfxLibraryInfo() {
   const url = selectedSb.value?.sfx_audio_url || selectedSb.value?.sfxAudioUrl
@@ -3461,12 +3832,45 @@ function gridSplitError() {
   return isFailedTask(task) ? taskFailureMessage(task) : ''
 }
 
+async function loadCovers() {
+  try {
+    const data = await episodeAPI.covers(epId.value)
+    if (data.cover_design_json) episode.value.cover_design_json = data.cover_design_json
+    cover4x3Url.value = data.cover_4x3_url || ''
+    cover3x4Url.value = data.cover_3x4_url || ''
+  } catch {
+    cover4x3Url.value = episode.value?.cover_image_4x3_url || ''
+    cover3x4Url.value = episode.value?.cover_image_3x4_url || ''
+  }
+}
+
+async function generateCovers(frameType) {
+  try {
+    coverGenerating.value = true
+    if (frameType) coverGeneratingRatio.value = frameType
+    const payload = frameType ? { frame_type: frameType } : {}
+    await episodeAPI.generateCovers(epId.value, payload)
+    toast.success(frameType ? `${frameType} 封面生成任务已创建` : '封面生成任务已创建')
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    coverGenerating.value = false
+    coverGeneratingRatio.value = null
+  }
+}
+
+async function generateCoverRatio(frameType) {
+  await generateCovers(frameType)
+}
+
 async function refresh(options = {}) {
   try {
     drama.value = await dramaAPI.get(dramaId)
+    try { introTemplates.value = (await introTemplateAPI.list()) || [] } catch { introTemplates.value = [] }
     const ep = drama.value.episodes?.find(e => (e.episode_number || e.episodeNumber) === episodeNumber)
     if (ep) {
       episode.value = ep
+      loadEpisodeBgmTrackInfos().catch(() => {})
       try { chars.value = await episodeAPI.characters(ep.id) } catch { chars.value = [] }
       try { scenes.value = await episodeAPI.scenes(ep.id) } catch { scenes.value = [] }
       sbs.value = await episodeAPI.storyboards(ep.id)
@@ -3479,21 +3883,26 @@ async function refresh(options = {}) {
       }
       await loadAgentTasks(dramaId, ep.id, refresh)
       if (!options.skipTasks) await loadCreationTasks()
+      await loadCovers()
+      await loadPublishRecords()
+      if (isPublishing.value || isAwaitingConfirm.value) startPublishRecordsPolling()
 
       const epHasContent = !!(episode.value?.content)
       const epHasScript = !!(episode.value?.script_content || episode.value?.scriptContent)
       const epHasSbs = sbs.value.length > 0
 
-      if (epHasSbs) scriptStep.value = 4
-      else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
-      else if (epHasScript && chars.value.length) scriptStep.value = 2
-      else if (epHasScript || epHasContent) scriptStep.value = 1
-      else scriptStep.value = 0
-
       if (!panelInitialized.value) {
         panelInitialized.value = true
+        // 只在首次加载时根据数据进度初始化 scriptStep，避免后续轮询/刷新覆盖用户手动导航
+        if (epHasSbs) scriptStep.value = 4
+        else if (epHasScript && chars.value.some(c => c.voice_style || c.voiceStyle)) scriptStep.value = 3
+        else if (epHasScript && chars.value.length) scriptStep.value = 2
+        else if (epHasScript || epHasContent) scriptStep.value = 1
+        else scriptStep.value = 0
+
         const hasHooks = !!(episode.value?.opening_hook && episode.value?.cliffhanger_hook)
-        if (!hasHooks) panel.value = 'intro'
+        const productionDone = sbs.value.length > 0 && composedCount.value === sbs.value.length
+        if (productionDone && !hasHooks) panel.value = 'intro'
       }
 
       await loadLatestGridImage()
@@ -3505,12 +3914,20 @@ async function refresh(options = {}) {
 }
 
 function saveRaw() { episodeAPI.update(epId.value, { content: localRaw.value }); episode.value.content = localRaw.value }
-function saveScr() { episodeAPI.update(epId.value, { script_content: localScript.value }); episode.value.script_content = localScript.value }
+async function saveScr() {
+  try {
+    const result = await episodeAPI.update(epId.value, { script_content: localScript.value })
+    episode.value.script_content = localScript.value
+    if (result?.cover_design) episode.value.cover_design_json = result.cover_design
+    return true
+  } catch (e) {
+    toast.error(e?.message || '精稿保存失败')
+    return false
+  }
+}
 function startEditHooks() {
   hookForm.opening_hook = openingHook.value
   hookForm.cliffhanger_hook = cliffhanger.value
-  hookForm.recap_script = recapScript.value
-  hookForm.series_hook = seriesHook.value
   hookEditing.value = true
 }
 async function saveHooks() {
@@ -3518,19 +3935,101 @@ async function saveHooks() {
     await episodeAPI.update(epId.value, {
       opening_hook: hookForm.opening_hook,
       cliffhanger_hook: hookForm.cliffhanger_hook,
-      recap_script: hookForm.recap_script,
-      series_hook: hookForm.series_hook,
     })
     Object.assign(episode.value, {
       opening_hook: hookForm.opening_hook,
       cliffhanger: hookForm.cliffhanger_hook,
-      recap_script: hookForm.recap_script,
-      series_hook: hookForm.series_hook,
     })
     hookEditing.value = false
-    toast.success('钩子文案已保存')
+    toast.success('开头/结尾文案已保存')
   } catch (e) { toast.error(e.message) }
 }
+
+async function loadPublishRecords() {
+  if (!epId.value) return
+  try {
+    publishRecords.value = await episodeAPI.publishRecords(epId.value)
+  } catch (e) {
+    publishRecords.value = []
+  }
+}
+
+function stopPublishRecordsPolling() {
+  if (!publishRecordsPollTimer.value) return
+  clearInterval(publishRecordsPollTimer.value)
+  publishRecordsPollTimer.value = null
+}
+
+function startPublishRecordsPolling() {
+  if (publishRecordsPollTimer.value) return
+  publishRecordsPollTimer.value = setInterval(async () => {
+    await loadPublishRecords()
+    if (!isPublishing.value && !isAwaitingConfirm.value) {
+      stopPublishRecordsPolling()
+    }
+  }, 3000)
+}
+
+async function doPublishWeChatChannels() {
+  if (!mergeUrl.value) {
+    toast.error('请先完成视频拼接')
+    return
+  }
+  try {
+    await episodeAPI.publishWeChatChannels(epId.value)
+    toast.success('已加入发布队列')
+    startPublishRecordsPolling()
+    await loadPublishRecords()
+  } catch (e) {
+    toast.error(e.message || '发布失败')
+  }
+}
+
+async function doConfirmPublishWeChatChannels() {
+  const taskId = awaitingConfirmTaskIdWeChat.value
+  if (!taskId) {
+    toast.error('找不到等待确认的任务')
+    return
+  }
+  try {
+    await episodeAPI.confirmPublishWeChatChannels(epId.value, taskId)
+    toast.success('已确认保存草稿')
+    await loadPublishRecords()
+  } catch (e) {
+    toast.error(e.message || '确认失败')
+  }
+}
+
+async function doPublishDouyin() {
+  if (!mergeUrl.value) {
+    toast.error('请先完成视频拼接')
+    return
+  }
+  try {
+    await episodeAPI.publishDouyin(epId.value)
+    toast.success('已加入抖音草稿队列')
+    startPublishRecordsPolling()
+    await loadPublishRecords()
+  } catch (e) {
+    toast.error(e.message || '抖音保存草稿失败')
+  }
+}
+
+async function doConfirmPublishDouyin() {
+  const taskId = awaitingConfirmTaskIdDouyin.value
+  if (!taskId) {
+    toast.error('找不到等待确认的任务')
+    return
+  }
+  try {
+    await episodeAPI.confirmPublishDouyin(epId.value, taskId)
+    toast.success('已确认保存抖音草稿')
+    await loadPublishRecords()
+  } catch (e) {
+    toast.error(e.message || '确认失败')
+  }
+}
+
 function isTaskTypeRunning(type) {
   return isActiveTask(latestMediaTask(type, () => true))
 }
@@ -3540,9 +4039,16 @@ async function regenerateHooks() {
     toast.success('已创建钩子设计任务')
   } catch (e) { toast.error(e.message) }
 }
+async function updateIntroTemplate(templateId) {
+  try {
+    await dramaAPI.update(dramaId, { intro_template_id: templateId || null })
+    drama.value.intro_template_id = templateId
+    toast.success('已切换开场模板')
+  } catch (e) { toast.error(e.message) }
+}
 async function regenerateIntro() {
   try {
-    await taskAPI.create({ type: 'intro.compose', drama_id: dramaId, episode_id: epId.value, payload: { episode_id: epId.value } })
+    await taskAPI.create({ type: 'intro.compose', drama_id: dramaId, episode_id: epId.value, payload: { episode_id: epId.value, template_id: introTemplateId.value } })
     toast.success('已创建开场合成任务')
   } catch (e) { toast.error(e.message) }
 }
@@ -3609,24 +4115,6 @@ async function updateNarrationSpeed(speed) {
     toast.success(`解说语速已设为 ${speed.toFixed(1)}x`)
   } catch (e) {
     toast.error(e?.message || '设置失败')
-  }
-}
-async function updatePacingMode(mode) {
-  if (mode === pacingMode.value) return
-  if (!confirm(`切换叙事节奏会清空当前分镜、旁白、配音和成片，并按“${mode === 'extreme' ? '极速' : mode === 'tight' ? '紧凑' : '标准'}”模式重新生成分镜。是否继续？`)) return
-  try {
-    const result = await episodeAPI.update(epId.value, { pacing_mode: mode })
-    episode.value.pacing_mode = mode
-    toast.success(`已切换为${mode === 'extreme' ? '极速' : mode === 'tight' ? '紧凑' : '标准'}节奏，分镜重新生成中`)
-    if (result.pacing_task_ids) {
-      watchAsyncResult(() => {
-        loadAgentTasks()
-        const stillRunning = rn.value && ['storyboard_breaker', 'storyboard_splitter', 'narrator'].includes(rt.value)
-        return !stillRunning
-      }, 60)
-    }
-  } catch (e) {
-    toast.error(e?.message || '切换失败')
   }
 }
 async function updateDialogueMode(mode) {
@@ -3708,18 +4196,21 @@ async function confirmSetRenderMode(mode) {
   await setRenderMode(mode)
 }
 function doRewrite() { saveRaw(); runAgent('script_rewriter', '请读取剧本并改写为格式化剧本，然后保存', dramaId, epId.value, refresh) }
-function skipRewrite() {
+async function skipRewrite() {
   const raw = (localRaw.value || rawContent.value || '').trim()
   if (!raw) {
     toast.warning('请先填写原始内容')
     return
   }
   localScript.value = raw
-  saveScr()
+  if (!(await saveScr())) return
   toast.success('已跳过 AI 改写，当前将直接使用原始内容')
   scriptStep.value = 2
 }
-function doExtract() { saveScr(); runAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', dramaId, epId.value, afterExtract) }
+async function doExtract() {
+  if (!(await saveScr())) return
+  runAgent('extractor', '请从剧本中提取所有角色和场景信息，提取时自动与项目已有数据进行去重合并', dramaId, epId.value, afterExtract)
+}
 async function afterExtract() {
   await refresh()
   // 提取完成后，自动用 LLM（配音导演）按性别/年龄/职业/定位分配音色，再错开同音色音调；
@@ -3937,6 +4428,21 @@ function hasTTS(sb) { return !!(sb?.tts_audio_url || sb?.ttsAudioUrl) }
 function getTTSUrl(sb) { return sb?.tts_audio_url || sb?.ttsAudioUrl || '' }
 function hasNarrationAudio(sb) { return !!(sb?.narration_audio_url || sb?.narrationAudioUrl) }
 function getNarrationAudioUrl(sb) { return sb?.narration_audio_url || sb?.narrationAudioUrl || '' }
+function hasNarrationText(sb) { return !!String(sb?.narration || '').trim() && !IGNORE_TTS_TEXT.test(String(sb?.narration || '').trim()) }
+function hasTTSText(sb) { return hasDialogue(sb) || hasNarrationText(sb) }
+function hasAnyTTS(sb) { return hasTTS(sb) || hasNarrationAudio(sb) }
+function getPrimaryTTSUrl(sb) {
+  return normalizePlayableAssetUrl(getNarrationAudioUrl(sb) || getTTSUrl(sb))
+}
+function getTTSSourceLabel(sb) {
+  if (hasNarrationText(sb)) return usesOriginalNarrationText.value ? '原文TTS' : '解说TTS'
+  return getDialogueSpeaker(sb) || '对白TTS'
+}
+function getTTSTextPreview(sb) {
+  const narration = String(sb?.narration || '').trim()
+  if (narration) return narration
+  return getDialogueText(sb)
+}
 function getDialogueSpeaker(sb) {
   const speaker = getDialogueSpeakerRaw(sb)
   if (!speaker) return '旁白'
@@ -3963,6 +4469,13 @@ async function batchShotTTS() {
   const result = await ttsAPI.all(epId.value, false)
   toast.success(`已为 ${result.total} 个镜头创建批量配音任务`)
   await refresh()
+}
+async function batchDubbingTTS() {
+  if (usesOriginalNarrationText.value) {
+    await batchNarrationAudio()
+    return
+  }
+  await batchShotTTS()
 }
 async function regenAllTTS() {
   // 重新生成所有可配音镜头（含已生成的），用于改音色后批量刷新
@@ -4059,12 +4572,20 @@ function getAudioCheckAssets(sb) {
     { kind: 'sfx', label: 'SFX', path: sb?.sfx_audio_url || sb?.sfxAudioUrl },
     { kind: 'ambient', label: '环境', path: sb?.ambient_audio_url || sb?.ambientAudioUrl },
   ]
+  if (!usesOriginalNarrationText.value) {
+    items.unshift(
+      { kind: 'dialogue', label: '对白TTS', path: sb?.tts_audio_url || sb?.ttsAudioUrl },
+      { kind: 'narration', label: '解说TTS', path: sb?.narration_audio_url || sb?.narrationAudioUrl },
+    )
+  }
   return items
     .map(item => ({
       kind: item.kind,
       label: item.label,
       url: normalizePlayableAssetUrl(item.path),
-      name: getAssetFilename(item.path),
+      name: item.kind === 'narration' || item.kind === 'dialogue'
+        ? `配音生成 · ${getAssetFilename(item.path)}`
+        : getAssetFilename(item.path),
     }))
     .filter(item => item.url)
 }
@@ -5601,6 +6122,7 @@ onMounted(() => {
 .shot-dot.has-img { background: var(--success); }
 .shot-dot.has-video { background: var(--info); }
 .shot-dot.has-dialogue { background: var(--warning); }
+.shot-dot.has-tts { background: #1f8f6b; }
 .shot-dot.has-bgm { background: #9b59b6; }
 .shot-dot.has-sfx { background: #e67e22; }
 .shot-dot.has-ambient { background: #3498db; }
@@ -5641,6 +6163,8 @@ onMounted(() => {
   color: #fff;
   background: var(--text-3);
 }
+.audio-check-narration { background: #1f8f6b; }
+.audio-check-dialogue { background: #b8751a; }
 .audio-check-bgm { background: #7c3fb2; }
 .audio-check-sfx { background: #c56a17; }
 .audio-check-ambient { background: #2476ad; }
@@ -5657,6 +6181,37 @@ onMounted(() => {
   width: 100%;
   height: 28px;
   min-width: 0;
+}
+.episode-tts-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0 14px;
+  padding: 12px;
+  border: 1px solid rgba(31, 143, 107, 0.24);
+  border-radius: 8px;
+  background: rgba(31, 143, 107, 0.06);
+}
+.episode-tts-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.episode-tts-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-0);
+}
+.episode-tts-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.episode-tts-player {
+  width: 100%;
+  height: 32px;
 }
 .shot-location {
   font-size: 10px;
@@ -6532,9 +7087,17 @@ onMounted(() => {
 @keyframes merge-indeterminate { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
 .merge-error-text { color: var(--error); }
 .export-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; width: 100%; max-width: 720px; }
+.publish-status-bar { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 720px; font-size: 12px; }
+.publish-draft-link { color: var(--primary); text-decoration: underline; }
+.publish-error-text { color: var(--danger, #ef5350); }
 .export-list { width: 240px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
 .export-list-head { padding: 11px 14px; font-size: 11px; font-weight: 700; color: var(--text-3); border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.06em; }
 .export-list-body { flex: 1; overflow-y: auto; padding: 6px; }
+.export-bgm-section { border-bottom: 1px solid var(--border); max-height: 45%; overflow-y: auto; }
+.export-bgm-list { padding: 8px; display: flex; flex-direction: column; gap: 10px; }
+.export-bgm-item { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: var(--radius); background: var(--bg-2, rgba(0,0,0,0.02)); }
+.export-bgm-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.export-bgm-name { flex: 1; font-size: 11px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .exp-row { display: flex; flex-direction: column; gap: 6px; padding: 6px 8px; border-radius: var(--radius); }
 .exp-row-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .exp-row:hover { background: var(--bg-hover); }
@@ -6908,8 +7471,11 @@ onMounted(() => {
 }
 
 .intro-panel {
+  flex: 1;
   display: flex; flex-direction: column; gap: 18px;
   padding: 18px 32px 32px;
+  overflow-y: auto;
+  min-height: 0;
 }
 .intro-section {
   background: var(--bg-2);
@@ -6927,6 +7493,9 @@ onMounted(() => {
 .intro-section-actions {
   display: flex; align-items: center; gap: 8px;
 }
+.intro-hint {
+  font-size: 12px; color: var(--text-3); margin: 0 0 12px; line-height: 1.5;
+}
 .intro-pre-grid {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px;
 }
@@ -6939,12 +7508,120 @@ onMounted(() => {
 .intro-pre-label {
   font-size: 12px; color: var(--text-2); width: 56px;
 }
+.intro-template-select {
+  min-width: 160px;
+  max-width: 220px;
+}
 .intro-pre-preview {
   width: 100%; max-height: 180px; border-radius: 10px; background: #000;
+}
+
+.cover-panel {
+  flex: 1;
+  display: flex; flex-direction: column; gap: 18px;
+  padding: 18px 32px 32px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.cover-panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.cover-form {
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.cover-design-summary {
+  display: flex; flex-direction: column; gap: 12px;
+}
+.cover-design-summary-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+}
+.cover-design-heading {
+  display: flex; align-items: baseline; gap: 9px; min-width: 0;
+}
+.cover-design-source {
+  font-size: 11px; color: var(--text-3); white-space: nowrap;
+}
+.cover-design-type {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border-1));
+  color: var(--accent);
+  font-size: 11px; line-height: 1;
+  border-radius: 999px;
+}
+.cover-copy-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px;
+  max-width: 760px;
+}
+.cover-copy-item {
+  display: flex; flex-direction: column; gap: 4px; min-width: 0;
+}
+.cover-copy-item-wide { grid-column: 1 / -1; }
+.cover-copy-item span {
+  color: var(--text-3); font-size: 10px; line-height: 1;
+}
+.cover-copy-item strong {
+  color: var(--text-0); font-size: 14px; line-height: 1.35; font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.cover-design-description {
+  max-width: 760px; margin: 0; color: var(--text-2); font-size: 12px; line-height: 1.55;
+}
+.cover-design-empty {
+  display: flex; align-items: center; gap: 7px; color: var(--text-3); font-size: 12px;
+}
+.cover-form-actions {
+  display: flex; align-items: center; gap: 10px;
+}
+.cover-form-note {
+  min-width: 0; color: var(--text-3); font-size: 11px; line-height: 1.4;
+}
+.cover-results {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px;
+}
+.cover-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.cover-card-label {
+  font-size: 12px; font-weight: 600; color: var(--text-0);
+}
+.cover-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.cover-enhance-hint {
+  font-size: 11px; color: var(--text-3); max-width: 260px; line-height: 1.4;
+}
+.cover-frame {
+  position: relative;
+  background: var(--bg-1);
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.cover-frame.ratio-4-3 { aspect-ratio: 4/3; }
+.cover-frame.ratio-3-4 { aspect-ratio: 3/4; }
+.cover-frame img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.cover-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  color: var(--text-3); font-size: 12px;
 }
 
 @media (max-width: 900px) {
   .intro-panel { padding: 16px; }
   .intro-pre-grid { grid-template-columns: 1fr; }
+  .cover-copy-grid { grid-template-columns: 1fr; }
+  .cover-copy-item-wide { grid-column: auto; }
+  .cover-form-actions { align-items: stretch; flex-direction: column; }
+  .cover-form-actions .btn { width: 100%; justify-content: center; }
 }
 </style>

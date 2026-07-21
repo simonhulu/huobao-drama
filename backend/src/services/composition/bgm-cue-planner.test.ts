@@ -1,6 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { planBgmCues } from './bgm-cue-planner.js'
+import { planBgmCues, planEpisodeBgmCues, type EpisodeBgmTrack } from './bgm-cue-planner.js'
+import type { AudioProfile } from '../audio-profile.js'
+
+function profile(bucket: AudioProfile['emotionBucket']): AudioProfile {
+  return {
+    emotionBucket: bucket,
+    bgmIntensity: 'medium',
+    bgmPrompt: '',
+    bgmPromptVariants: [],
+    sfxDescriptions: [],
+    ambientDescription: '',
+  }
+}
 
 test('planBgmCues keeps short adjacent shots in one music cue', () => {
   const cues = planBgmCues([
@@ -83,4 +95,70 @@ test('planBgmCues chooses the first cue BGM from the opening hook window', () =>
 
   assert.equal(cues.length, 1)
   assert.equal(cues[0].bgmPath, 'hook.mp3')
+})
+
+test('planEpisodeBgmCues groups same-emotion shots into one music cue', () => {
+  const shots = [
+    { id: 1, videoDuration: 10 },
+    { id: 2, videoDuration: 10 },
+    { id: 3, videoDuration: 10 },
+  ]
+  const profiles = new Map([
+    [1, profile('tense')],
+    [2, profile('tense')],
+    [3, profile('tense')],
+  ])
+  const tracks: EpisodeBgmTrack[] = [{ path: 'tense.mp3', emotionBucket: 'tense', role: 'primary' }]
+
+  const cues = planEpisodeBgmCues(shots, profiles, tracks)
+  assert.equal(cues.length, 1)
+  assert.equal(cues[0].duration, 30)
+  assert.equal(cues[0].bgmPath, 'tense.mp3')
+})
+
+test('planEpisodeBgmCues switches music only on substantial emotional turns', () => {
+  const shots = [
+    { id: 1, videoDuration: 40 }, // tense
+    { id: 2, videoDuration: 40 }, // tense
+    { id: 3, videoDuration: 40 }, // epic
+    { id: 4, videoDuration: 40 }, // epic
+    { id: 5, videoDuration: 5 },  // tense (transient, should be absorbed)
+  ]
+  const profiles = new Map([
+    [1, profile('tense')],
+    [2, profile('tense')],
+    [3, profile('epic')],
+    [4, profile('epic')],
+    [5, profile('tense')],
+  ])
+  const tracks: EpisodeBgmTrack[] = [
+    { path: 'tense.mp3', emotionBucket: 'tense', role: 'primary' },
+    { path: 'epic.mp3', emotionBucket: 'epic', role: 'secondary' },
+  ]
+
+  const cues = planEpisodeBgmCues(shots, profiles, tracks, { minActDuration: 25 })
+  assert.equal(cues.length, 2)
+  assert.equal(cues[0].bgmPath, 'tense.mp3')
+  assert.equal(cues[0].duration, 80)
+  assert.equal(cues[1].bgmPath, 'epic.mp3')
+  assert.equal(cues[1].duration, 85)
+})
+
+test('planEpisodeBgmCues ignores short emotional blips without a dedicated track', () => {
+  const shots = [
+    { id: 1, videoDuration: 30 }, // calm
+    { id: 2, videoDuration: 5 },  // happy (no track)
+    { id: 3, videoDuration: 30 }, // calm
+  ]
+  const profiles = new Map([
+    [1, profile('calm')],
+    [2, profile('happy')],
+    [3, profile('calm')],
+  ])
+  const tracks: EpisodeBgmTrack[] = [{ path: 'calm.mp3', emotionBucket: 'calm', role: 'primary' }]
+
+  const cues = planEpisodeBgmCues(shots, profiles, tracks)
+  assert.equal(cues.length, 1)
+  assert.equal(cues[0].bgmPath, 'calm.mp3')
+  assert.equal(cues[0].duration, 65)
 })

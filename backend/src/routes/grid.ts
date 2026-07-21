@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { eq } from 'drizzle-orm'
+import fs from 'fs'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
@@ -9,6 +10,9 @@ import { buildConsistencySeed, buildConsistencySuffix, buildGridConsistencyInput
 import { createAgent } from '../agents/index.js'
 import { styleToPromptPhrase } from '../services/visual-style.js'
 import { logTaskError, logTaskPayload, logTaskProgress } from '../utils/task-logger.js'
+import { createTask } from '../services/tasks/store.js'
+import { getAbsolutePath } from '../utils/storage.js'
+import { areStoryboardNumbersContiguous } from '../services/grid-story-props.js'
 
 const app = new Hono()
 
@@ -625,6 +629,286 @@ app.get('/status/:id', async (c) => {
     image_url: row.imageUrl,
     error_msg: row.errorMsg,
   })
+})
+
+// POST /grid/episode/:episodeId/generate —— 每分镜单张16:9图片流水线
+app.post('/episode/:episodeId/generate', async (c) => {
+  const episodeId = Number(c.req.param('episodeId'))
+  if (!Number.isFinite(episodeId) || episodeId <= 0) return badRequest(c, 'invalid episodeId')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const body = await c.req.json().catch(() => ({} as any))
+  const force = Boolean((body as any).force)
+  const review = (body as any).review !== false
+  const useReferenceImages = (body as any).useReferenceImages !== false
+  const onlyIds = Array.isArray((body as any).onlyStoryboardIds)
+    ? (body as any).onlyStoryboardIds.map(Number).filter((n: number) => Number.isFinite(n) && n > 0)
+    : undefined
+
+  const task = createTask({
+    type: 'grid.episode_generate',
+    dramaId: ep.dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: force
+      ? `grid.episode_generate:${episodeId}:force:${Date.now()}`
+      : `grid.episode_generate:${episodeId}`,
+    payload: {
+      episode_id: episodeId,
+      force,
+      review,
+      only_storyboard_ids: onlyIds,
+      use_reference_images: useReferenceImages,
+    },
+  })
+  return success(c, { task_id: task.id })
+})
+
+// POST /grid/episode/:episodeId/review —— VLM 六维校验（可独立触发）
+app.post('/episode/:episodeId/review', async (c) => {
+  const episodeId = Number(c.req.param('episodeId'))
+  if (!Number.isFinite(episodeId) || episodeId <= 0) return badRequest(c, 'invalid episodeId')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const body = await c.req.json().catch(() => ({} as any))
+  const onlyIds = Array.isArray((body as any).onlyStoryboardIds)
+    ? (body as any).onlyStoryboardIds.map(Number).filter((n: number) => Number.isFinite(n) && n > 0)
+    : undefined
+  const requestedMaxRetries = Number((body as any).maxRetries)
+  const maxRetries = Number.isFinite(requestedMaxRetries)
+    ? Math.max(0, Math.floor(requestedMaxRetries))
+    : undefined
+
+  const task = createTask({
+    type: 'grid.episode_review',
+    dramaId: ep.dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: `grid.episode_review:${episodeId}:${Date.now()}`,
+    payload: { episode_id: episodeId, only_storyboard_ids: onlyIds, max_retries: maxRetries },
+  })
+  return success(c, { task_id: task.id })
+})
+
+// POST /grid/episode/:episodeId/render —— GridStoryPreview 合成整集 mp4
+app.post('/episode/:episodeId/render', async (c) => {
+  const episodeId = Number(c.req.param('episodeId'))
+  if (!Number.isFinite(episodeId) || episodeId <= 0) return badRequest(c, 'invalid episodeId')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const body = await c.req.json().catch(() => ({} as any))
+  const onlyIds = Array.isArray((body as any).onlyStoryboardIds)
+    ? (body as any).onlyStoryboardIds.map(Number).filter((n: number) => Number.isFinite(n) && n > 0)
+    : undefined
+  const maxDurationSec = Number((body as any).maxDurationSec)
+  if (onlyIds?.length) {
+    const selectedNumbers = db.select().from(schema.storyboards)
+      .where(eq(schema.storyboards.episodeId, episodeId)).all()
+      .filter((sb) => onlyIds.includes(sb.id))
+      .map((sb) => sb.storyboardNumber)
+    if (selectedNumbers.length !== new Set(onlyIds).size) return badRequest(c, 'unknown storyboardId')
+    if (!areStoryboardNumbersContiguous(selectedNumbers)) {
+      return badRequest(c, 'non-contiguous storyboard render would skip narration')
+    }
+  }
+
+  const task = createTask({
+    type: 'grid.episode_render',
+    dramaId: ep.dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: `grid.episode_render:${episodeId}:${Date.now()}`,
+    payload: {
+      episode_id: episodeId,
+      only_storyboard_ids: onlyIds,
+      max_duration_sec: Number.isFinite(maxDurationSec) && maxDurationSec > 0 ? maxDurationSec : undefined,
+    },
+  })
+  return success(c, { task_id: task.id })
+})
+
+// POST /grid/episode/:episodeId/videos —— Grok 视频素材层（复用优先，未命中才生成）
+app.post('/episode/:episodeId/videos', async (c) => {
+  const episodeId = Number(c.req.param('episodeId'))
+  if (!Number.isFinite(episodeId) || episodeId <= 0) return badRequest(c, 'invalid episodeId')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const body = await c.req.json().catch(() => ({} as any))
+  const storyboardIds = Array.isArray((body as any).storyboardIds)
+    ? (body as any).storyboardIds.map(Number).filter((n: number) => Number.isFinite(n) && n > 0)
+    : []
+  if (!storyboardIds.length) return badRequest(c, 'storyboardIds required')
+
+  const task = createTask({
+    type: 'grid.episode_videos',
+    dramaId: ep.dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: `grid.episode_videos:${episodeId}:${Date.now()}`,
+    payload: {
+      episode_id: episodeId,
+      storyboard_ids: storyboardIds,
+      tags: (body as any).tags,
+      duration_sec: (body as any).durationSec,
+      resolution: (body as any).resolution,
+      mode: (body as any).mode,
+      force: Boolean((body as any).force),
+    },
+  })
+  return success(c, { task_id: task.id })
+})
+
+// GET /grid/videos/assets —— 视频素材库浏览（按标签过滤）
+app.get('/videos/assets', async (c) => {
+  const era = c.req.query('era')
+  const rows = db.select().from(schema.videoAssets).all()
+    .filter((r) => !era || String(r.era || '') === era)
+    .map((r) => ({
+      id: r.id,
+      src: r.localPath,
+      era: r.era,
+      scene: r.sceneTag,
+      event: r.eventTag,
+      mood: r.mood,
+      duration_sec: r.durationSec,
+      resolution: r.resolution,
+      status: r.status,
+      use_count: r.useCount,
+      prompt: r.prompt,
+      design: r.designJson ? JSON.parse(r.designJson) : null,
+      refs: r.refsJson ? JSON.parse(r.refsJson) : null,
+      created_at: r.createdAt,
+    }))
+  return success(c, { assets: rows })
+})
+
+// GET /grid/episode/:episodeId/cells —— 查看各镜单图生产状态（兼容旧双格数据）
+app.get('/episode/:episodeId/cells', async (c) => {
+  const episodeId = Number(c.req.param('episodeId'))
+  const rows = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, episodeId))
+    .orderBy(schema.storyboards.storyboardNumber).all()
+  return success(c, {
+    storyboards: rows.map((sb) => {
+      let cells: any = null
+      try { cells = sb.gridCells ? JSON.parse(sb.gridCells) : null } catch { /* ignore */ }
+      return {
+        storyboard_id: sb.id,
+        storyboard_number: sb.storyboardNumber,
+        title: sb.title,
+        grid_sheet_image: sb.gridSheetImage || null,
+        cells: cells?.cells ?? null,
+      }
+    }),
+  })
+})
+
+// GET /grid/productions —— 全部 Episode 的 grid 生产状态总览（/remotion 主页用）
+app.get('/productions', async (c) => {
+  const episodes = db.select().from(schema.episodes).all()
+  const dramas = db.select().from(schema.dramas).all()
+  const accounts = db.select().from(schema.mediaAccounts).all()
+  const accountMap = new Map(accounts.map((a) => [a.id, a]))
+  const dramaMap = new Map(dramas.map((d) => [d.id, d]))
+  const storyboards = db.select().from(schema.storyboards).all()
+
+  const byEpisode = new Map<number, typeof storyboards>()
+  for (const sb of storyboards) {
+    const list = byEpisode.get(sb.episodeId) ?? []
+    list.push(sb)
+    byEpisode.set(sb.episodeId, list)
+  }
+
+  const items = episodes
+    .filter((ep) => (byEpisode.get(ep.id)?.length ?? 0) > 0)
+    .map((ep) => {
+      const shots = byEpisode.get(ep.id) ?? []
+      let cellsReady = 0
+      let reviewPassed = 0
+      let reviewTotal = 0
+      for (const sb of shots) {
+        try {
+          const gc = sb.gridCells ? JSON.parse(sb.gridCells) : null
+          const cells = gc?.cells
+          if (Array.isArray(cells) && cells.length && cells.every((cell: any) => cell?.src)) cellsReady++
+          for (const cell of cells ?? []) {
+            if (cell?.review) {
+              reviewTotal++
+              if (cell.review.pass) reviewPassed++
+            }
+          }
+        } catch { /* ignore */ }
+      }
+      const renderAbs = getAbsolutePath(`remotion/grid-story-ep${ep.id}.mp4`)
+      const hasRender = fs.existsSync(renderAbs)
+      let renderAt: string | null = null
+      if (hasRender) {
+        try { renderAt = fs.statSync(renderAbs).mtime.toISOString() } catch { /* ignore */ }
+      }
+      let status = 'pending'
+      if (hasRender) {
+        status = 'done'
+      } else if (cellsReady > 0 && cellsReady >= shots.length) {
+        status = 'ready'
+      } else if (cellsReady > 0) {
+        status = 'working'
+      }
+      return {
+        episode_id: ep.id,
+        drama_id: ep.dramaId,
+        drama_title: dramaMap.get(ep.dramaId)?.title ?? '',
+        account_id: dramaMap.get(ep.dramaId)?.mediaAccountId ?? null,
+        account_name: accountMap.get(dramaMap.get(ep.dramaId)?.mediaAccountId ?? -1)?.name ?? null,
+        episode_number: ep.episodeNumber,
+        title: ep.title,
+        shot_count: shots.length,
+        cells_ready: cellsReady,
+        review_passed: reviewTotal ? reviewPassed : null,
+        review_total: reviewTotal || null,
+        has_render: hasRender,
+        render_url: hasRender ? `/static/remotion/grid-story-ep${ep.id}.mp4` : null,
+        render_at: renderAt,
+        updated_at: ep.updatedAt,
+        status,
+      }
+    })
+    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+
+  const queryAccountId = c.req.query('account_id')
+  const queryDramaId = c.req.query('drama_id')
+  const queryStatus = c.req.query('status')
+  const queryQ = c.req.query('q')
+  const accountIdFilter = queryAccountId ? Number(queryAccountId) : null
+  const dramaIdFilter = queryDramaId ? Number(queryDramaId) : null
+  const statusFilter = queryStatus || null
+  const qFilter = queryQ ? String(queryQ).trim().toLowerCase() : null
+
+  const filtered = items.filter((item) => {
+    if (accountIdFilter !== null && item.account_id !== accountIdFilter) return false
+    if (dramaIdFilter !== null && item.drama_id !== dramaIdFilter) return false
+    if (statusFilter && item.status !== statusFilter) return false
+    if (qFilter) {
+      const haystack = `${item.title} ${item.drama_title} ${item.account_name ?? ''} E${String(item.episode_number).padStart(2, '0')}`.toLowerCase()
+      if (!haystack.includes(qFilter)) return false
+    }
+    return true
+  })
+
+  const offset = Math.max(0, Number(c.req.query('offset')) || 0)
+  const limit = Math.min(50, Math.max(1, Number(c.req.query('limit')) || 10))
+  return success(c, { items: filtered.slice(offset, offset + limit), total: filtered.length, offset, limit })
 })
 
 export default app

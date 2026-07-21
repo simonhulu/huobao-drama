@@ -2,12 +2,20 @@ import path from 'path'
 import fs from 'fs'
 import { spawn } from 'child_process'
 import { db, schema } from '../db/index.js'
-import { eq } from 'drizzle-orm'
+import { eq, asc } from 'drizzle-orm'
 import { fileURLToPath } from 'url'
+import { loadMusicLibrary } from './music-library.js'
+import { getVideoEncoderOptions } from './composition/video-encoder.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
 const INTRO_DIR = path.join(DATA_ROOT, 'static', 'intros')
+const REMOTION_DIR = path.resolve(__dirname, '../../../remotion')
+const REMOTION_CLI = path.join(REMOTION_DIR, 'node_modules/.bin/remotion')
+const CHROME_EXECUTABLE = path.join(
+  REMOTION_DIR,
+  '../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell'
+)
 
 export interface IntroComposeInput {
   episodeId: number
@@ -30,6 +38,20 @@ export interface IntroTemplateConfig {
     animation?: { type: string; duration: number; delay?: number }
   }>
   audio?: any
+  component?: string
+  cards?: Array<{ text: string; sub?: string }>
+  bgmAssetId?: string
+}
+
+const REMOTION_TEMPLATE_IDS = [
+  'black-title-fade',
+  'dynasty-year-flash',
+  'vintage-ken-burns',
+] as const
+type RemotionTemplateId = typeof REMOTION_TEMPLATE_IDS[number]
+
+function isRemotionTemplate(id: string): id is RemotionTemplateId {
+  return REMOTION_TEMPLATE_IDS.includes(id as RemotionTemplateId)
 }
 
 function parseAspectRatio(aspectRatio?: string | null): { width: number; height: number } {
@@ -76,9 +98,73 @@ function runFfmpeg(args: string[]): Promise<void> {
   })
 }
 
+function validateVideo(outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-show_entries', 'stream=codec_type',
+      '-of', 'default=noprint_wrappers=1',
+      outputPath,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stderr = ''
+    proc.stderr.on('data', (data) => { stderr += String(data) })
+    proc.on('error', reject)
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`Rendered video is corrupt or unreadable: ${stderr.trim() || `ffprobe exited ${code}`}`))
+        return
+      }
+      resolve()
+    })
+  })
+}
+
+function runCommand(cmd: string, args: string[], options: { cwd: string }): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, { cwd: options.cwd, stdio: 'inherit' })
+    proc.on('error', reject)
+    proc.on('close', (code) => {
+      if (code === 0) return resolve()
+      reject(new Error(`Command "${cmd} ${args.join(' ')}" exited with code ${code}`))
+    })
+  })
+}
+
+function getServerBaseUrl(): string {
+  const port = process.env.PORT || '5679'
+  return `http://localhost:${port}`
+}
+
+function toStaticUrl(localPath: string | null | undefined, baseUrl: string): string | null {
+  if (!localPath) return null
+  if (/^https?:\/\//.test(localPath)) return localPath
+  const rel = localPath.replace(/^\/+/, '').replace(/^static\//, '')
+  return `${baseUrl}/static/${rel}`
+}
+
+const DEFAULT_BGM_ASSET_ID = '2342ac04-1107-4b15-96a3-00a9e64246e6'
+
+function resolveBgmUrl(bgmAssetId: string | undefined, baseUrl: string): string | null {
+  const assetId = bgmAssetId?.trim() || DEFAULT_BGM_ASSET_ID
+  const lib = loadMusicLibrary()
+  const entry = lib.entries.find((e) => e.filename.startsWith(`${assetId}.`) || e.relativePath.includes(assetId))
+  if (!entry) {
+    console.warn(`[IntroComposer] BGM asset ${assetId} not found in music library`)
+    return null
+  }
+  return toStaticUrl(entry.relativePath, baseUrl)
+}
+
+function firstSentence(text?: string | null): string {
+  if (!text) return ''
+  const match = text.match(/^[^，。！？,.!?]+/)
+  return match ? match[0].trim() : text.trim()
+}
+
 async function renderClassicTitleFadeIntro(input: IntroComposeInput): Promise<string> {
   const { width, height } = parseAspectRatio(input.aspectRatio)
-  const duration = 3
+  const duration = 4
   const title = input.dramaTitle?.trim() || '精彩短剧'
   const outputFilename = `${input.episodeId}-intro.mp4`
   const outputPath = path.join(INTRO_DIR, outputFilename)
@@ -100,9 +186,7 @@ async function renderClassicTitleFadeIntro(input: IntroComposeInput): Promise<st
     '-i', 'anullsrc=r=48000:cl=stereo',
     '-vf', drawtextFilter,
     '-t', String(duration),
-    '-c:v', 'libx264',
-    '-preset', 'fast',
-    '-crf', '23',
+    ...getVideoEncoderOptions(),
     '-pix_fmt', 'yuv420p',
     '-r', '30',
     '-c:a', 'aac',
@@ -117,6 +201,126 @@ async function renderClassicTitleFadeIntro(input: IntroComposeInput): Promise<st
   return path.join('static', 'intros', outputFilename)
 }
 
+function compositionIdForTemplate(templateId: RemotionTemplateId): string {
+  switch (templateId) {
+    case 'black-title-fade':
+      return 'BlackTitleIntro'
+    case 'dynasty-year-flash':
+      return 'DynastyYearFlash'
+    case 'vintage-ken-burns':
+      return 'VintageKenBurns'
+  }
+}
+
+function defaultDynastyCards(dramaTitle: string): Array<{ text: string; sub?: string }> {
+  return [
+    { text: '大明', sub: 'Ming Dynasty' },
+    { text: '万历十年', sub: 'Year of Wanli 10' },
+    { text: '1582', sub: 'June' },
+    { text: dramaTitle || '历史转折', sub: 'A turning point' },
+  ]
+}
+
+async function renderRemotionIntro(
+  input: IntroComposeInput,
+  templateId: RemotionTemplateId
+): Promise<string> {
+  const baseUrl = getServerBaseUrl()
+  const outputFilename = `${input.episodeId}-${templateId}.mp4`
+  const outputPath = path.join(INTRO_DIR, outputFilename)
+  fs.mkdirSync(INTRO_DIR, { recursive: true })
+
+  const [episode] = db
+    .select()
+    .from(schema.episodes)
+    .where(eq(schema.episodes.id, input.episodeId))
+    .all()
+  const [drama] = episode
+    ? db.select().from(schema.dramas).where(eq(schema.dramas.id, episode.dramaId)).all()
+    : [undefined]
+
+  const storyboards = db
+    .select()
+    .from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, input.episodeId))
+    .orderBy(asc(schema.storyboards.storyboardNumber))
+    .all()
+    .filter((sb) => sb.firstFrameImage || sb.composedImage)
+
+  const imageUrls = storyboards
+    .slice(0, 4)
+    .map((sb) => toStaticUrl(sb.firstFrameImage || sb.composedImage, baseUrl))
+    .filter((url): url is string => Boolean(url))
+
+  const template = input.templateId
+    ? db.select().from(schema.introTemplates).where(eq(schema.introTemplates.id, input.templateId)).all()[0]
+    : undefined
+  const config = (template?.config as IntroTemplateConfig | undefined) ?? { duration: 4, background: { type: 'color', value: '#000000' }, layers: [] }
+
+  const dramaTitle = drama?.title?.trim() || input.dramaTitle?.trim() || '精彩短剧'
+  const episodeTitle = episode?.title?.trim() || `第${input.episodeNumber}集`
+  const openingHook = episode?.openingHook?.trim() || drama?.hook?.trim() || ''
+  const mainText = firstSentence(openingHook) || dramaTitle
+  const subText = episodeTitle
+
+  const aspectRatio = input.aspectRatio || episode?.aspectRatio || '16:9'
+  const compositionId = compositionIdForTemplate(templateId)
+
+  let props: Record<string, unknown> = {
+    aspectRatio,
+    durationInFrames: Math.round(config.duration * 30),
+  }
+
+  if (templateId === 'black-title-fade') {
+    const bgmUrl = resolveBgmUrl(config.bgmAssetId, baseUrl)
+    props = {
+      ...props,
+      mainText,
+      subText,
+      images: imageUrls.length ? imageUrls : undefined,
+      bgmUrl,
+    }
+  } else if (templateId === 'dynasty-year-flash') {
+    const cards = config.cards?.length ? config.cards : defaultDynastyCards(dramaTitle)
+    props = {
+      ...props,
+      cards,
+      bellUrl: `${baseUrl}/static/intros/bell_sfx.m4a`,
+    }
+  } else if (templateId === 'vintage-ken-burns') {
+    const bgmUrl = resolveBgmUrl(config.bgmAssetId, baseUrl)
+    props = {
+      ...props,
+      image: imageUrls[0] || `${baseUrl}/static/intros/placeholder.jpg`,
+      title: mainText,
+      subtitle: subText,
+      audioUrl: bgmUrl,
+    }
+  }
+
+  const propsPath = path.join(INTRO_DIR, `${input.episodeId}-${templateId}-props.json`)
+  fs.writeFileSync(propsPath, JSON.stringify(props, null, 2))
+
+  await runCommand(
+    REMOTION_CLI,
+    [
+      'render',
+      `--browser-executable=${CHROME_EXECUTABLE}`,
+      `--props=${propsPath}`,
+      '--concurrency=1',
+      'src/index.tsx',
+      compositionId,
+      outputPath,
+      '--codec=h264',
+    ],
+    { cwd: REMOTION_DIR }
+  )
+
+  await validateVideo(outputPath)
+
+  return path.join('static', 'intros', outputFilename)
+}
+
 export async function composeIntroForEpisode(input: IntroComposeInput): Promise<string | null> {
   let template = input.templateId
     ? db.select().from(schema.introTemplates).where(eq(schema.introTemplates.id, input.templateId)).all()[0]
@@ -127,16 +331,20 @@ export async function composeIntroForEpisode(input: IntroComposeInput): Promise<
     template = defaults[0]
   }
 
+  if (template && isRemotionTemplate(template.id)) {
+    return renderRemotionIntro(input, template.id)
+  }
+
   if (!template) {
-    return renderClassicTitleFadeIntro(input)
+    return renderRemotionIntro({ ...input, templateId: 'black-title-fade' }, 'black-title-fade')
   }
 
   const config = template.config as IntroTemplateConfig
 
   if (template.id === 'classic-title-fade') {
-    return renderClassicTitleFadeIntro(input)
+    return renderRemotionIntro({ ...input, templateId: 'black-title-fade' }, 'black-title-fade')
   }
 
-  console.warn(`Intro template ${template.id} renderer not implemented yet, falling back to classic title fade`)
-  return renderClassicTitleFadeIntro(input)
+  console.warn(`Intro template ${template.id} renderer not implemented yet, falling back to black-title-fade`)
+  return renderRemotionIntro({ ...input, templateId: 'black-title-fade' }, 'black-title-fade')
 }

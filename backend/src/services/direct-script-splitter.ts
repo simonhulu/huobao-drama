@@ -15,7 +15,6 @@ import {
 export interface SmartSplitDirectScriptOptions {
   durationPresetId: string
   style?: 'default' | 'ai_manga_drama'
-  pacingMode?: string
   dramaTitle?: string | null
 }
 
@@ -71,7 +70,7 @@ export async function smartSplitDirectScript(
     sourceText,
     durationPresetId: options.durationPresetId,
     style: options.style ?? 'default',
-    pacingMode: options.pacingMode ?? 'standard',
+    productionMode: 'direct_script',
   })
 
   return {

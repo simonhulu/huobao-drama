@@ -36,7 +36,12 @@ function linkSceneToEpisode(episodeId: number, sceneId: number) {
   }
 }
 
-export function createExtractTools(episodeId: number, dramaId: number) {
+interface ExtractToolsOptions {
+  strictTools?: boolean
+}
+
+export function createExtractTools(episodeId: number, dramaId: number, options: ExtractToolsOptions = {}) {
+  const { strictTools = false } = options
   function isDirectScriptWorkflow(): boolean {
     return getEpisodeScriptSource(episodeId) === 'direct_script'
   }
@@ -45,6 +50,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
   const readScriptForExtraction = createTool({
     id: 'read_script_for_extraction',
     description: 'Read the original story or formatted screenplay for character/scene extraction.',
+    strict: strictTools,
     inputSchema: z.object({}),
     execute: async () => {
       const [ep] = db.select().from(schema.episodes)
@@ -63,6 +69,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
   const readExistingCharacters = createTool({
     id: 'read_existing_characters',
     description: 'Read all characters already existing in this drama project (for deduplication).',
+    strict: strictTools,
     inputSchema: z.object({}),
     execute: async () => {
       const linkedIds = new Set(
@@ -92,6 +99,7 @@ export function createExtractTools(episodeId: number, dramaId: number) {
   const readExistingScenes = createTool({
     id: 'read_existing_scenes',
     description: 'Read all scenes already existing in this drama project (for deduplication).',
+    strict: strictTools,
     inputSchema: z.object({}),
     execute: async () => {
       const linkedIds = new Set(
@@ -121,15 +129,16 @@ export function createExtractTools(episodeId: number, dramaId: number) {
   const saveDedupCharacters = createTool({
     id: 'save_dedup_characters',
     description: 'Save extracted characters with deduplication. Existing characters (same name) are merged/updated; new ones are created. All are linked to the current episode. For finished-script/documentary workflows, subjects/narrators/historical figures can also be saved as characters; empty names are skipped.',
+    strict: strictTools,
     inputSchema: z.object({
       characters: z.array(z.object({
         name: z.string(),
-        role: z.string().optional(),
-        description: z.string().optional().describe('Character background and relationships with other characters (e.g. husband/wife, sibling, superior/subordinate, rival). For finished-script/documentary workflows, describe the subject\'s identity, role in the narrative, and any relevant context instead of dramatic relationships.'),
-        appearance: z.string().optional(),
-        personality: z.string().optional(),
-      })),
-    }),
+        role: z.string().default(''),
+        description: z.string().default('').describe('Character background and relationships with other characters (e.g. husband/wife, sibling, superior/subordinate, rival). For finished-script/documentary workflows, describe the subject\'s identity, role in the narrative, and any relevant context instead of dramatic relationships.'),
+        appearance: z.string().default(''),
+        personality: z.string().default(''),
+      }).strict()),
+    }).strict(),
     execute: async ({ characters }) => {
       const ts = now()
       const results = { created: 0, merged: 0, skipped: 0 }
@@ -202,13 +211,14 @@ export function createExtractTools(episodeId: number, dramaId: number) {
   const saveDedupScenes = createTool({
     id: 'save_dedup_scenes',
     description: 'Save extracted scenes with deduplication. Existing scenes (same location+time) are reused; new ones are created. All are linked to the current episode. For finished-script/documentary workflows, any setting/location/time period mentioned in the script can be saved as a scene; empty locations are skipped.',
+    strict: strictTools,
     inputSchema: z.object({
       scenes: z.array(z.object({
         location: z.string(),
-        time: z.string().optional(),
-        prompt: z.string().optional(),
-      })),
-    }),
+        time: z.string().default(''),
+        prompt: z.string().default(''),
+      }).strict()),
+    }).strict(),
     execute: async ({ scenes }) => {
       const ts = now()
       const results = { created: 0, reused: 0, skipped: 0 }
@@ -267,9 +277,10 @@ export function createExtractTools(episodeId: number, dramaId: number) {
   const saveStorySynopsis = createTool({
     id: 'save_story_synopsis',
     description: 'Save the episode story synopsis and main plot direction for downstream storyboard and narration understanding.',
+    strict: strictTools,
     inputSchema: z.object({
       synopsis: z.string().describe('Episode synopsis: main plot, core conflict, key turning points, and character relationship network'),
-    }),
+    }).strict(),
     execute: async ({ synopsis }) => {
       const ts = now()
       db.update(schema.episodes)

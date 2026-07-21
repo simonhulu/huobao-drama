@@ -51,11 +51,24 @@ function buildSystemPrompt(): string {
     '你的任务是为每一集生成：',
     '1. opening_hook：recap 结束后、正文开始前的过渡钩子，直接抛出本集核心冲突，不要交代前情。',
     '2. cliffhanger_hook：本集结尾悬念，让观众想看下一集。',
-    '3. recap_script（从第二集开始）：用上一集画面+新配音生成前情提要，40-70字，概括上一集关键事件。',
+    '3. recap_script：仅对第 2 集及以后生成，用于本集开头回顾上一集内容。',
     '4. series_hook：全剧一句话核心钩子，用于封面标题。',
-    'recap_script 必须基于上一集的 cliffhanger_hook 和 must_keep_context 生成。',
-    '第一集不需要 recap_script。',
-    '只通过函数调用提交结果，不要输出额外正文。',
+    '',
+    'recap_script 要求：',
+    '- 必须以"上一集"开头，例如"上一集，张居正清丈土地，宗室被削爵震慑。如今，一条鞭法即将推行。"',
+    '- 只保留主角动作、关键转折、当前状态三要素。',
+    '- 字数控制在 35–50 字（含标点），既要简洁又要保留关键转折。',
+    '- 不要细节、不要背景铺垫、不要人名全称。',
+    '',
+    '输出格式：',
+    '只输出一段合法的 JSON，不要 markdown 代码块，不要解释。格式如下：',
+    '{',
+    '  "series_hook": "全剧一句话钩子",',
+    '  "episode_hooks": [',
+    '    { "episode_number": 1, "opening_hook": "...", "cliffhanger_hook": "..." },',
+    '    { "episode_number": 2, "opening_hook": "...", "cliffhanger_hook": "...", "recap_script": "上一集，..." }',
+    '  ]',
+    '}',
   ].join('\n')
 }
 
@@ -78,9 +91,10 @@ function buildUserPrompt(input: HookDesignInput): string {
     '',
     '要求：',
     '1. series_hook 用一句话概括全剧最大冲突。',
-    '2. 第一集 recap_script 为空。',
-    '3. 从第二集开始，recap_script 必须让观众理解当前集的前因。',
-    '4. opening_hook 不再承担前情交代，只负责把观众拉进本集冲突。',
+    '2. opening_hook 不再承担前情交代，只负责把观众拉进本集冲突。',
+    '3. cliffhanger_hook 要制造强烈悬念，让观众想看下一集。',
+    '4. recap_script 仅对第 2 集及以后生成；第 1 集可留空。',
+    '5. recap_script 必须包含"上一集"引导语，控制在 35–50 字（含标点）。'
   ].join('\n')
 }
 
@@ -104,48 +118,15 @@ export async function designHooksForEpisodes(input: HookDesignInput): Promise<Ho
       ],
       temperature: 0.3,
       max_tokens: 8000,
-      tools: [{
-        type: 'function',
-        function: {
-          name: 'submit_hook_design',
-          description: '提交全剧钩子设计',
-          parameters: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              series_hook: { type: 'string' },
-              episode_hooks: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  additionalProperties: false,
-                  properties: {
-                    episode_number: { type: 'integer' },
-                    opening_hook: { type: 'string' },
-                    cliffhanger_hook: { type: 'string' },
-                    recap_script: { type: 'string' },
-                  },
-                  required: ['episode_number', 'opening_hook', 'cliffhanger_hook'],
-                },
-              },
-            },
-            required: ['series_hook', 'episode_hooks'],
-          },
-        },
-      }],
-      tool_choice: {
-        type: 'function',
-        function: { name: 'submit_hook_design' },
-      },
+      response_format: { type: 'json_object' },
     })
   }, { timeoutMs: 180_000, maxAttempts: 2 })
 
   const data = await response.json()
-  const toolCall = data?.choices?.[0]?.message?.tool_calls?.find(
-    (item: any) => item?.function?.name === 'submit_hook_design'
-  )
-  if (!toolCall) throw new Error('Hook design model did not return expected tool call')
-  const parsed = JSON.parse(toolCall.function.arguments)
+  const content = data?.choices?.[0]?.message?.content
+  if (!content) throw new Error('Hook design model returned empty content')
+
+  const parsed = JSON.parse(content)
   const validated = hookDesignPayloadSchema.parse(parsed)
 
   return {

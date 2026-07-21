@@ -4,9 +4,11 @@ import * as schema from './schema.js'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { bindSecretKeyToDatabase, encryptSecret, isEncryptedSecret } from '../services/secret-crypto.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DB_PATH = process.env.DB_PATH || path.resolve(__dirname, '../../../data/huobao_drama.db')
+bindSecretKeyToDatabase(DB_PATH)
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
 
@@ -15,8 +17,19 @@ sqlite.pragma('journal_mode = WAL')
 sqlite.pragma('busy_timeout = 30000')
 
 sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS media_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    handle TEXT,
+    positioning_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS dramas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_account_id INTEGER,
     title TEXT NOT NULL,
     video_title TEXT,
     description TEXT,
@@ -31,6 +44,7 @@ sqlite.exec(`
     tags TEXT,
     hook TEXT,
     metadata TEXT,
+    project_positioning_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT
@@ -78,6 +92,8 @@ sqlite.exec(`
     narration_mode TEXT DEFAULT 'rewrite',
     opening_hook TEXT,
     cliffhanger TEXT,
+    creative_brief_json TEXT,
+    director_plan_json TEXT,
     metadata TEXT,
     recap_script TEXT,
     recap_video_url TEXT,
@@ -85,6 +101,17 @@ sqlite.exec(`
     series_hook TEXT,
     retention_beats TEXT,
     energy_curve TEXT,
+    bgm_audio_url TEXT,
+    secondary_bgm_audio_url TEXT,
+    bgm_plan_json TEXT,
+    pre_tts_audio_url TEXT,
+    pre_tts_titles_json TEXT,
+    cover_prompt TEXT,
+    cover_image_4x3_url TEXT,
+    cover_image_3x4_url TEXT,
+    cover_image_4x3_gen_id INTEGER,
+    cover_image_3x4_gen_id INTEGER,
+    cover_design_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT
@@ -260,6 +287,7 @@ sqlite.exec(`
     description TEXT,
     language TEXT,
     provider TEXT NOT NULL,
+    voice_type TEXT DEFAULT 'system',
     created_at TEXT NOT NULL
   );
 
@@ -282,6 +310,7 @@ sqlite.exec(`
   CREATE TABLE IF NOT EXISTS image_generations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     storyboard_id INTEGER,
+    episode_id INTEGER,
     drama_id INTEGER,
     scene_id INTEGER,
     character_id INTEGER,
@@ -346,6 +375,34 @@ sqlite.exec(`
     completed_at TEXT,
     deleted_at TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS video_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drama_id INTEGER,
+    episode_id INTEGER,
+    storyboard_id INTEGER,
+    prompt TEXT,
+    model TEXT,
+    provider TEXT,
+    mode TEXT,
+    source_image TEXT,
+    era TEXT,
+    scene_tag TEXT,
+    event_tag TEXT,
+    mood TEXT,
+    duration_sec REAL,
+    resolution TEXT,
+    aspect_ratio TEXT,
+    local_path TEXT,
+    status TEXT DEFAULT 'pending',
+    error_msg TEXT,
+    use_count INTEGER DEFAULT 0,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_video_assets_tags
+    ON video_assets (era, scene_tag, event_tag, status);
 
   CREATE TABLE IF NOT EXISTS video_merges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -477,6 +534,169 @@ sqlite.exec(`
     ON creation_task_dependencies (task_id);
   CREATE INDEX IF NOT EXISTS idx_creation_task_dependencies_depends_on
     ON creation_task_dependencies (depends_on_task_id);
+
+  CREATE TABLE IF NOT EXISTS episode_publish_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    task_id INTEGER,
+    draft_url TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (episode_id, platform)
+  );
+  CREATE INDEX IF NOT EXISTS idx_episode_publish_records_task
+    ON episode_publish_records (task_id);
+  CREATE INDEX IF NOT EXISTS idx_episode_publish_records_status
+    ON episode_publish_records (status);
+
+  CREATE TABLE IF NOT EXISTS remotion_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    source_type TEXT NOT NULL,
+    source_episode_id INTEGER,
+    source_drama_id INTEGER,
+    media_account_id INTEGER,
+    title TEXT NOT NULL,
+    source_snapshot_json TEXT NOT NULL,
+    positioning_snapshot_json TEXT,
+    source_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    current_stage TEXT NOT NULL DEFAULT 'source_snapshot',
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    version INTEGER NOT NULL DEFAULT 1,
+    progress_current INTEGER DEFAULT 0,
+    progress_total INTEGER DEFAULT 0,
+    progress_message TEXT,
+    final_video_url TEXT,
+    metadata_json TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    deleted_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS remotion_stage_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    stage_version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',
+    input_hash TEXT,
+    input_json TEXT,
+    output_json TEXT,
+    task_id INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    UNIQUE (project_id, stage, stage_version)
+  );
+  CREATE INDEX IF NOT EXISTS idx_remotion_stage_runs_project
+    ON remotion_stage_runs (project_id, id);
+  CREATE INDEX IF NOT EXISTS idx_remotion_stage_runs_status
+    ON remotion_stage_runs (status);
+
+  CREATE TABLE IF NOT EXISTS remotion_shots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    source_storyboard_id INTEGER,
+    shot_number INTEGER NOT NULL,
+    title TEXT,
+    narration TEXT,
+    dialogue TEXT,
+    duration_ms INTEGER NOT NULL,
+    shot_type TEXT NOT NULL,
+    visual_plan_json TEXT NOT NULL,
+    source_evidence_json TEXT,
+    status TEXT NOT NULL DEFAULT 'planned',
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    UNIQUE (project_id, shot_number)
+  );
+  CREATE INDEX IF NOT EXISTS idx_remotion_shots_project
+    ON remotion_shots (project_id, shot_number);
+  CREATE INDEX IF NOT EXISTS idx_remotion_shots_status
+    ON remotion_shots (status);
+
+  CREATE TABLE IF NOT EXISTS remotion_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    shot_id INTEGER,
+    asset_key TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    provider TEXT,
+    status TEXT NOT NULL DEFAULT 'planned',
+    prompt_json TEXT,
+    source_url TEXT,
+    local_path TEXT,
+    thumbnail_path TEXT,
+    mime_type TEXT,
+    width INTEGER,
+    height INTEGER,
+    duration_ms INTEGER,
+    image_generation_id INTEGER,
+    task_id INTEGER,
+    license_json TEXT,
+    content_hash TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    metadata_json TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    deleted_at TEXT,
+    UNIQUE (project_id, asset_key, version)
+  );
+  CREATE INDEX IF NOT EXISTS idx_remotion_assets_project
+    ON remotion_assets (project_id, id);
+  CREATE INDEX IF NOT EXISTS idx_remotion_assets_shot
+    ON remotion_assets (shot_id, id);
+  CREATE INDEX IF NOT EXISTS idx_remotion_assets_image_generation
+    ON remotion_assets (image_generation_id);
+  CREATE INDEX IF NOT EXISTS idx_remotion_assets_status
+    ON remotion_assets (status);
+
+  CREATE TABLE IF NOT EXISTS remotion_renders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    shot_id INTEGER,
+    render_kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    input_hash TEXT,
+    props_json TEXT,
+    output_path TEXT,
+    output_url TEXT,
+    width INTEGER,
+    height INTEGER,
+    fps INTEGER,
+    duration_ms INTEGER,
+    qa_json TEXT,
+    task_id INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    UNIQUE (project_id, render_kind, shot_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_remotion_renders_project
+    ON remotion_renders (project_id, id);
+  CREATE INDEX IF NOT EXISTS idx_remotion_renders_status
+    ON remotion_renders (status);
 `)
 
 function ensureColumn(table: string, column: string, definition: string) {
@@ -490,6 +710,8 @@ function ensureColumn(table: string, column: string, definition: string) {
   }
 }
 
+ensureColumn('remotion_renders', 'started_at', 'TEXT')
+ensureColumn('remotion_assets', 'started_at', 'TEXT')
 ensureColumn('episodes', 'image_config_id', 'INTEGER')
 ensureColumn('episodes', 'video_config_id', 'INTEGER')
 ensureColumn('episodes', 'audio_config_id', 'INTEGER')
@@ -503,6 +725,27 @@ ensureColumn('episodes', 'video_title', 'TEXT')
 ensureColumn('dramas', 'video_title', 'TEXT')
 ensureColumn('dramas', 'workflow_type', "TEXT DEFAULT 'story_rewrite'")
 ensureColumn('episodes', 'workflow_type', "TEXT DEFAULT 'story_rewrite'")
+ensureColumn('dramas', 'media_account_id', 'INTEGER')
+ensureColumn('dramas', 'project_positioning_json', 'TEXT')
+ensureColumn('episodes', 'creative_brief_json', 'TEXT')
+ensureColumn('episodes', 'director_plan_json', 'TEXT')
+ensureColumn('remotion_projects', 'media_account_id', 'INTEGER')
+ensureColumn('remotion_projects', 'positioning_snapshot_json', 'TEXT')
+ensureColumn('storyboards', 'grid_sheet_image', 'TEXT')
+ensureColumn('storyboards', 'grid_cells', 'TEXT')
+ensureColumn('video_assets', 'design_json', 'TEXT')
+ensureColumn('video_assets', 'refs_json', 'TEXT')
+
+// Existing dramas predate account-level positioning. Give them one stable
+// default account so the new inheritance chain is complete without changing
+// their content or production history.
+const defaultAccount = sqlite.prepare(
+  `SELECT id FROM media_accounts WHERE deleted_at IS NULL ORDER BY id LIMIT 1`,
+).get() as { id: number } | undefined
+const defaultAccountId = defaultAccount?.id ?? Number(sqlite.prepare(
+  `INSERT INTO media_accounts (name, positioning_json, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+).run('默认自媒体账号', '{}', new Date().toISOString(), new Date().toISOString()).lastInsertRowid)
+sqlite.prepare(`UPDATE dramas SET media_account_id = ? WHERE media_account_id IS NULL`).run(defaultAccountId)
 
 // Migrate legacy workflow_type values to new naming
 sqlite.exec(`UPDATE dramas SET workflow_type = 'story_rewrite' WHERE workflow_type = 'short_drama'`)
@@ -527,6 +770,15 @@ ensureColumn('storyboards', 'image_prompt_final', 'INTEGER DEFAULT 0')
 ensureColumn('storyboards', 'bgm_audio_url', 'TEXT')
 ensureColumn('storyboards', 'sfx_audio_url', 'TEXT')
 ensureColumn('storyboards', 'ambient_audio_url', 'TEXT')
+ensureColumn('episodes', 'pre_tts_audio_url', 'TEXT')
+ensureColumn('episodes', 'pre_tts_titles_json', 'TEXT')
+ensureColumn('episodes', 'cover_prompt', 'TEXT')
+ensureColumn('episodes', 'cover_image_4x3_url', 'TEXT')
+ensureColumn('episodes', 'cover_image_3x4_url', 'TEXT')
+ensureColumn('episodes', 'cover_image_4x3_gen_id', 'INTEGER')
+ensureColumn('episodes', 'cover_image_3x4_gen_id', 'INTEGER')
+ensureColumn('episodes', 'cover_design_json', 'TEXT')
+ensureColumn('image_generations', 'episode_id', 'INTEGER')
 
 ensureColumn('characters', 'seed', 'INTEGER')
 ensureColumn('characters', 'voice_pitch', 'INTEGER')
@@ -537,6 +789,8 @@ ensureColumn('creation_tasks', 'priority', 'INTEGER DEFAULT 0')
 ensureColumn('creation_tasks', 'scheduled_at', 'TEXT')
 ensureColumn('creation_tasks', 'provider', 'TEXT')
 ensureColumn('creation_tasks', 'retry_reason', 'TEXT')
+ensureColumn('episode_publish_records', 'session_key', 'TEXT')
+ensureColumn('episode_publish_records', 'checkpoint_json', 'TEXT')
 
 ensureColumn('dramas', 'intro_template_id', 'TEXT')
 ensureColumn('episodes', 'recap_script', 'TEXT')
@@ -548,6 +802,20 @@ ensureColumn('episodes', 'metadata', 'TEXT')
 ensureColumn('image_generations', 'attempts', 'INTEGER DEFAULT 0')
 ensureColumn('image_generations', 'last_error_code', 'TEXT')
 ensureColumn('image_generations', 'last_error_detail', 'TEXT')
+ensureColumn('ai_voices', 'voice_type', "TEXT DEFAULT 'system'")
+sqlite.exec(`UPDATE ai_voices SET voice_type = 'system' WHERE voice_type IS NULL OR voice_type = ''`)
+
+const migrateAiConfigSecrets = sqlite.transaction(() => {
+  const rows = sqlite.prepare(`SELECT id, api_key FROM ai_service_configs WHERE api_key <> ''`).all() as Array<{
+    id: number
+    api_key: string
+  }>
+  const update = sqlite.prepare(`UPDATE ai_service_configs SET api_key = ? WHERE id = ?`)
+  for (const row of rows) {
+    if (!isEncryptedSecret(row.api_key)) update.run(encryptSecret(row.api_key), row.id)
+  }
+})
+migrateAiConfigSecrets()
 
 export const db = drizzle(sqlite, { schema })
 export { schema }

@@ -1,0 +1,163 @@
+{
+  "schemaVersion": "editorial-vlm-semantic-gold-supplement-v1",
+  "predicateSemanticsVersion": "change-instance-token-phrase-v1",
+  "sourceId": "yahoo",
+  "baseGold": {
+    "schemaVersion": "editorial-vlm-human-gold-v1",
+    "sha256": "86599efc6a996552130c279313ec9e1b5af2338a07807b57fc411f7a2a1a7321"
+  },
+  "inputSha256": "eb03fd8e5cdaee65d22ed6c6a3206f1fc1aac78b21d33978c175e1a7679c639c",
+  "reviews": [
+    {
+      "reviewId": "review-unit-000001",
+      "targets": [
+        {
+          "targetId": "observation-target-000001",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["layer_entry", "text_appear", "mask_reveal"],
+              "subjectTermsAny": ["Yahoo logo", "Yahoo wordmark", "logo"],
+              "mechanismAny": ["scale", "mask_reveal", "crop_reveal", "opacity", "type_on"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "review-unit-000002",
+      "targets": [
+        {
+          "targetId": "observation-target-000002",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["text_replace", "layer_replace", "text_appear"],
+              "subjectTermsAny": ["most valuable", "headline", "Yahoo wordmark"],
+              "mechanismAny": ["type_on", "mask_reveal", "crop_reveal", "opacity", "cut"]
+            }
+          ]
+        },
+        {
+          "targetId": "observation-target-000003",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["layer_transform", "layer_entry", "text_appear", "mask_reveal", "crop_reveal"],
+              "subjectTermsAny": ["purple underline", "small caption", "company in the world"],
+              "mechanismAny": ["translate", "slide", "type_on", "mask_reveal", "crop_reveal", "opacity", "scale"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "review-unit-000003",
+      "targets": [
+        {
+          "targetId": "observation-target-000005",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["mask_reveal", "crop_reveal", "layer_transform"],
+              "subjectTermsAny": ["globe", "globe fragments", "world graphic", "line art"],
+              "mechanismAny": ["rotation", "mask_reveal", "crop_reveal", "scale", "opacity", "translate"]
+            },
+            {
+              "changeTypeAny": ["layer_entry"],
+              "subjectTermsAny": ["purple underline", "small caption", "most visited"],
+              "mechanismAny": ["cut", "opacity", "translate", "slide", "scale", "mask_reveal", "crop_reveal", "type_on"]
+            }
+          ]
+        },
+        {
+          "targetId": "observation-target-000006",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["mask_reveal", "crop_reveal", "layer_transform"],
+              "subjectTermsAny": ["globe", "globe outline", "world graphic", "line art"],
+              "mechanismAny": ["rotation", "mask_reveal", "crop_reveal", "scale", "opacity", "translate"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "review-unit-000008",
+      "targets": [
+        {
+          "targetId": "observation-target-000016",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["text_replace", "layer_replace"],
+              "subjectTermsAny": ["90's", "90s", "$1 million", "central wording", "metric"],
+              "mechanismAny": ["cut"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "review-unit-000012",
+      "targets": []
+    },
+    {
+      "reviewId": "review-unit-000013",
+      "targets": [
+        {
+          "targetId": "observation-target-000023",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["layer_transform", "layer_entry", "mask_reveal", "crop_reveal"],
+              "subjectTermsAny": ["purple bar", "purple underline"],
+              "mechanismAny": ["translate", "slide", "opacity", "mask_reveal", "crop_reveal", "scale"]
+            }
+          ]
+        },
+        {
+          "targetId": "observation-target-000024",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["text_appear", "layer_entry", "mask_reveal", "crop_reveal"],
+              "subjectTermsAny": ["The Rise", "Rise title", "title"],
+              "mechanismAny": ["type_on", "translate", "slide", "mask_reveal", "crop_reveal", "opacity", "scale"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "review-unit-000018",
+      "targets": []
+    },
+    {
+      "reviewId": "review-unit-000019",
+      "targets": []
+    },
+    {
+      "reviewId": "review-unit-000029",
+      "targets": [
+        {
+          "targetId": "observation-target-000047",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["text_counter_change"],
+              "subjectTermsAny": ["view count", "counter", "metric"],
+              "mechanismAny": ["cut", "type_on", "opacity"]
+            }
+          ]
+        },
+        {
+          "targetId": "observation-target-000049",
+          "requiredChangePredicates": [
+            {
+              "changeTypeAny": ["layer_transform", "text_appear", "layer_entry", "mask_reveal", "crop_reveal"],
+              "subjectTermsAny": ["however", "purple underline", "small caption", "this was never"],
+              "mechanismAny": ["translate", "slide", "type_on", "mask_reveal", "crop_reveal", "opacity", "scale"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "review-unit-000037",
+      "targets": []
+    }
+  ]
+}

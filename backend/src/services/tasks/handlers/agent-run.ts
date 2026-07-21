@@ -1,4 +1,5 @@
 import { createAgent as defaultCreateAgent, validAgentTypes } from '../../../agents/index.js'
+import { runStoryboardBreakerDirect, isDeepSeekProvider } from '../../storyboard-breaker-direct.js'
 import { registerTaskHandler } from '../registry.js'
 import {
   scheduleDirectScriptPipeline,
@@ -193,10 +194,13 @@ export function createAgentRunHandler(deps: CreateAgentRunHandlerDeps = {}): Tas
       const agent = createAgent(agentType, episodeId, dramaId)
       if (!agent) throw new Error('Agent not found')
 
-      const result = await agent.generate(
-        [{ role: 'user', content: message }],
-        { maxSteps: 20 },
-      )
+      const useDirectPath = agentType === 'storyboard_breaker' && isDeepSeekProvider()
+      const result = useDirectPath
+        ? await runStoryboardBreakerDirect(episodeId, dramaId, message)
+        : await agent.generate(
+            [{ role: 'user', content: message }],
+            { maxSteps: 20 },
+          )
 
       const toolCalls = normalizeToolCalls(result.toolCalls || [])
       const toolResults = normalizeToolResults(result.toolResults || [])

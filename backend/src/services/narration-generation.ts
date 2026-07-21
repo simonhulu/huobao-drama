@@ -13,6 +13,7 @@ import { createNarratorTools } from '../agents/tools/narrator-tools.js'
 import { now } from '../utils/response.js'
 import { logTaskProgress, logTaskSuccess, logTaskError } from '../utils/task-logger.js'
 import { usesOriginalTextForNarration } from './episode-mode.js'
+import { normalizeTtsText } from '../utils/tts-text.js'
 
 const MAX_TOKENS = Number(process.env.NARRATION_GENERATION_MAX_TOKENS || 8000)
 
@@ -154,7 +155,7 @@ export function countExistingNarrations(episodeId: number): number {
 type EpisodeRow = typeof schema.episodes.$inferSelect
 type StoryboardRow = typeof schema.storyboards.$inferSelect
 
-function getVerbatimSource(ep: EpisodeRow): string {
+export function getVerbatimSource(ep: EpisodeRow): string {
   if (ep.workflowType === 'direct_script') {
     return (ep.scriptContent || ep.content || '').trim()
   }
@@ -186,6 +187,12 @@ function normalizeWithOriginalIndex(text: string): { normalized: string; indexes
 }
 
 function extractOriginalFragment(source: string, fragment: string): string | null {
+  const range = findOriginalFragmentRange(source, fragment)
+  if (!range) return null
+  return source.slice(range.start, range.end).trim()
+}
+
+export function findOriginalFragmentRange(source: string, fragment: string): { start: number; end: number } | null {
   const cleanFragment = normalizeForFragmentMatch(fragment)
   if (!source.trim() || !cleanFragment) return null
 
@@ -203,29 +210,35 @@ function extractOriginalFragment(source: string, fragment: string): string | nul
     sliceEnd++
   }
 
-  return source.slice(originalStart, sliceEnd).trim()
+  return { start: originalStart, end: sliceEnd }
 }
 
 export function resolveStoryboardNarrationTextForTTS(sb: StoryboardRow, ep?: EpisodeRow | null): string {
+  let raw = ''
   if (ep && usesOriginalTextForNarration(ep)) {
     const source = getVerbatimSource(ep)
     const narration = (sb.narration || '').trim()
     const description = (sb.description || '').trim()
 
     if (narration) {
-      return extractOriginalFragment(source, narration) || ''
+      raw = extractOriginalFragment(source, narration) || ''
+    } else if (description) {
+      raw = extractOriginalFragment(source, description) || ''
     }
-    if (description) {
-      return extractOriginalFragment(source, description) || ''
-    }
-    return ''
+  } else {
+    raw = (sb.narration || '').trim()
   }
 
-  return (sb.narration || '').trim()
+  return normalizeTtsText(raw)
 }
 
 /**
- * 把原文按句子切分后均匀分配到每个分镜的 narration 字段。
+ * 把原文按句子切分后分配到每个分镜的 narration 字段。
+ *
+ * 分配策略：
+ * 1. 优先尝试用每个分镜已有的 narration / description 在原文中定位。
+ * 2. 定位成功后，直接使用对应的原文片段，保证画面和旁白对齐。
+ * 3. 定位失败或产生重叠的分镜，再把剩余原文按字数平均分配。
  *
  * 这里的 narration 只是历史字段名：
  * - direct_script / verbatim 下，它不是 AI 生成的“旁白文案”，只是逐镜头 TTS 原文切片。
@@ -276,49 +289,104 @@ export function restoreOriginalTextNarrations(episodeId: number): { updated: num
     return result
   }
 
-  const sentences = splitSentences(original, 300)
+  // 把一段未分配的原文均匀切分给若干分镜
+  function distributeText(text: string, shotIds: number[], out: Map<number, string>) {
+    if (shotIds.length === 0) return
+    const sentences = splitSentences(text, 300)
+    if (sentences.length === 0) {
+      for (const id of shotIds) out.set(id, '')
+      return
+    }
 
-  if (sentences.length === 0) {
-    sentences.push(original)
-  }
+    const totalChars = sentences.reduce((sum, s) => sum + s.length, 0)
+    const targetChars = totalChars / shotIds.length
+    const chunks: string[][] = []
+    let current: string[] = []
+    let currentChars = 0
 
-  // 按顺序把句子分组，目标让每组字数尽量接近，避免某些分镜过长/过短。
-  const totalChars = sentences.reduce((sum, s) => sum + s.length, 0)
-  const targetChars = totalChars / shots.length
-  const chunks: string[][] = []
-  let current: string[] = []
-  let currentChars = 0
-
-  for (let i = 0; i < sentences.length; i++) {
-    const sentence = sentences[i]
-    if (
-      chunks.length < shots.length - 1 &&
-      currentChars > 0 &&
-      currentChars + sentence.length > targetChars * 1.2
-    ) {
+    for (let i = 0; i < sentences.length; i++) {
+      const sentence = sentences[i]
+      if (
+        chunks.length < shotIds.length - 1 &&
+        currentChars > 0 &&
+        currentChars + sentence.length > targetChars * 1.2
+      ) {
+        chunks.push(current)
+        current = [sentence]
+        currentChars = sentence.length
+      } else {
+        current.push(sentence)
+        currentChars += sentence.length
+      }
+    }
+    if (current.length > 0) {
       chunks.push(current)
-      current = [sentence]
-      currentChars = sentence.length
-    } else {
-      current.push(sentence)
-      currentChars += sentence.length
+    }
+
+    while (chunks.length < shotIds.length) {
+      chunks.push([])
+    }
+
+    for (let i = 0; i < shotIds.length; i++) {
+      out.set(shotIds[i], chunks[i].join(''))
     }
   }
-  if (current.length > 0) {
-    chunks.push(current)
+
+  // 第一遍：尝试用 narration / description 在原文中定位
+  const matchedRanges: Array<{ start: number; end: number; shotId: number; text: string }> = []
+  const matchedByShotId = new Map<number, { start: number; end: number; text: string }>()
+
+  for (const sb of shots) {
+    const fragment = (sb.narration || sb.description || '').trim()
+    if (!fragment) continue
+
+    const range = findOriginalFragmentRange(original, fragment)
+    if (!range) continue
+
+    // 避免重叠：如果和已定位区域重叠，则视为未命中，交给后面的均分兜底
+    const overlaps = matchedRanges.some(
+      r => !(range.end <= r.start || range.start >= r.end),
+    )
+    if (overlaps) continue
+
+    const text = original.slice(range.start, range.end).trim()
+    matchedRanges.push({ start: range.start, end: range.end, shotId: sb.id, text })
+    matchedByShotId.set(sb.id, { start: range.start, end: range.end, text })
   }
 
-  while (chunks.length < shots.length) {
-    chunks.push([])
+  matchedRanges.sort((a, b) => a.start - b.start)
+
+  // 第二遍：按顺序遍历分镜，把匹配成功的直接采用，未匹配的收集成“缺口”再均分
+  const narrations = new Map<number, string>()
+  let cursor = 0
+  let pendingShotIds: number[] = []
+
+  function flushPending(end: number) {
+    if (pendingShotIds.length === 0) return
+    const gapText = original.slice(cursor, end)
+    distributeText(gapText, pendingShotIds, narrations)
+    pendingShotIds = []
   }
+
+  for (const sb of shots) {
+    const matched = matchedByShotId.get(sb.id)
+    if (matched) {
+      flushPending(matched.start)
+      narrations.set(sb.id, matched.text)
+      cursor = matched.end
+    } else {
+      pendingShotIds.push(sb.id)
+    }
+  }
+  flushPending(original.length)
 
   const ts = now()
   let updated = 0
-  for (let i = 0; i < shots.length; i++) {
-    const text = chunks[i].join('')
+  for (const sb of shots) {
+    const text = normalizeTtsText(narrations.get(sb.id) || '')
     db.update(schema.storyboards)
       .set({ narration: text, updatedAt: ts })
-      .where(eq(schema.storyboards.id, shots[i].id))
+      .where(eq(schema.storyboards.id, sb.id))
       .run()
     updated++
   }
@@ -329,7 +397,12 @@ export function restoreOriginalTextNarrations(episodeId: number): { updated: num
     .where(eq(schema.storyboards.episodeId, episodeId))
     .run()
 
-  logTaskSuccess('NarrationFallback', 'original-text-restored', { episodeId, shots: shots.length, sentences: sentences.length, updated })
+  logTaskSuccess('NarrationFallback', 'original-text-restored', {
+    episodeId,
+    shots: shots.length,
+    matched: matchedRanges.length,
+    updated,
+  })
   return { updated }
 }
 

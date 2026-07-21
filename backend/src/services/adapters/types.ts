@@ -111,6 +111,8 @@ export interface ImageGenResponse {
 export interface ImagePollResponse {
   status: 'pending' | 'processing' | 'completed' | 'failed'
   imageUrl?: string
+  imageBase64?: string
+  mimeType?: string
   error?: string
 }
 

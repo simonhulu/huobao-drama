@@ -68,6 +68,25 @@ description: 小说改写为格式化剧本的方法论和规范
 4. 检查改写结果，确认符合格式化剧本格式
 5. 调用 `save_script` 保存最终结果
 
+## 封面方案
+
+保存精稿时，同时通过 `save_script` 的 `cover_design` 参数保存一套推荐封面方案。不要把方案 JSON 混入剧本正文。
+
+方案至少包含以下字段：
+
+```json
+{
+  "type": "冲突型",
+  "main_title": "4-10个汉字的主标题钩子",
+  "sub_title": "8-20个汉字的副标题悬念",
+  "kicker": "4-10个汉字的栏目标签",
+  "ai_prompt": "只描述无字底图的英文生图提示词，包含 cinematic、highly detailed、no text、no watermark",
+  "rationale": "说明画面和文案如何制造点击动机"
+}
+```
+
+`ai_prompt` 严禁要求生成标题、字幕、书法、LOGO、字母或水印；标题由系统统一排版。若没有显式传入 `cover_design`，系统会尝试从精稿中的 `thumbnail_designs` 或“封面设计方案”章节自动提取。
+
 ## 注意事项
 
 - 对白逐字保真是硬要求：可以调整对白的归属和场景位置，但台词文字本身保持与原文一致

@@ -8,6 +8,8 @@ import type { TaskContext, TaskHandler } from '../types.js'
 interface IntroComposePayload {
   episode_id?: number
   episodeId?: number
+  template_id?: string
+  templateId?: string
 }
 
 export function createIntroComposeHandler(): TaskHandler<IntroComposePayload> {
@@ -26,11 +28,12 @@ export function createIntroComposeHandler(): TaskHandler<IntroComposePayload> {
 
       const [drama] = db.select().from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
 
+      const templateId = ctx.payload.template_id ?? ctx.payload.templateId ?? drama?.introTemplateId
       const introVideoUrl = await composeIntroForEpisode({
         episodeId,
         episodeNumber: ep.episodeNumber,
         dramaTitle: drama?.title,
-        templateId: drama?.introTemplateId,
+        templateId,
         aspectRatio: ep.aspectRatio,
       })
 

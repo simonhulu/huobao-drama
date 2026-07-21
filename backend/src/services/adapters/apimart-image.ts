@@ -63,6 +63,12 @@ export class APIMartImageAdapter implements ImageProviderAdapter {
   }
 
   parseGenerateResponse(result: any): ImageGenResponse {
+    // 如果响应已携带图片 URL，按同步结果处理（避免对同步返回的 gpt-image-2 错误地进入轮询）
+    const syncImageUrl = extractAPIMartImageUrl(result)
+    if (syncImageUrl) {
+      return { isAsync: false, imageUrl: syncImageUrl }
+    }
+
     const data = Array.isArray(result.data) ? result.data[0] : result.data
     const taskId = result.task_id || data?.task_id || data?.id || result.id
     if (!taskId) {
@@ -91,6 +97,13 @@ export class APIMartImageAdapter implements ImageProviderAdapter {
   parsePollResponse(result: any): ImagePollResponse {
     const data = result.data ?? result
     const status = String(data.status || result.status || '').toLowerCase()
+
+    // apimart 异步任务注册有延迟/抖动，偶发返回 "No associated task found"——
+    // 这是瞬态，不是失败；当 pending 继续轮询。
+    const errText = String(data.error?.message || data.error || data.error_message || result.error?.message || result.message || '')
+    if (/no associated task/i.test(errText)) {
+      return { status: 'pending' }
+    }
 
     if (status === 'completed' || status === 'succeeded' || status === 'success') {
       const imageUrl = extractAPIMartImageUrl(data)

@@ -18,14 +18,14 @@ import { getEpisodeVisualStyle } from './episode-mode.js'
 import { resolveStoryboardNarrationTextForTTS } from './narration-generation.js'
 import { generateSubtitleFileForStoryboard, readEpisodeSubtitleConfig } from './subtitle.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn } from '../utils/task-logger.js'
-import { ensureStoryboardBGM } from './music-generation.js'
 import { findSfxFiles, findAmbientFile, getSfxUrl } from './sfx-library.js'
 import { applyAudioProfileToStoryboard } from './audio-profile.js'
+import { normalizeTtsText } from '../utils/tts-text.js'
+import { DEFAULT_NARRATION_VOICE_ID } from './narration-defaults.js'
 import {
   buildStoryboardComposition,
   renderStoryboardComposition,
-  buildDeterministicMotionPlan,
-  parseMovement,
+  buildPreferredStoryboardMotionPlan,
   type AudioLayer,
   type SubtitleOverlay,
   type GrainVignetteOverlay,
@@ -39,6 +39,7 @@ const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?e
 const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
 
 const SFX_VOLUME = 1.0
+const DISABLE_SFX = process.env.DISABLE_SFX === '1' || process.env.DISABLE_SFX === 'true'
 
 export function toAbsPath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) return relativePath
@@ -64,7 +65,7 @@ export function parseDialogueForTTS(dialogue?: string | null) {
   if (!raw) return { speaker: '', pureText: '', ignorable: true }
   const speakerMatch = raw.match(/^(.+?)[:：]/)
   const speaker = speakerMatch ? speakerMatch[1].replace(/[（(].+?[)）]/g, '').trim() : ''
-  const pureText = raw.replace(/^.+?[:：]\s*/, '').replace(/[（(].+?[)）]/g, '').trim()
+  const pureText = normalizeTtsText(raw.replace(/^.+?[:：]\s*/, '').replace(/[（(].+?[)）]/g, '').trim())
   const ignorable = (!!speaker && IGNORE_TTS_SPEAKERS.test(speaker)) || !pureText || IGNORE_TTS_TEXT.test(pureText)
   return { speaker, pureText, ignorable }
 }
@@ -102,7 +103,7 @@ export function resolveVoiceForDialogue(speaker: string, episodeId: number): { v
 }
 
 export function resolveNarratorVoice(episodeId: number): { voiceId: string; audioConfigId: number | undefined } {
-  let voiceId = 'alloy'
+  let voiceId = DEFAULT_NARRATION_VOICE_ID
   let audioConfigId: number | undefined
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (ep) {
@@ -133,8 +134,8 @@ export function resolveNarratorVoice(episodeId: number): { voiceId: string; audi
     if (configured) {
       voiceId = configured.voiceId
     } else {
-      // 2. 回退到默认解说音色“大女主”
-      const preferred = voices.find(v => v.voiceId === 'DaniangzhuVoice01')
+      // 2. 回退到默认历史解说音色
+      const preferred = voices.find(v => v.voiceId === DEFAULT_NARRATION_VOICE_ID)
       if (preferred) {
         voiceId = preferred.voiceId
       } else if (voices.length > 0) {
@@ -324,7 +325,7 @@ function mixAudioTracks(cmd: ffmpeg.FfmpegCommand, tracks: AudioTrack[], totalDu
 /**
  * 合成单个镜头
  */
-export async function composeStoryboard(storyboardId: number, options?: { force?: boolean }): Promise<string> {
+export async function composeStoryboard(storyboardId: number, options?: { force?: boolean; forceAudio?: boolean }): Promise<string> {
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, storyboardId)).all()
   if (!sb) throw new Error(`Storyboard ${storyboardId} not found`)
 
@@ -358,7 +359,8 @@ export async function composeStoryboard(storyboardId: number, options?: { force?
 
   try {
     // 1. 准备音频（对白、旁白）
-    const { ttsAudioUrl, narrationAudioUrl } = await ensureStoryboardAudio(storyboardId, { visualStyle, force: options?.force })
+    const forceAudio = options?.forceAudio ?? options?.force ?? false
+    const { ttsAudioUrl, narrationAudioUrl } = await ensureStoryboardAudio(storyboardId, { visualStyle, force: forceAudio })
 
     // 2. 计算语音轨道与实际所需时长
     let narrationEnd = 0
@@ -383,24 +385,17 @@ export async function composeStoryboard(storyboardId: number, options?: { force?
       : baseDuration
     const duration = Math.max(1, requiredDuration)
 
-    // 3. 准备 BGM 与 SFX
+    // 3. 准备 SFX 与音频画像
     // 先根据旁白/描述推断音频画像，自动补全空缺的 bgm_prompt 和 sound_effect。
+    // BGM 不再在分镜级生成，改由集 mixer 统一规划 1–3 条情绪 bed。
     const audioProfile = applyAudioProfileToStoryboard(storyboardId)
 
-    // 每个分镜按自己的 bgm_prompt 生成/复用 BGM，集 mixer 会把各段拼接成情绪时间线。
-    let bgmAudioUrl: string | null = null
-    if (sb.bgmPrompt?.trim() || audioProfile.bgmPrompt) {
-      try {
-        bgmAudioUrl = await ensureStoryboardBGM(storyboardId, options)
-      } catch (err: any) {
-        logTaskWarn('ComposeTask', 'bgm-skip', { storyboardId, error: err.message })
-      }
-    }
-
     // 多样化 SFX：同一描述返回多个候选，按分镜序号轮询，避免相邻镜头反复用同一个文件。
+    // DISABLE_SFX=1 时完全跳过 SFX 与环境底噪，只用 BGM。
     let sfxFilePath: string | null = null
+    let ambientFilePath: string | null = null
     const effectiveSoundEffect = sb.soundEffect?.trim() || audioProfile.sfxDescriptions.join('; ')
-    if (!isIgnorableSound(effectiveSoundEffect)) {
+    if (!DISABLE_SFX && !isIgnorableSound(effectiveSoundEffect)) {
       const candidates = findSfxFiles(effectiveSoundEffect, 5)
       if (candidates.length > 0) {
         const rotationIndex = (sb.storyboardNumber - 1) % candidates.length
@@ -408,6 +403,13 @@ export async function composeStoryboard(storyboardId: number, options?: { force?
       }
     }
     const sfxDuration = sfxFilePath && fs.existsSync(sfxFilePath) ? await getAudioDuration(sfxFilePath) : 0
+
+    if (!DISABLE_SFX) {
+      const ambientDescription = [sb.soundEffect, sb.atmosphere, sb.location, sb.title, audioProfile.ambientDescription]
+        .filter(Boolean)
+        .join(' ')
+      ambientFilePath = ambientDescription ? findAmbientFile(ambientDescription) : null
+    }
 
     // 4. 生成字幕文件（ASS），根据 episode 字幕配置
     const subtitleConfig = readEpisodeSubtitleConfig(ep)
@@ -440,10 +442,7 @@ export async function composeStoryboard(storyboardId: number, options?: { force?
       })
     }
 
-    const ambientDescription = [sb.soundEffect, sb.atmosphere, sb.location, sb.title, audioProfile.ambientDescription]
-      .filter(Boolean)
-      .join(' ')
-    const ambientFilePath = ambientDescription ? findAmbientFile(ambientDescription) : null
+
 
     // 持久化本次实际选用的 SFX / Ambient，便于前端展示素材索引
     db.update(schema.storyboards)
@@ -503,7 +502,16 @@ export async function composeStoryboard(storyboardId: number, options?: { force?
       duration,
       baseImagePath: visualStyle === 'image_story' ? sb.firstFrameImage! : undefined,
       baseVideoPath: visualStyle === 'ai_video' ? sb.videoUrl! : undefined,
-      motion: visualStyle === 'image_story' ? (parseMovement(sb.movement) ?? buildDeterministicMotionPlan(sb.id)) : undefined,
+      motion: visualStyle === 'image_story'
+        ? buildPreferredStoryboardMotionPlan({
+          seed: sb.id,
+          duration,
+          movement: sb.movement,
+          narration: sb.narration || sb.description,
+          dialogue: sb.dialogue,
+          videoPrompt: sb.videoPrompt,
+        })
+        : undefined,
       audioLayers,
     })
     composition.video.overlays = overlays
@@ -516,6 +524,7 @@ export async function composeStoryboard(storyboardId: number, options?: { force?
       composedVideoUrl: composedRelative,
       status: 'compose_completed',
       duration,
+      bgmAudioUrl: null,
       subtitleUrl: subtitlePath ? `static/subtitles/${path.basename(subtitlePath)}` : null,
       updatedAt: now(),
     }).where(eq(schema.storyboards.id, storyboardId)).run()
@@ -525,7 +534,7 @@ export async function composeStoryboard(storyboardId: number, options?: { force?
       storyboardNumber: sb.storyboardNumber,
       visualStyle,
       output: composedRelative,
-      bgm: !!bgmAudioUrl,
+      bgm: false,
       sfx: !!sfxFilePath,
     })
     return composedRelative

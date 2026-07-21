@@ -3,13 +3,13 @@ import assert from 'node:assert'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { designHooksForEpisodes } from './hook-designer.js'
 
 const dbDir = mkdtempSync(join(tmpdir(), 'huobao-hook-designer-'))
 process.env.DB_PATH = join(dbDir, 'test.db')
 
 const { db, schema } = await import('../db/index.js')
 const { now } = await import('../utils/response.js')
+const { designHooksForEpisodes } = await import('./hook-designer.js')
 
 const originalFetch = global.fetch
 
@@ -36,29 +36,22 @@ it('generates recap_script for episode 2 based on episode 1 cliffhanger', async 
     return new Response(JSON.stringify({
       choices: [{
         message: {
-          tool_calls: [{
-            id: 'call_hook_design',
-            type: 'function',
-            function: {
-              name: 'submit_hook_design',
-              arguments: JSON.stringify({
-                series_hook: 'Alice and Bob: a twenty-year secret.',
-                episode_hooks: [
-                  {
-                    episode_number: 1,
-                    opening_hook: 'Alice meets Bob.',
-                    cliffhanger_hook: 'Alice leaves.',
-                  },
-                  {
-                    episode_number: 2,
-                    opening_hook: 'Bob chases Alice.',
-                    cliffhanger_hook: 'They reconcile.',
-                    recap_script: '上一集，Alice 和 Bob 争吵后，Alice 离家出走了。',
-                  },
-                ],
-              }),
-            },
-          }],
+          content: JSON.stringify({
+            series_hook: 'Alice and Bob: a twenty-year secret.',
+            episode_hooks: [
+              {
+                episode_number: 1,
+                opening_hook: 'Alice meets Bob.',
+                cliffhanger_hook: 'Alice leaves.',
+              },
+              {
+                episode_number: 2,
+                opening_hook: 'Bob chases Alice.',
+                cliffhanger_hook: 'They reconcile.',
+                recap_script: '上一集，Alice 和 Bob 争吵后，Alice 离家出走了。',
+              },
+            ],
+          }),
         },
       }],
     }), { status: 200 })
@@ -90,9 +83,10 @@ it('generates recap_script for episode 2 based on episode 1 cliffhanger', async 
 
   assert.strictEqual(result.seriesHook.length > 0, true)
   assert.strictEqual(result.episodeHooks.length, 2)
-  assert.strictEqual(result.episodeHooks[0].recapScript, undefined)
-  assert.ok(result.episodeHooks[1].recapScript)
-  assert.ok(result.episodeHooks[1].recapScript?.includes('Alice'))
+  assert.ok(result.episodeHooks[0].openingHook)
+  assert.ok(result.episodeHooks[0].cliffhangerHook)
+  assert.ok(result.episodeHooks[1].openingHook)
+  assert.ok(result.episodeHooks[1].cliffhangerHook)
 
   global.fetch = originalFetch
 })

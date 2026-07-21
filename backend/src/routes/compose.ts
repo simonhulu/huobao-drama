@@ -19,6 +19,7 @@ app.post('/storyboards/:id/compose', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json().catch(() => ({}))
   const force = Boolean(body?.force)
+  const forceAudio = body?.force_audio === true || body?.forceAudio === true
   const [sb] = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id)).all()
   if (!sb) return badRequest(c, 'Storyboard not found')
 
@@ -51,6 +52,7 @@ app.post('/storyboards/:id/compose', async (c) => {
     payload: {
       storyboard_id: id,
       force,
+      force_audio: forceAudio,
     },
   })
 
@@ -66,6 +68,7 @@ app.post('/episodes/:id/compose-all', async (c) => {
   const episodeId = Number(c.req.param('id'))
   const body = await c.req.json().catch(() => ({}))
   const force = Boolean(body?.force)
+  const forceAudio = body?.force_audio === true || body?.forceAudio === true
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c, 'Episode not found')
 
@@ -103,6 +106,7 @@ app.post('/episodes/:id/compose-all', async (c) => {
       payload: {
         storyboard_id: sb.id,
         force,
+        force_audio: forceAudio,
       },
     })
   )

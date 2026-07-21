@@ -132,6 +132,57 @@ test('syncImageGenerationTaskState updates related tables on succeeded', () => {
   assert.equal(scene?.status, 'completed')
 })
 
+test('custom showcase frame types stay out of storyboard render fields', () => {
+  resetTables()
+  const storyboardId = createStoryboard(1)
+  db.update(schema.storyboards)
+    .set({ firstFrameImage: 'images/original-first.png', composedImage: 'images/original-composed.png' })
+    .where(eq(schema.storyboards.id, storyboardId))
+    .run()
+  const generationId = createImageGeneration({ storyboardId, frameType: 'remotion-showcase-v3-clean' })
+
+  const task = createTask({
+    type: 'image.generate',
+    dramaId: 1,
+    episodeId: 1,
+    scopeType: 'storyboard',
+    scopeId: storyboardId,
+    payload: { image_generation_id: generationId },
+  })
+
+  transitionTask(task.id, 'succeeded', {
+    result: { image_generation_id: generationId, local_path: 'images/showcase-clean.png' },
+    sync: (tx, updatedTask) => syncImageGenerationTaskState(tx, updatedTask),
+  })
+
+  const storyboard = loadStoryboard(storyboardId)
+  assert.equal(storyboard?.firstFrameImage, 'images/original-first.png')
+  assert.equal(storyboard?.composedImage, 'images/original-composed.png')
+  assert.equal(loadImageGeneration(generationId)?.localPath, 'images/showcase-clean.png')
+})
+
+test('composed frame type still updates storyboard composed image', () => {
+  resetTables()
+  const storyboardId = createStoryboard(1)
+  const generationId = createImageGeneration({ storyboardId, frameType: 'composed' })
+
+  const task = createTask({
+    type: 'image.generate',
+    dramaId: 1,
+    episodeId: 1,
+    scopeType: 'storyboard',
+    scopeId: storyboardId,
+    payload: { image_generation_id: generationId },
+  })
+
+  transitionTask(task.id, 'succeeded', {
+    result: { image_generation_id: generationId, local_path: 'images/composed.png' },
+    sync: (tx, updatedTask) => syncImageGenerationTaskState(tx, updatedTask),
+  })
+
+  assert.equal(loadStoryboard(storyboardId)?.composedImage, 'images/composed.png')
+})
+
 test('syncImageGenerationTaskState marks failed on terminal failure', () => {
   resetTables()
   const generationId = createImageGeneration()
@@ -172,7 +223,7 @@ test('syncImageGenerationTaskState marks canceled', () => {
   assert.equal(record?.status, 'canceled')
 })
 
-test('syncImageGenerationTaskState resets to processing on retry', () => {
+test('syncImageGenerationTaskState tracks processing and queued states on retry', () => {
   resetTables()
   const generationId = createImageGeneration({ status: 'failed' })
   const task = createTask({
@@ -182,13 +233,16 @@ test('syncImageGenerationTaskState resets to processing on retry', () => {
     payload: { image_generation_id: generationId },
   })
 
-  transitionTask(task.id, 'running')
+  transitionTask(task.id, 'running', {
+    sync: (tx, updatedTask) => syncImageGenerationTaskState(tx, updatedTask),
+  })
+  assert.equal(loadImageGeneration(generationId)?.status, 'processing')
   scheduleTaskRetry(task.id, new Error('rate limited'), 'rate_limited', new Date(Date.now() + 5000).toISOString(), (tx, updatedTask) => {
     syncImageGenerationTaskState(tx, updatedTask)
   })
 
   const record = loadImageGeneration(generationId)
-  assert.equal(record?.status, 'processing')
+  assert.equal(record?.status, 'pending')
   assert.equal(record?.lastErrorCode, 'rate_limited')
 })
 

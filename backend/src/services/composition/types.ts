@@ -13,6 +13,8 @@ export interface MotionPlan {
   keyframes: MotionKeyframe[]
 }
 
+export type MotionEasing = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out'
+
 export interface MotionKeyframe {
   /** 归一化焦点 X（0-1），0.5 为画面中心 */
   focusX: number
@@ -22,6 +24,10 @@ export interface MotionKeyframe {
   zoom: number
   /** 在时间轴上的位置（0-1），用于多段关键帧 */
   t: number
+  /** 到达该关键帧时，上一段运动使用的缓动方式 */
+  easing?: MotionEasing
+  /** 在该关键帧处从上一状态直接切换，而不是连续插值 */
+  transition?: 'smooth' | 'cut' | 'flash' | 'dip-black'
 }
 
 export interface AudioLayer {

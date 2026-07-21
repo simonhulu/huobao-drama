@@ -1,0 +1,90 @@
+{
+  "targetObservations": [
+    {
+      "targetId": "observation-target-000001",
+      "localDelta": {
+        "editClass": "within_setup_change",
+        "changes": [
+          {
+            "changeType": "text_replace",
+            "subject": "center title",
+            "mechanism": "cut",
+            "beforeState": "90's",
+            "afterState": "$1 million",
+            "evidence": "The micro-sequence preserves the composition while the centered words change."
+          }
+        ],
+        "evidence": ["The background and framing remain continuous across all five target frames."],
+        "alternativeExplanations": ["A very fast masked replacement may occur between decoded frames."],
+        "confidence": 0.88
+      },
+      "audioRelation": {
+        "assessability": "machine_evidence_available",
+        "relation": "synchronous_accent",
+        "evidence": ["side_onset onset offset +0.020000 seconds from target anchor"]
+      }
+    },
+    {
+      "targetId": "observation-target-000002",
+      "localDelta": {
+        "editClass": "hard_cut",
+        "changes": [],
+        "evidence": ["No blended intermediate state is visible around the anchor."],
+        "alternativeExplanations": ["A sub-frame transition cannot be excluded."],
+        "confidence": 0.9
+      },
+      "audioRelation": {
+        "assessability": "not_assessable",
+        "relation": "unknown",
+        "evidence": []
+      }
+    }
+  ],
+  "continuousTracks": [
+    {
+      "startSampleIndex": 0,
+      "endSampleIndex": 2,
+      "subject": {
+        "scope": "layer",
+        "layerType": "logo",
+        "description": "centered Yahoo logo"
+      },
+      "behavior": "scale_down",
+      "direction": "out",
+      "evidence": "The logo becomes progressively smaller across overview samples 0, 1, and 2.",
+      "confidence": 0.86
+    }
+  ],
+  "unitEvidence": {
+    "layers": [
+      {
+        "description": "centered Yahoo logo",
+        "layerType": "logo",
+        "depth": "foreground",
+        "observedOverviewSampleIndices": [0, 1, 2],
+        "evidence": "A purple wordmark is visible in the center of the first three overview frames."
+      }
+    ],
+    "texts": [
+      {
+        "visibleText": "YAHOO",
+        "observedOverviewSampleIndices": [0, 1, 2],
+        "evidence": "The word is directly readable in those overview samples."
+      }
+    ],
+    "cameraContexts": [
+      {
+        "basis": "simulated_2d",
+        "shotScale": "indeterminate",
+        "observedOverviewSampleIndices": [0, 1, 2],
+        "evidence": ["The composition is a flat graphic rather than a photographed camera view."]
+      }
+    ]
+  },
+  "reviewNotes": [],
+  "confidence": {
+    "overall": 0.87,
+    "unitEvidence": 0.84,
+    "continuousTracks": 0.86
+  }
+}

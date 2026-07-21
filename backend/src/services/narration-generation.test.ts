@@ -116,6 +116,31 @@ test('restoreVerbatimNarrations does not inject hooks into direct-script origina
   assert.ok(!rows[1].narration?.includes('错误悬念'))
 })
 
+test('restoreOriginalTextNarrations respects existing description boundaries', () => {
+  const { episodeId, ts } = seedDirectScriptEpisode()
+  db.update(schema.episodes)
+    .set({ scriptContent: '第一句原文。第二句原文。第三句原文。' })
+    .where(eq(schema.episodes.id, episodeId))
+    .run()
+
+  db.insert(schema.storyboards).values([
+    { episodeId, storyboardNumber: 1, description: '第一句原文。', createdAt: ts, updatedAt: ts },
+    { episodeId, storyboardNumber: 2, description: '第二句原文。', createdAt: ts, updatedAt: ts },
+    { episodeId, storyboardNumber: 3, createdAt: ts, updatedAt: ts },
+  ]).run()
+
+  restoreOriginalTextNarrations(episodeId)
+
+  const rows = db.select().from(schema.storyboards)
+    .where(eq(schema.storyboards.episodeId, episodeId))
+    .orderBy(schema.storyboards.storyboardNumber)
+    .all()
+
+  assert.equal(rows[0].narration, '第一句原文。')
+  assert.equal(rows[1].narration, '第二句原文。')
+  assert.equal(rows[2].narration, '第三句原文。')
+})
+
 test('restoreOriginalTextNarrations clears extra storyboard narration beyond source text', () => {
   const { episodeId, ts } = seedDirectScriptEpisode()
   db.update(schema.episodes)

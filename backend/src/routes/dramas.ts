@@ -10,6 +10,10 @@ import { cleanDirectScript, type HookStyle, type RetentionMode } from '../servic
 import { buildRetentionStructureFromScript, optimizeScriptForRetention, type RetentionStructure } from '../services/retention-script-optimizer.js'
 import { smartSplitDirectScript, splitDirectScriptByMarkers, type DirectScriptSegment, type DirectScriptSplitResult } from '../services/direct-script-splitter.js'
 import { createTask, addTaskDependency } from '../services/tasks/store.js'
+import { scheduleCoverGeneration } from '../services/tasks/handlers/cover-generate.js'
+import { normalizeTtsText } from '../utils/tts-text.js'
+import { DEFAULT_NARRATION_VOICE_ID } from '../services/narration-defaults.js'
+import { getDefaultMediaAccountRow, getMediaAccountRow, normalizeMediaAccount, parseJsonRecord, serializePositioning } from '../services/media-accounts.js'
 
 const app = new Hono()
 type CleanMode = 'faithful' | 'retention'
@@ -75,6 +79,8 @@ app.get('/', async (c) => {
 
   const total = filtered.length
   const items = filtered.slice((page - 1) * pageSize, page * pageSize)
+  const accountRows = db.select().from(schema.mediaAccounts).where(isNull(schema.mediaAccounts.deletedAt)).all()
+  const accountsById = new Map(accountRows.map(account => [account.id, normalizeMediaAccount(account)]))
 
   // Attach episode/character/scene counts
   const enriched = await Promise.all(items.map(async (drama) => {
@@ -87,6 +93,8 @@ app.get('/', async (c) => {
     return {
       ...toSnakeCase(drama),
       tags: drama.tags ? JSON.parse(drama.tags) : [],
+      media_account: (drama.mediaAccountId ? accountsById.get(drama.mediaAccountId) : null) || null,
+      project_positioning: parseJsonRecord(drama.projectPositioningJson),
       total_episodes: eps.length,
       episodes: toSnakeCaseArray(eps),
       characters: toSnakeCaseArray(chars),
@@ -104,13 +112,22 @@ app.get('/', async (c) => {
 app.post('/', async (c) => {
   const body = await c.req.json()
   const ts = now()
+  const totalEpisodes = Number(body.total_episodes ?? 0)
+  const requestedAccountId = Number(body.media_account_id ?? body.mediaAccountId)
+  const account = Number.isInteger(requestedAccountId) && requestedAccountId > 0
+    ? getMediaAccountRow(requestedAccountId)
+    : getDefaultMediaAccountRow()
+  if (!account) return badRequest(c, 'media account not found')
   const res = db.insert(schema.dramas).values({
+    mediaAccountId: account.id,
     title: body.title,
     description: body.description,
     genre: body.genre,
     style: body.style,
+    totalEpisodes: Math.max(0, totalEpisodes),
     tags: body.tags ? JSON.stringify(body.tags) : null,
     metadata: body.metadata,
+    projectPositioningJson: serializePositioning(body.project_positioning ?? body.projectPositioning ?? {}),
     status: 'draft',
     createdAt: ts,
     updatedAt: ts,
@@ -119,17 +136,18 @@ app.post('/', async (c) => {
   const [result] = db.select().from(schema.dramas)
     .where(eq(schema.dramas.id, Number(res.lastInsertRowid))).all()
 
-  // Create default episodes
-  const totalEpisodes = body.total_episodes || 1
-  for (let i = 1; i <= totalEpisodes; i++) {
-    db.insert(schema.episodes).values({
-      dramaId: result.id,
-      episodeNumber: i,
-      title: `第${i}集`,
-      status: 'draft',
-      createdAt: ts,
-      updatedAt: ts,
-    }).run()
+  // 默认不创建空占位 episode；只有显式指定计划集数时才预创建。
+  if (totalEpisodes > 0) {
+    for (let i = 1; i <= totalEpisodes; i++) {
+      db.insert(schema.episodes).values({
+        dramaId: result.id,
+        episodeNumber: i,
+        title: `第${i}集`,
+        status: 'draft',
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+    }
   }
 
   return created(c, toSnakeCase(result))
@@ -164,8 +182,8 @@ app.post('/:id/smart-split', async (c) => {
   const aspectRatio = String(body.aspect_ratio || '16:9')
   const renderMode = body.render_mode === 'ai_video' ? 'ai_video' : 'image_story'
   const style = body.style === 'ai_manga_drama' ? 'ai_manga_drama' : body.style === 'default' ? 'default' : undefined
-  const pacingMode = String(body.pacing_mode || drama.pacingMode || 'standard').trim()
   const replaceExisting = body.replace === true
+  const coverPromptBase = body.cover_prompt?.trim() || `为短剧《${drama.title}》生成一张有冲突感或悬念感的封面照，突出本集核心情节与人物情绪`
 
   if (!sourceText || !durationPresetId || !Number.isInteger(imageConfigId) || !Number.isInteger(videoConfigId) || !Number.isInteger(audioConfigId)) {
     return badRequest(c, 'source_text、duration_preset、image_config_id、video_config_id、audio_config_id 必填')
@@ -189,7 +207,6 @@ app.post('/:id/smart-split', async (c) => {
       sourceText,
       durationPresetId,
       style,
-      pacingMode,
     })
 
     if (replaceExisting) {
@@ -228,9 +245,8 @@ app.post('/:id/smart-split', async (c) => {
             audioConfigId,
             aspectRatio,
             renderMode,
-            pacingMode,
             dialogueMode: 'narration_only',
-            narrationVoiceId: 'DaniangzhuVoice01',
+            narrationVoiceId: DEFAULT_NARRATION_VOICE_ID,
             workflowType: 'story_rewrite',
             status: 'draft',
             updatedAt: ts,
@@ -251,9 +267,8 @@ app.post('/:id/smart-split', async (c) => {
             audioConfigId,
             aspectRatio,
             renderMode,
-            pacingMode,
             dialogueMode: 'narration_only',
-            narrationVoiceId: 'DaniangzhuVoice01',
+            narrationVoiceId: DEFAULT_NARRATION_VOICE_ID,
             workflowType: 'story_rewrite',
             status: 'draft',
             createdAt: ts,
@@ -315,6 +330,18 @@ app.post('/:id/smart-split', async (c) => {
       if (ep?.id) scheduleHookDesignAndIntroRecap(dramaId, ep.id)
     }
 
+    // 为每一集调度封面生成任务，传入的 cover_prompt 会按单集内容微调
+    const coverTaskIds: number[] = []
+    for (const ep of createdEpisodes) {
+      if (!ep?.id) continue
+      try {
+        const coverTask = scheduleCoverGeneration(ep.id, { roughPrompt: coverPromptBase })
+        coverTaskIds.push(coverTask.id)
+      } catch (coverErr: any) {
+        console.error(`[smart-split] schedule cover generation failed for episode ${ep.id}:`, coverErr.message)
+      }
+    }
+
     return created(c, {
       drama_id: dramaId,
       hook: splitResult.hook,
@@ -328,6 +355,7 @@ app.post('/:id/smart-split', async (c) => {
         suspense_value: beat.suspenseValue,
         must_keep_context: beat.mustKeepContext,
       })),
+      cover_task_ids: coverTaskIds,
       created_episodes: createdEpisodes.map((ep, idx) => ({
         ...ep,
         video_title: videoTitles?.episodeTitles[idx] || null,
@@ -346,8 +374,10 @@ app.post('/:id/import-script', async (c) => {
   if (!drama) return notFound(c, '剧本不存在')
 
   const body = await c.req.json().catch(() => ({} as Record<string, any>))
-  let scriptContent = String(body.script_content || '').trim()
+  let scriptContent = normalizeTtsText(String(body.script_content || '').trim())
   if (!scriptContent) return badRequest(c, 'script_content is required')
+
+  const coverPromptBase = body.cover_prompt?.trim() || `为短剧《${drama.title}》生成一张有冲突感或悬念感的封面照，突出本集核心情节与人物情绪`
 
   const requestedRetentionMode = parseRetentionMode(body.retention_mode)
   const cleanMode = parseCleanMode(body.clean_mode, requestedRetentionMode)
@@ -384,7 +414,6 @@ app.post('/:id/import-script', async (c) => {
         dramaTitle: drama.title,
         durationPresetId,
         style: body.split_style === 'ai_manga_drama' ? 'ai_manga_drama' : 'default',
-        pacingMode: body.pacing_mode || 'standard',
       })
       segments = directSplitResult.segments
     } catch (err) {
@@ -448,6 +477,9 @@ app.post('/:id/import-script', async (c) => {
       }
     }
 
+    // 机械清洗：移除复制粘贴带入的零宽字符、装饰线、CJK 间异常空格等
+    segmentContent = normalizeTtsText(segmentContent)
+
     const title = body.title
       ? (segments.length > 1 ? `${body.title} ${i + 1}` : body.title)
       : (segment.title || `第${nextNum}集`)
@@ -471,9 +503,8 @@ app.post('/:id/import-script', async (c) => {
       autoMode: true,
       enableAiRewrite: false,
       workflowType: 'direct_script',
-      pacingMode: 'literal',
       narrationMode: 'verbatim',
-      narrationVoiceId: body.narration_voice_id ?? 'DaniangzhuVoice01',
+      narrationVoiceId: body.narration_voice_id ?? DEFAULT_NARRATION_VOICE_ID,
       createdAt: ts,
       updatedAt: ts,
     }).run()
@@ -507,6 +538,17 @@ app.post('/:id/import-script', async (c) => {
     .where(eq(schema.dramas.id, dramaId))
     .run()
 
+  // 为每一集调度封面生成任务，传入的 cover_prompt 会按单集内容微调
+  const coverTaskIds: number[] = []
+  for (const ep of createdEpisodes) {
+    try {
+      const coverTask = scheduleCoverGeneration(ep.id, { roughPrompt: coverPromptBase })
+      coverTaskIds.push(coverTask.id)
+    } catch (coverErr: any) {
+      console.error(`[import-script] schedule cover generation failed for episode ${ep.id}:`, coverErr.message)
+    }
+  }
+
   return created(c, {
     drama_id: dramaId,
     clean_mode: cleanMode,
@@ -514,6 +556,7 @@ app.post('/:id/import-script', async (c) => {
     episodes: createdEpisodes,
     segment_count: createdEpisodes.length,
     cleaned: shouldClean,
+    cover_task_ids: coverTaskIds,
   })
 })
 
@@ -590,6 +633,11 @@ app.get('/:id', async (c) => {
   return success(c, {
     ...toSnakeCase(drama),
     tags: drama.tags ? JSON.parse(drama.tags) : [],
+    media_account: (() => {
+      const account = drama.mediaAccountId ? getMediaAccountRow(drama.mediaAccountId) : null
+      return account ? normalizeMediaAccount(account) : null
+    })(),
+    project_positioning: parseJsonRecord(drama.projectPositioningJson),
     episodes: enrichedEpisodes,
     characters: toSnakeCaseArray(chars),
     scenes: toSnakeCaseArray(scns),
@@ -606,10 +654,18 @@ app.put('/:id', async (c) => {
   if (body.description !== undefined) updates.description = body.description
   if (body.genre !== undefined) updates.genre = body.genre
   if (body.style !== undefined) updates.style = body.style
-  if (body.pacing_mode !== undefined) updates.pacingMode = body.pacing_mode || 'tight'
   if (body.status !== undefined) updates.status = body.status
   if (body.tags !== undefined) updates.tags = JSON.stringify(body.tags)
   if (body.metadata !== undefined) updates.metadata = body.metadata
+  if (body.media_account_id !== undefined || body.mediaAccountId !== undefined) {
+    const accountId = Number(body.media_account_id ?? body.mediaAccountId)
+    const account = Number.isInteger(accountId) && accountId > 0 ? getMediaAccountRow(accountId) : null
+    if (!account) return badRequest(c, 'media account not found')
+    updates.mediaAccountId = account.id
+  }
+  if (body.project_positioning !== undefined || body.projectPositioning !== undefined) {
+    updates.projectPositioningJson = serializePositioning(body.project_positioning ?? body.projectPositioning)
+  }
   if (body.intro_template_id !== undefined) updates.introTemplateId = body.intro_template_id || null
   db.update(schema.dramas).set(updates).where(eq(schema.dramas.id, id)).run()
   return success(c)
@@ -696,7 +752,7 @@ app.post('/:id/episodes', async (c) => {
     renderMode: body.render_mode ?? 'image_story',
     autoMode: auto,
     enableAiRewrite: body.enable_ai_rewrite === undefined ? true : isTruthy(body.enable_ai_rewrite),
-    narrationVoiceId: body.narration_voice_id ?? null,
+    narrationVoiceId: body.narration_voice_id ?? DEFAULT_NARRATION_VOICE_ID,
     status: 'draft',
     createdAt: ts,
     updatedAt: ts,

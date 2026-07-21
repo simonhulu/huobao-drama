@@ -120,7 +120,10 @@ export function createGridSplitHandler(deps: GridSplitDeps = {}): TaskHandler<Gr
   }
 }
 
+import { registerGridEpisodeHandlers } from './grid-episode.js'
+
 export function registerGridHandlers() {
   registerTaskHandler('grid.generate', createGridGenerateHandler())
   registerTaskHandler('grid.split', createGridSplitHandler())
+  registerGridEpisodeHandlers()
 }

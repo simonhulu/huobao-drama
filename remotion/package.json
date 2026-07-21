@@ -1,0 +1,33 @@
+{
+  "name": "huobao-drama-remotion",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render:black": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx BlackTitleIntro ../data/intros/04_black_title_fade.mp4 --codec=h264",
+    "render:dynasty": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx DynastyYearFlash ../data/intros/02_dynasty_year_flash.mp4 --codec=h264",
+    "render:vintage": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx VintageKenBurns ../data/intros/03_vintage_ken_burns.mp4 --codec=h264",
+    "render:cutout": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx CutoutParallaxDemo out/cutout-parallax.mp4 --codec=h264",
+    "render:showcase": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx EpisodeShowcase ../data/static/remotion/episode-114-1-showcase.mp4 --codec=h264 --props=../data/temp/videoeditor-showcase-props-114-1.json",
+    "render:showcase:v2": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx EpisodeShowcase ../data/static/remotion/episode-114-1-showcase-v2.mp4 --codec=h264 --props=../data/temp/videoeditor-showcase-v2-props-114-1.json",
+    "render:showcase:v3": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx EpisodeShowcase ../data/static/remotion/episode-114-1-showcase-v3.mp4 --codec=h264 --props=../data/temp/videoeditor-showcase-v3-props-114-1.json",
+    "render:showcase:v4": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx EpisodeShowcase ../data/static/remotion/episode-114-1-showcase-v4.mp4 --codec=h264 --props=../data/temp/videoeditor-showcase-v3-props-114-1.json",
+    "render:showcase:v5": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx EpisodeShowcase ../data/static/remotion/episode-114-1-showcase-v5.mp4 --codec=h264 --props=../data/temp/videoeditor-showcase-v5-props-114-1.json",
+    "render:showcase:v7": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx EpisodeShowcase ../data/static/remotion/episode-114-1-showcase-v7.mp4 --codec=h264 --props=../data/temp/videoeditor-showcase-v7-props-114-1.json",
+    "render:magnates:smoke": "remotion render --browser-executable=../.remotion-chrome/chrome-headless-shell-mac-arm64/chrome-headless-shell src/index.tsx MagnatesEditorial out/magnates-editorial-smoke.mp4 --codec=h264 --hardware-acceleration=required --video-bitrate=4M --log=verbose",
+    "test:editorial": "sh -c 'out=\"${TMPDIR:-/tmp}/huobao-editorial-contract-$$.mjs\"; esbuild src/editorial/editorial.contract.test.ts --bundle --platform=node --format=esm --outfile=\"$out\" && node --test \"$out\"; status=$?; rm -f \"$out\"; exit $status'",
+    "render": "npm run render:black && npm run render:dynasty && npm run render:vintage",
+    "preview": "remotion preview src/index.tsx"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.260"
+  },
+  "devDependencies": {
+    "@remotion/cli": "^4.0.260",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.5.0"
+  }
+}

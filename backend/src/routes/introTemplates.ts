@@ -25,7 +25,7 @@ app.post('/', async (c) => {
   db.insert(schema.introTemplates).values({
     id: body.id,
     name: body.name,
-    config: typeof body.config === 'string' ? body.config : JSON.stringify(body.config),
+    config: typeof body.config === 'string' ? JSON.parse(body.config) : body.config,
     isDefault: !!body.is_default,
     createdAt: ts,
     updatedAt: ts,
@@ -38,7 +38,7 @@ app.put('/:id', async (c) => {
   const body = await c.req.json().catch(() => ({} as Record<string, any>))
   const updates: Record<string, any> = { updatedAt: now() }
   if (body.name !== undefined) updates.name = body.name
-  if (body.config !== undefined) updates.config = typeof body.config === 'string' ? body.config : JSON.stringify(body.config)
+  if (body.config !== undefined) updates.config = typeof body.config === 'string' ? JSON.parse(body.config) : body.config
   db.update(schema.introTemplates).set(updates).where(eq(schema.introTemplates.id, id)).run()
   return success(c)
 })

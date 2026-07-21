@@ -12,6 +12,8 @@ interface ComposeStoryboardPayload {
   storyboard_id?: number
   storyboardId?: number
   force?: boolean
+  force_audio?: boolean
+  forceAudio?: boolean
 }
 
 interface ComposeStoryboardDeps {
@@ -33,6 +35,10 @@ export function createComposeStoryboardHandler(deps: ComposeStoryboardDeps = {})
       const storyboardId = Number(ctx.payload.storyboard_id ?? ctx.payload.storyboardId)
       if (!storyboardId) throw new Error('storyboard_id is required')
       const force = Boolean(ctx.payload.force)
+      const hasForceAudio = ctx.payload.force_audio !== undefined || ctx.payload.forceAudio !== undefined
+      const forceAudio = hasForceAudio
+        ? Boolean(ctx.payload.force_audio ?? ctx.payload.forceAudio)
+        : force
 
       ctx.progress('Starting storyboard compose', 0, 1)
       ctx.event('compose.storyboard.started', { storyboard_id: storyboardId, force })
@@ -51,7 +57,8 @@ export function createComposeStoryboardHandler(deps: ComposeStoryboardDeps = {})
         }
       }
 
-      const composedVideoUrl = await composeStoryboard(storyboardId, { force })
+      const options = hasForceAudio ? { force, forceAudio } : { force }
+      const composedVideoUrl = await composeStoryboard(storyboardId, options)
       const result = { storyboard_id: storyboardId, composed_video_url: composedVideoUrl }
       ctx.progress('Storyboard compose completed', 1, 1)
       ctx.event('compose.storyboard.completed', result)

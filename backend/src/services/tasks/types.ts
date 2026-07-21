@@ -20,6 +20,7 @@ export interface TaskListFilter {
   episodeId?: number
   status?: CreationTaskStatus | string
   type?: string
+  activeOnly?: boolean
 }
 
 export type TransactionClient = Parameters<Parameters<typeof import('../../db/index.js').db.transaction>[0]>[0]

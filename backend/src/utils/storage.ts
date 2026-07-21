@@ -6,9 +6,26 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import sharp from 'sharp'
 import { v4 as uuid } from 'uuid'
+import { ProxyAgent, fetch as undiciFetch } from 'undici'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
+
+const DOWNLOAD_TIMEOUT_MS = Math.max(10_000, Number(process.env.DOWNLOAD_TIMEOUT_MS || 120_000))
+
+function getHttpProxy(): string | undefined {
+  return process.env.IMAGE_HTTP_PROXY || process.env.HTTP_PROXY || undefined
+}
+
+function getHttpsProxy(): string | undefined {
+  return process.env.IMAGE_HTTPS_PROXY || process.env.HTTPS_PROXY || getHttpProxy()
+}
+
+function getProxyAgent(url: string): ProxyAgent | undefined {
+  const proxy = url.startsWith('https:') ? getHttpsProxy() : getHttpProxy()
+  if (!proxy) return undefined
+  return new ProxyAgent(proxy)
+}
 
 /**
  * 下载远程文件到本地存储
@@ -21,7 +38,10 @@ export async function downloadFile(url: string, subDir: string): Promise<string>
   const filename = `${uuid()}${ext}`
   const filePath = path.join(dir, filename)
 
-  const resp = await fetch(url)
+  const dispatcher = getProxyAgent(url)
+  const resp = dispatcher
+    ? await undiciFetch(url, { dispatcher, signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
+    : await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
   if (!resp.ok) throw new Error(`Download failed: ${resp.status}`)
 
   const buffer = Buffer.from(await resp.arrayBuffer())

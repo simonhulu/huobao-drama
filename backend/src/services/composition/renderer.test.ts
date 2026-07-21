@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process'
 import {
   buildDeterministicMotionPlan,
   motionPlanToZoompan,
+  buildMotionTransitionFilters,
   buildStoryboardComposition,
   renderStoryboardComposition,
 } from './index.js'
@@ -66,6 +67,40 @@ test('motionPlanToZoompan produces a zoompan filter string', () => {
   assert.ok(filter)
   assert.match(filter!, /zoompan=/)
   assert.match(filter!, /s=1920x1080/)
+})
+
+test('motionPlanToZoompan preserves intermediate keyframes and easing', () => {
+  const filter = motionPlanToZoompan({
+    kind: 'keyframes',
+    durationScale: 1,
+    keyframes: [
+      { t: 0, focusX: 0.3, focusY: 0.5, zoom: 1, easing: 'ease-in' },
+      { t: 0.5, focusX: 0.7, focusY: 0.4, zoom: 1.16, easing: 'ease-out' },
+      { t: 1, focusX: 0.5, focusY: 0.6, zoom: 1.08, easing: 'ease-in-out' },
+    ],
+  }, 1920, 1080, 2)
+
+  assert.ok(filter)
+  assert.match(filter!, /0\.5/)
+  assert.match(filter!, /if\(lt\(/)
+  assert.match(filter!, /1-\(1-/)
+})
+
+test('buildMotionTransitionFilters emits real flash and dip-black filters', () => {
+  const filters = buildMotionTransitionFilters({
+    kind: 'keyframes',
+    durationScale: 1,
+    keyframes: [
+      { t: 0, focusX: 0.5, focusY: 0.5, zoom: 1 },
+      { t: 0.5, focusX: 0.7, focusY: 0.3, zoom: 1.7, transition: 'flash' },
+      { t: 1, focusX: 0.7, focusY: 0.3, zoom: 1.7, transition: 'dip-black' },
+    ],
+  }, 2)
+
+  assert.equal(filters.length, 2)
+  assert.match(filters[0], /drawbox=.*color=white/)
+  assert.match(filters[0], /between\(t\\,/)
+  assert.match(filters[1], /fade=t=out/)
 })
 
 test('renderStoryboardComposition produces a valid video with audio', { skip: !ffmpegAvailable() }, async () => {
@@ -213,4 +248,33 @@ test('renderStoryboardComposition produces different motion for different moveme
   assert.ok(fs.existsSync(zoomResult.outputPath))
   assert.ok(fs.existsSync(panResult.outputPath))
   assert.notEqual(path.basename(zoomResult.outputPath), path.basename(panResult.outputPath))
+})
+
+test('renderStoryboardComposition renders a multi-keyframe motion plan', { skip: !ffmpegAvailable() }, async () => {
+  const workDir = mkdtempSync(path.join(tmpdir(), 'huobao-composition-keyframes-'))
+  const imagePath = path.join(workDir, 'input.png')
+  generateTestImage(imagePath)
+
+  const composition = buildStoryboardComposition({
+    outputDir: workDir,
+    width: 1920,
+    height: 1080,
+    duration: 2,
+    baseImagePath: imagePath,
+    motion: {
+      kind: 'keyframes',
+      durationScale: 1,
+      keyframes: [
+        { t: 0, focusX: 0.35, focusY: 0.5, zoom: 1, easing: 'ease-in-out' },
+        { t: 0.5, focusX: 0.65, focusY: 0.45, zoom: 1.18, easing: 'ease-out' },
+        { t: 1, focusX: 0.5, focusY: 0.6, zoom: 1.08, easing: 'ease-in-out' },
+      ],
+    },
+    audioLayers: [],
+  })
+
+  const result = await renderStoryboardComposition(composition)
+  assert.ok(fs.existsSync(result.outputPath))
+  const info = getVideoInfo(result.outputPath)
+  assert.ok(info.streams.some((stream: any) => stream.codec_type === 'video'))
 })

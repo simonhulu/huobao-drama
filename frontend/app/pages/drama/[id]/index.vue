@@ -10,14 +10,41 @@
           返回
         </button>
         <div class="head-info">
-          <h1 class="page-title">{{ drama.title }}</h1>
+          <div class="title-row">
+            <h1 v-if="!editingTitle" class="page-title" @click="startEditTitle">{{ drama.title }}</h1>
+            <input
+              v-else
+              v-model="titleDraft"
+              class="title-input"
+              type="text"
+              @keyup.enter="saveTitle"
+              @keyup.esc="cancelEditTitle"
+            />
+            <button v-if="!editingTitle" class="btn btn-icon title-edit-btn" @click="startEditTitle">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+            </button>
+            <template v-else>
+              <button class="btn btn-icon title-edit-btn" @click="saveTitle">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+              </button>
+              <button class="btn btn-icon title-edit-btn" @click="cancelEditTitle">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </template>
+          </div>
           <div v-if="drama.video_title" class="drama-video-title">{{ drama.video_title }}</div>
           <div v-else-if="drama.hook" class="drama-hook">{{ drama.hook }}</div>
           <div class="page-meta">
             <span v-if="drama.genre" class="style-chip genre-chip">{{ genreLabel(drama.genre) }}</span>
             <span v-if="drama.style" class="style-chip">{{ styleLabel(drama.style) }}</span>
-            <span v-if="drama.pacing_mode" class="style-chip">{{ pacingModeLabel(drama.pacing_mode) }}</span>
-            <span v-if="drama.style || drama.pacing_mode || drama.genre" class="meta-divider"></span>
+            <span v-if="drama.style || drama.genre" class="meta-divider"></span>
             <span class="meta-item">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               {{ drama.characters?.length || 0 }} 角色
@@ -36,6 +63,15 @@
               placeholder="使用默认开场"
               searchable
               @update:model-value="onIntroTemplateChange"
+            />
+          </div>
+          <div class="intro-template-row">
+            <span class="intro-template-label">图片风格</span>
+            <BaseSelect
+              :model-value="drama.style || ''"
+              :options="styleOptions"
+              placeholder="选择图片风格"
+              @update:model-value="onStyleChange"
             />
           </div>
         </div>
@@ -229,6 +265,19 @@
               <input v-model="newEpisodeTitle" class="input" placeholder="默认按集数自动命名" />
               <span class="field-hint">留空时会自动按集数命名，例如“第 3 集”。</span>
             </label>
+            <label class="field">
+              <span class="field-label">封面照提示词</span>
+              <textarea v-model="newEpisodeCoverPrompt" class="input textarea" rows="4" placeholder="描述你想要的封面视觉：主体、构图、风格、文字元素等。创建后可在封面步骤修改并重新生成。"></textarea>
+              <span class="field-hint">系统会基于该提示词生成一张 4:3 和一张 3:4 封面图。可点击右侧 AI 优化，按爆款封面技巧扩写。</span>
+            </label>
+            <div class="cover-enhance-row">
+              <button class="btn btn-sm" :disabled="enhancingCoverPrompt || !newEpisodeCoverPrompt.trim()" @click="enhanceNewEpisodeCoverPrompt">
+                <Loader2 v-if="enhancingCoverPrompt" :size="11" class="animate-spin" />
+                <Sparkles v-else :size="11" />
+                {{ enhancingCoverPrompt ? '优化中...' : 'AI 优化提示词' }}
+              </button>
+              <span v-if="coverEnhanceHint" class="cover-enhance-hint">{{ coverEnhanceHint }}</span>
+            </div>
           </div>
 
           <div class="dialog-section">
@@ -330,20 +379,10 @@
           </div>
 
           <div class="dialog-section">
-            <div class="dialog-section-head">
-              <span class="dialog-section-title">叙事节奏</span>
-              <span class="dialog-section-copy">紧凑/极速会合并低密度 beat、减少集数，并影响后续分镜密度</span>
-            </div>
-            <div class="radio-group">
-              <label v-for="opt in pacingModeOptions" :key="opt.value" class="radio">
-                <input type="radio" v-model="smartSplitPacingMode" :value="opt.value" />
-                <span>{{ opt.label }}</span>
-              </label>
-            </div>
-            <label class="field checkbox-field" style="margin-top:10px">
+            <label class="field checkbox-field">
               <input type="checkbox" v-model="smartSplitReplace" />
               <span class="field-label" style="font-weight:500">替换现有剧集</span>
-              <span class="field-hint">勾选后会先删除当前所有集、分镜和素材，再按新节奏重新分集。</span>
+              <span class="field-hint">勾选后会先删除当前所有集、分镜和素材，再重新分集。</span>
             </label>
           </div>
 
@@ -386,6 +425,16 @@
                 <span>竖屏 9:16</span>
               </label>
             </div>
+          </div>
+
+          <div class="dialog-section">
+            <div class="dialog-section-head">
+              <span class="dialog-section-title">封面照提示词（可选）</span>
+              <span class="dialog-section-copy">留空时系统会按剧名自动生成；创建后会对每一集单独微调并生成封面</span>
+            </div>
+            <label class="field">
+              <textarea v-model="smartSplitCoverPrompt" class="input textarea" rows="3" placeholder="例如：白银、赋税与王朝崩溃，一张有历史厚重感和悬念感的封面照"></textarea>
+            </label>
           </div>
         </div>
         <div class="dialog-foot">
@@ -526,6 +575,16 @@
               </label>
             </div>
           </div>
+
+          <div class="dialog-section">
+            <div class="dialog-section-head">
+              <span class="dialog-section-title">封面照提示词（可选）</span>
+              <span class="dialog-section-copy">留空时系统会按剧名自动生成；创建后会对每一集单独微调并生成封面</span>
+            </div>
+            <label class="field">
+              <textarea v-model="importScriptCoverPrompt" class="input textarea" rows="3" placeholder="例如：白银、赋税与王朝崩溃，一张有历史厚重感和悬念感的封面照"></textarea>
+            </label>
+          </div>
         </div>
         <div class="dialog-foot">
           <div class="dialog-foot-copy">
@@ -542,6 +601,7 @@
 
 <script setup>
 import { toast } from 'vue-sonner'
+import { Sparkles, Loader2 } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { aiConfigAPI, dramaAPI, episodeAPI, introTemplateAPI } from '~/composables/useApi'
 
@@ -554,6 +614,9 @@ const smartSplitDialog = ref(false)
 const smartSplitting = ref(false)
 const preProducing = ref(false)
 const newEpisodeTitle = ref('')
+const newEpisodeCoverPrompt = ref('')
+const enhancingCoverPrompt = ref(false)
+const coverEnhanceHint = ref('')
 const imageConfigs = ref([])
 const videoConfigs = ref([])
 const audioConfigs = ref([])
@@ -563,12 +626,12 @@ const newEpisodeAudioConfigId = ref(null)
 const newEpisodeAspect = ref('16:9')
 const smartSplitSourceText = ref('')
 const smartSplitDurationPreset = ref('shorts_1_3')
-const smartSplitPacingMode = ref('tight')
 const smartSplitReplace = ref(false)
 const smartSplitImageConfigId = ref(null)
 const smartSplitVideoConfigId = ref(null)
 const smartSplitAudioConfigId = ref(null)
 const smartSplitAspect = ref('9:16')
+const smartSplitCoverPrompt = ref('')
 const lastSmartSplitResult = ref(null)
 const importScriptDialog = ref(false)
 const importingScript = ref(false)
@@ -582,11 +645,15 @@ const importScriptVideoConfigId = ref(null)
 const importScriptAudioConfigId = ref(null)
 const importScriptAspect = ref('16:9')
 const importScriptRenderMode = ref('image_story')
+const importScriptCoverPrompt = ref('')
 
 const introTemplates = ref([])
 const introTemplateOptions = computed(() =>
   introTemplates.value.map(t => ({ label: `${t.name}${t.is_default ? ' · 默认' : ''}`, value: t.id }))
 )
+const editingTitle = ref(false)
+const titleDraft = ref('')
+
 async function loadIntroTemplates() {
   try { introTemplates.value = await introTemplateAPI.list() }
   catch (e) { toast.error(e.message) }
@@ -596,6 +663,26 @@ async function onIntroTemplateChange(id) {
     await dramaAPI.update(dramaId, { intro_template_id: id || null })
     toast.success('已更新开场模板')
     await load()
+  } catch (e) { toast.error(e.message) }
+}
+function startEditTitle() {
+  titleDraft.value = drama.value?.title || ''
+  editingTitle.value = true
+}
+function cancelEditTitle() {
+  editingTitle.value = false
+}
+async function saveTitle() {
+  const newTitle = titleDraft.value.trim()
+  if (!newTitle || newTitle === drama.value?.title) {
+    cancelEditTitle()
+    return
+  }
+  try {
+    await dramaAPI.update(dramaId, { title: newTitle })
+    toast.success('项目名称已更新')
+    drama.value.title = newTitle
+    cancelEditTitle()
   } catch (e) { toast.error(e.message) }
 }
 
@@ -648,12 +735,6 @@ async function deleteSelectedEpisodes() {
     deletingBulk.value = false
   }
 }
-
-const pacingModeOptions = [
-  { label: '标准', value: 'standard' },
-  { label: '紧凑', value: 'tight' },
-  { label: '极速', value: 'extreme' },
-]
 
 const durationPresets = [
   { id: 'micro_30_60', label: '30-60 秒', hint: '极短切片，适合强冲突开场' },
@@ -714,17 +795,86 @@ const importScriptPrimaryLabel = computed(() => {
 function durationPresetLabel(id) {
   return durationPresets.find(item => item.id === id)?.label || id || '未选择'
 }
-function pacingModeLabel(mode) {
-  return pacingModeOptions.find(item => item.value === mode)?.label || mode || '未选择'
-}
 const styleLabels = {
+  // 基础风格
   generic: '通用（电影感）',
   realistic: '写实',
-  anime: '二次元',
+  cinematic: '电影写实',
+  anime: '动漫插画',
   ghibli: '吉卜力',
-  cinematic: '电影',
   comic: '漫画',
   watercolor: '水彩',
+  // 电影摄影风格
+  wes_anderson: '韦斯·安德森',
+  film_noir: '黑色电影',
+  rembrandt: '伦勃朗光',
+  villeneuve: '维伦纽瓦史诗',
+  wong_kar_wai: '王家卫',
+  documentary: '纪录片',
+  vintage_film: '复古胶片',
+  historical_systems: '现实系统史诗',
+  period_crime_35mm: '复古犯罪凝视',
+  institutional_tableau: '制度剧场',
+  republican_shanghai: '民国上海复古',
+  showa_nostalgia: '昭和生活怀旧',
+  northwest_epic: '西北乡土史诗',
+  korean_crime: '冷峻现实犯罪',
+  studio_wuxia: '邵氏棚拍武侠',
+  location_kungfu: '七十年代实景功夫',
+  ink_wuxia: '东方水墨武侠',
+  old_color_wuxia: '旧彩浪漫武侠',
+  guofeng_editorial: '古风暗场时尚',
+  night_flash_snapshot: '夜街直闪快照',
+  commercial_teal_orange: '现代青橙商业',
+  // 艺术绘画
+  oil_painting: '油画',
+  pastel: '色粉画',
+  ink_wash: '水墨',
+  ukiyo_e: '浮世绘',
+  impressionist: '印象派',
+  pop_art: '波普艺术',
+  renaissance: '文艺复兴',
+  baroque: '巴洛克',
+  neoclassical: '新古典主义',
+  // 视觉氛围
+  cyberpunk: '赛博科幻',
+  steampunk: '蒸汽朋克',
+  fantasy: '奇幻',
+  noir: '黑色电影',
+  vintage: '复古',
+  minimalist: '极简',
+  dark_academia: '暗黑学院',
+  // 媒介渲染
+  digital_art: '数字艺术',
+  concept_art: '概念艺术',
+  pixel_art: '像素风',
+  line_art: '线稿',
+  '3d_render': '3D 渲染',
+  isometric: '等距插画',
+  // 中式 / 东方历史
+  chinese_ink: '中式水墨',
+  chinese_gongbi: '中式工笔',
+  wuxia: '武侠国风',
+  chinese_palace: '宫廷国风',
+  eastern_fantasy: '东方奇幻',
+  ukiyo_samurai: '浮世绘武士',
+  // 西方 / 世界历史
+  historical: '历史史诗',
+  historical_epic: '历史史诗',
+  roman_fresco: '古罗马壁画',
+  byzantine: '拜占庭圣像',
+  medieval_manuscript: '中世纪手抄本',
+  dutch_golden_age: '荷兰黄金时代',
+  victorian: '维多利亚',
+  prohibition_era: '禁酒令时代',
+  wwii_photo: '二战纪实',
+  // 高级主题风格（兼容旧数据）
+  scifi: '科幻',
+  mythology: '神话 / 奇幻',
+  space: '太空',
+  deepsea: '深海',
+  ancient: '古文明',
+  wasteland: '末日废土',
 }
 const genreLabels = {
   generic: '通用',
@@ -736,8 +886,30 @@ const genreLabels = {
   ancient: '古文明',
   wasteland: '末日废土',
 }
+const curatedStyleKeys = [
+  'historical_systems', 'period_crime_35mm', 'institutional_tableau',
+  'republican_shanghai', 'showa_nostalgia', 'northwest_epic', 'korean_crime',
+  'studio_wuxia', 'location_kungfu', 'ink_wuxia', 'old_color_wuxia',
+  'guofeng_editorial', 'night_flash_snapshot', 'commercial_teal_orange',
+  'cinematic', 'documentary', 'chinese_gongbi', 'wuxia', 'eastern_fantasy',
+  'anime', 'watercolor', 'cyberpunk',
+]
+const styleOptions = computed(() => [
+  { label: '默认（无特殊风格）', value: '' },
+  ...curatedStyleKeys.map(value => ({ label: styleLabels[value], value })),
+  ...(drama.value?.style && !curatedStyleKeys.includes(drama.value.style)
+    ? [{ label: `${styleLabels[drama.value.style] || drama.value.style}（当前项目）`, value: drama.value.style }]
+    : []),
+])
 function styleLabel(value) {
   return styleLabels[value] || value || ''
+}
+async function onStyleChange(value) {
+  try {
+    await dramaAPI.update(dramaId, { style: value || null })
+    toast.success('图片风格已更新')
+    await load()
+  } catch (e) { toast.error(e.message) }
 }
 function genreLabel(value) {
   return genreLabels[value] || value || ''
@@ -788,15 +960,35 @@ async function loadConfigs() {
 
 function openAddEpisode() {
   newEpisodeTitle.value = ''
+  newEpisodeCoverPrompt.value = ''
+  coverEnhanceHint.value = ''
   applyConfigDefaults()
   addDialog.value = true
 }
 
+async function enhanceNewEpisodeCoverPrompt() {
+  if (!newEpisodeCoverPrompt.value.trim()) return
+  try {
+    enhancingCoverPrompt.value = true
+    coverEnhanceHint.value = ''
+    const result = await episodeAPI.enhanceCoverPrompt(0, {
+      prompt: newEpisodeCoverPrompt.value.trim(),
+      drama_id: dramaId,
+    })
+    newEpisodeCoverPrompt.value = result.enhanced_prompt || result.image_prompt || newEpisodeCoverPrompt.value
+    coverEnhanceHint.value = result.rationale || '提示词已优化'
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    enhancingCoverPrompt.value = false
+  }
+}
+
 function openSmartSplit() {
   smartSplitDurationPreset.value = 'shorts_1_3'
-  smartSplitPacingMode.value = drama.value?.pacing_mode || 'tight'
   smartSplitReplace.value = false
   smartSplitAspect.value = '9:16'
+  smartSplitCoverPrompt.value = ''
   if (!smartSplitSourceText.value.trim() && drama.value?.episodes?.length) {
     smartSplitSourceText.value = drama.value.episodes
       .map(e => e.content || '').filter(Boolean).join('\n\n')
@@ -813,6 +1005,7 @@ function openImportScript() {
   importScriptDurationPreset.value = ''
   importScriptAspect.value = '16:9'
   importScriptRenderMode.value = 'image_story'
+  importScriptCoverPrompt.value = ''
   applyConfigDefaults()
   importScriptDialog.value = true
 }
@@ -854,6 +1047,7 @@ async function runImportScript() {
       audio_config_id: importScriptAudioConfigId.value,
       aspect_ratio: importScriptAspect.value,
       render_mode: importScriptRenderMode.value,
+      cover_prompt: importScriptCoverPrompt.value.trim() || undefined,
     }
     const result = await dramaAPI.importScript(dramaId, payload)
     importScriptDialog.value = false
@@ -872,6 +1066,7 @@ async function addEpisode() {
     await episodeAPI.create({
       drama_id: dramaId,
       title: newEpisodeTitle.value || undefined,
+      cover_prompt: newEpisodeCoverPrompt.value || undefined,
       image_config_id: newEpisodeImageConfigId.value,
       video_config_id: newEpisodeVideoConfigId.value,
       audio_config_id: newEpisodeAudioConfigId.value,
@@ -893,13 +1088,13 @@ async function runSmartSplit() {
     const result = await dramaAPI.smartSplit(dramaId, {
       source_text: smartSplitSourceText.value.trim(),
       duration_preset: smartSplitDurationPreset.value,
-      pacing_mode: smartSplitPacingMode.value,
       replace: smartSplitReplace.value,
       image_config_id: smartSplitImageConfigId.value,
       video_config_id: smartSplitVideoConfigId.value,
       audio_config_id: smartSplitAudioConfigId.value,
       aspect_ratio: smartSplitAspect.value,
       render_mode: 'image_story',
+      cover_prompt: smartSplitCoverPrompt.value.trim() || undefined,
     })
     lastSmartSplitResult.value = result
     smartSplitDialog.value = false
@@ -965,7 +1160,30 @@ onMounted(() => { load(); loadConfigs(); loadIntroTemplates() })
   font-size: 26px; font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.2;
+  cursor: pointer;
 }
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.title-input {
+  font-family: var(--font-display);
+  font-size: 26px; font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-0);
+  min-width: 320px;
+}
+.title-edit-btn {
+  padding: 4px;
+  color: var(--text-2);
+}
+.title-edit-btn:hover { color: var(--text-0); background: var(--bg-hover); }
 .drama-hook {
   font-size: 13px;
   line-height: 1.5;
@@ -1269,6 +1487,12 @@ onMounted(() => { load(); loadConfigs(); loadIntroTemplates() })
   gap: 14px;
   overflow-y: auto;
   padding-right: 4px;
+}
+.cover-enhance-row {
+  display: flex; align-items: center; gap: 10px; margin-top: 2px;
+}
+.cover-enhance-hint {
+  font-size: 11px; color: var(--text-3); max-width: 320px; line-height: 1.4;
 }
 .dialog-section {
   display: flex;

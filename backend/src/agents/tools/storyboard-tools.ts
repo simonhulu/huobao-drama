@@ -10,6 +10,9 @@ import { now } from '../../utils/response.js'
 import { logTaskProgress, logTaskSuccess } from '../../utils/task-logger.js'
 import { stripVideoTags } from '../../services/adapters/prompt-utils.js'
 import { normalizeStoryboardImagePromptForAspectRatio } from '../../services/storyboard-aspect-prompt.js'
+import { applyPreTTSTimingsToStoryboards, splitLongStoryboardsByPreTTS } from '../../services/episode-tts.js'
+import { usesOriginalTextForNarration } from '../../services/episode-mode.js'
+import { validateDirectorPlan } from '../../services/director-plan.js'
 
 const STORY_RETENTION_RULES = [
   '镜头服务于故事，不得只保留表面动作。',
@@ -32,36 +35,6 @@ function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) 
       storyboardId,
       characterId,
     }).run()
-  }
-}
-
-function getEpisodeSceneIds(episodeId: number) {
-  return new Set(
-    db.select().from(schema.episodeScenes)
-      .where(eq(schema.episodeScenes.episodeId, episodeId)).all()
-      .map(link => link.sceneId),
-  )
-}
-
-function getEpisodeCharacterIds(episodeId: number) {
-  return new Set(
-    db.select().from(schema.episodeCharacters)
-      .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
-      .map(link => link.characterId),
-  )
-}
-
-function validateStoryboardBindings(episodeId: number, sceneId: number | null | undefined, characterIds: number[] | undefined) {
-  const episodeSceneIds = getEpisodeSceneIds(episodeId)
-  const episodeCharacterIds = getEpisodeCharacterIds(episodeId)
-
-  if (sceneId != null && !episodeSceneIds.has(sceneId)) {
-    throw new Error(`scene_id ${sceneId} 不属于当前集`)
-  }
-
-  const invalidCharacterIds = (characterIds || []).filter(id => !episodeCharacterIds.has(id))
-  if (invalidCharacterIds.length) {
-    throw new Error(`character_ids 不属于当前集: ${invalidCharacterIds.join(', ')}`)
   }
 }
 
@@ -144,6 +117,10 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
           dialogue_mode: ep.dialogueMode || 'narration_only',
           opening_hook: ep.openingHook || '',
           cliffhanger: ep.cliffhanger || '',
+          director_plan: (() => {
+            if (!ep.directorPlanJson) return null
+            try { return JSON.parse(ep.directorPlanJson) } catch { return null }
+          })(),
         },
         original_story: originalStory,
         formatted_script: formattedScript,
@@ -189,34 +166,79 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
     },
   })
 
+  const saveDirectorPlan = createTool({
+    id: 'save_director_plan',
+    description: 'Save the director treatment before shot breakdown. It must classify the genre, protagonist arc, scenes, causal beats, concrete actions, and manual Shot.Cafe/Flim.ai composition references. This is an editorial contract, not a renderer card.',
+    inputSchema: z.object({
+      director_plan: z.record(z.string(), z.unknown()),
+    }),
+    execute: async ({ director_plan }) => {
+      const normalized = validateDirectorPlan(director_plan)
+      const ts = now()
+      db.update(schema.episodes)
+        .set({ directorPlanJson: JSON.stringify(normalized), updatedAt: ts })
+        .where(eq(schema.episodes.id, episodeId)).run()
+      logTaskSuccess('StoryboardTool', 'director-plan-saved', {
+        episodeId,
+        scenes: normalized.scenes.length,
+        beats: normalized.beats.length,
+        genre: normalized.genre,
+      })
+      return {
+        saved: true,
+        scenes: normalized.scenes.length,
+        beats: normalized.beats.length,
+        message: 'Director plan saved; generate shots only from these approved causal beats.',
+      }
+    },
+  })
+
   const saveStoryboards = createTool({
     id: 'save_storyboards',
-    description: 'Save generated storyboards. Replaces all existing storyboards for this episode. When calling this tool, output the arguments as a plain JSON object. Do not wrap them in markdown code fences (```json). In direct_script mode, shots are saved exactly as provided; each shot should represent a complete narrative event or plot beat, not a sentence or time segment.',
+    description: 'Save generated storyboards. Replaces all existing storyboards for this episode. When calling this tool, output the arguments as a plain JSON object. Do not wrap them in markdown code fences (```json). Every shot must represent one complete narrative event or plot beat with a concrete action and result, not a sentence, time segment, atmosphere, or generic scene plate. In direct_script mode, the source-to-shot fields are validated before replacement.',
     inputSchema: z.object({
       storyboards: z.array(z.object({
         shot_number: z.number(),
-        title: z.string().optional(),
-        shot_type: z.string().optional(),
-        angle: z.string().optional(),
-        movement: z.string().optional(),
-        location: z.string().optional(),
-        time: z.string().optional(),
-        action: z.string().optional(),
-        dialogue: z.string().optional(),
-        description: z.string().optional(),
-        result: z.string().optional(),
-        atmosphere: z.string().optional(),
-        image_prompt: z.string().optional(),
-        video_prompt: z.string().optional(),
-        bgm_prompt: z.string().optional(),
-        sound_effect: z.string().optional(),
-        duration: z.number().optional(),
+        title: z.string(),
+        shot_type: z.string(),
+        angle: z.string(),
+        movement: z.string(),
+        location: z.string(),
+        time: z.string(),
+        action: z.string(),
+        dialogue: z.string(),
+        description: z.string(),
+        result: z.string(),
+        atmosphere: z.string(),
+        image_prompt: z.string(),
+        video_prompt: z.string(),
+        bgm_prompt: z.string(),
+        sound_effect: z.string(),
+        duration: z.number(),
         energy_level: z.enum(['high', 'medium', 'low']).optional(),
-        scene_id: z.number().nullable().optional(),
-        character_ids: z.array(z.number()).optional(),
+        scene_id: z.number().nullable(),
+        character_ids: z.array(z.number()),
       })),
     }),
     execute: async ({ storyboards }) => {
+      const [episode] = db.select().from(schema.episodes)
+        .where(eq(schema.episodes.id, episodeId)).all()
+      if (usesOriginalTextForNarration(episode)) {
+        const invalid = storyboards.find((storyboard) => (
+          !storyboard.action?.trim()
+          || !storyboard.description?.trim()
+          || !storyboard.result?.trim()
+          || !storyboard.image_prompt?.trim()
+          || !storyboard.video_prompt?.trim()
+          || !Array.isArray(storyboard.character_ids)
+          || !('scene_id' in storyboard)
+        ))
+        if (invalid) {
+          throw new Error(
+            `direct storyboard ${invalid.shot_number} requires action, description, result, image_prompt, video_prompt, scene_id, and character_ids`,
+          )
+        }
+      }
       const ts = now()
       logTaskProgress('StoryboardTool', 'save-begin', {
         episodeId,
@@ -244,7 +266,6 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
 
       let totalDuration = 0
       for (const sb of shotsToSave) {
-        validateStoryboardBindings(episodeId, sb.scene_id, sb.character_ids)
         const cleanedImagePrompt = normalizeStoryboardImagePromptForAspectRatio(
           stripVideoTags(sb.image_prompt || ''),
           aspectRatio,
@@ -267,6 +288,23 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         }).run()
         syncStoryboardCharacters(Number(res.lastInsertRowid), sb.character_ids || [])
         totalDuration += sb.duration || 8
+      }
+
+      // direct_script / verbatim 模式下，如果已经有预生成 TTS 时间戳，用真实音频时长覆盖估算值
+      const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+      if (ep && usesOriginalTextForNarration(ep) && ep.preTtsTitlesJson) {
+        const { updated, fallback } = applyPreTTSTimingsToStoryboards(episodeId)
+        logTaskSuccess('StoryboardTool', 'pre-tts-timing-applied', { episodeId, updated, fallback })
+
+        // 自动 12 秒拆分已临时关闭，优先保证粗分质量
+        // const { split, created, fallback: splitFallback } = await splitLongStoryboardsByPreTTS(episodeId, 12)
+        // logTaskSuccess('StoryboardTool', 'pre-tts-split-applied', { episodeId, split, created, fallback: splitFallback })
+
+        // 重新计算总时长
+        const refreshed = db.select().from(schema.storyboards)
+          .where(eq(schema.storyboards.episodeId, episodeId))
+          .all()
+        totalDuration = refreshed.reduce((sum, sb) => sum + (sb.duration || 8), 0)
       }
 
       db.update(schema.episodes)
@@ -314,16 +352,6 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         storyboardId: storyboard_id,
         fields: Object.keys(fields),
       })
-
-      validateStoryboardBindings(
-        episodeId,
-        'scene_id' in fields ? fields.scene_id : storyboard.sceneId,
-        'character_ids' in fields
-          ? fields.character_ids
-          : db.select().from(schema.storyboardCharacters)
-              .where(eq(schema.storyboardCharacters.storyboardId, storyboard_id)).all()
-              .map(link => link.characterId),
-      )
 
       const updates: Record<string, any> = { updatedAt: now() }
       if ('title' in fields) updates.title = fields.title
@@ -441,5 +469,5 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
     },
   })
 
-  return { readStoryboardContext, saveStoryboards, updateStoryboard, generateGridPrompt }
+  return { readStoryboardContext, saveDirectorPlan, saveStoryboards, updateStoryboard, generateGridPrompt }
 }

@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, lte, or } from 'drizzle-orm'
 import { db, schema } from '../../db/index.js'
 import { now } from '../../utils/response.js'
 import { taskEventBus } from './events.js'
@@ -164,14 +164,21 @@ export function getTask(id: number): CreationTask | null {
 }
 
 export function listTasks(filter: TaskListFilter = {}): CreationTask[] {
-  let rows = db.select().from(schema.creationTasks).all()
-  if (filter.dramaId != null) rows = rows.filter(row => row.dramaId === filter.dramaId)
-  if (filter.episodeId != null) rows = rows.filter(row => row.episodeId === filter.episodeId)
-  if (filter.status) rows = rows.filter(row => row.status === filter.status)
-  if (filter.type) rows = rows.filter(row => row.type === filter.type)
-  return rows
-    .sort((a, b) => b.id - a.id)
-    .map(normalizeTask)
+  const conditions = []
+  if (filter.dramaId != null) conditions.push(eq(schema.creationTasks.dramaId, filter.dramaId))
+  if (filter.episodeId != null) conditions.push(eq(schema.creationTasks.episodeId, filter.episodeId))
+  if (filter.status) conditions.push(eq(schema.creationTasks.status, filter.status))
+  if (filter.type) conditions.push(eq(schema.creationTasks.type, filter.type))
+  if (filter.activeOnly) {
+    conditions.push(inArray(schema.creationTasks.status, ['queued', 'running']))
+  }
+
+  const where = conditions.length ? and(...conditions) : undefined
+  const query = db.select().from(schema.creationTasks)
+    .where(where)
+    .orderBy(desc(schema.creationTasks.id))
+  const rows = filter.activeOnly ? query.limit(200).all() : query.all()
+  return rows.map(normalizeTask)
 }
 
 function isoFromMs(ms: number) {
@@ -217,22 +224,22 @@ export function acquireNextQueuedTask(input: LeaseTaskInput): CreationTask | nul
   const ts = isoFromMs(nowMs)
   const isoNow = ts
 
-  const candidates = db.select().from(schema.creationTasks).all()
-    .filter(row => row.status === 'queued')
-    .filter(row => !input.types?.length || input.types.includes(row.type))
-    .filter(row => {
-      const scheduled = row.scheduledAt
-      if (!scheduled) return true
-      return scheduled <= isoNow
-    })
-    .sort((a, b) => {
-      const priorityDiff = (b.priority ?? 0) - (a.priority ?? 0)
-      if (priorityDiff !== 0) return priorityDiff
-      const scheduledA = a.scheduledAt ?? ''
-      const scheduledB = b.scheduledAt ?? ''
-      if (scheduledA !== scheduledB) return scheduledA.localeCompare(scheduledB)
-      return a.id - b.id
-    })
+  const conditions = [
+    eq(schema.creationTasks.status, 'queued'),
+    or(isNull(schema.creationTasks.scheduledAt), lte(schema.creationTasks.scheduledAt, isoNow)),
+  ]
+  if (input.types?.length) {
+    conditions.push(inArray(schema.creationTasks.type, input.types))
+  }
+
+  const candidates = db.select().from(schema.creationTasks)
+    .where(and(...conditions))
+    .orderBy(
+      desc(schema.creationTasks.priority),
+      asc(schema.creationTasks.scheduledAt),
+      asc(schema.creationTasks.id),
+    )
+    .all()
 
   for (const row of candidates) {
     const depState = getTaskDependencyState(row.id)

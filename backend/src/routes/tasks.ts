@@ -64,33 +64,18 @@ app.get('/', (c) => {
   const episodeId = c.req.query('episode_id')
   const status = c.req.query('status')
   const type = c.req.query('type')
+  const activeOnly = c.req.query('active_only') === 'true'
 
   const tasks = listTasks({
     dramaId: dramaId ? Number(dramaId) : undefined,
     episodeId: episodeId ? Number(episodeId) : undefined,
     status,
     type,
+    activeOnly,
   })
 
   const queuePositionMap = buildQueuePositionMap(tasks)
   return success(c, tasks.map(task => enrichTaskResponse(task, queuePositionMap)))
-})
-
-app.get('/:id', (c) => {
-  const id = Number(c.req.param('id'))
-  const task = getTask(id)
-  if (!task) return success(c, null)
-  const all = listTasks({
-    dramaId: task.dramaId ?? undefined,
-    episodeId: task.episodeId ?? undefined,
-  })
-  const queuePositionMap = buildQueuePositionMap(all)
-  return success(c, enrichTaskResponse(task, queuePositionMap))
-})
-
-app.get('/:id/events', (c) => {
-  const id = Number(c.req.param('id'))
-  return success(c, toSnakeCaseArray(listTaskEvents(id)))
 })
 
 app.get('/stream', (c) => {
@@ -143,6 +128,23 @@ app.get('/stream', (c) => {
       Connection: 'keep-alive',
     },
   })
+})
+
+app.get('/:id', (c) => {
+  const id = Number(c.req.param('id'))
+  const task = getTask(id)
+  if (!task) return success(c, null)
+  const all = listTasks({
+    dramaId: task.dramaId ?? undefined,
+    episodeId: task.episodeId ?? undefined,
+  })
+  const queuePositionMap = buildQueuePositionMap(all)
+  return success(c, enrichTaskResponse(task, queuePositionMap))
+})
+
+app.get('/:id/events', (c) => {
+  const id = Number(c.req.param('id'))
+  return success(c, toSnakeCaseArray(listTaskEvents(id)))
 })
 
 app.post('/:id/cancel', (c) => {

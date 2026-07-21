@@ -108,8 +108,11 @@
                     <span class="config-base mono truncate">{{ c.base_url || '未设置 Base URL' }}</span>
                   </div>
                 </div>
-                <span :class="['tag', c.api_key ? 'tag-success' : 'tag-error']">{{ c.api_key ? '已配置' : '无密钥' }}</span>
+                <span :class="['tag', c.api_key_configured ? 'tag-success' : 'tag-error']">{{ c.api_key_configured ? `已配置 ${c.api_key_hint || ''}` : '无密钥' }}</span>
                 <button class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">测试</button>
+                <button v-if="isMiniMaxAudio(c)" class="btn btn-ghost btn-sm" @click="openDesignVoice(c)">
+                  <Sparkles :size="13" /> 设计音色
+                </button>
                 <button v-if="st.type === 'audio' && c.provider === 'siliconflow'" class="btn btn-ghost btn-sm" @click="openCloneVoice(c)">
                   <Upload :size="13" /> 复刻
                 </button>
@@ -353,7 +356,7 @@
           <input v-model.number="cfgForm.priority" class="input" type="number" min="0" max="999" />
           <span class="field-hint">数值越高越优先。工作台默认会优先使用同类型里优先级最高的启用配置。</span>
         </label>
-        <label class="field"><span class="field-label">API Key</span><input v-model="cfgForm.api_key" class="input" type="password" placeholder="sk-..." /></label>
+        <label class="field"><span class="field-label">API Key</span><input v-model="cfgForm.api_key" class="input" type="password" :placeholder="cfgEditId && cfgEditingKeyConfigured ? '留空保持现有密钥' : 'sk-...'" autocomplete="new-password" /></label>
         <label class="field"><span class="field-label">Base URL</span><input v-model="cfgForm.base_url" class="input" placeholder="https://..." /></label>
         <div class="endpoint-hint">
           <span class="dim">实际端点前缀：</span>
@@ -427,6 +430,50 @@
         <div class="modal-actions">
           <button type="button" class="btn" @click="presetDialog = false">取消</button>
           <button type="submit" class="btn btn-primary">创建并启用</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- MiniMax Voice Design Dialog -->
+    <div v-if="designVoiceDialog" class="overlay" @click.self="designVoiceDialog = false">
+      <form class="modal card config-modal" @submit.prevent="submitDesignVoice">
+        <div class="config-modal-head">
+          <div>
+            <div class="setup-kicker">MiniMax Voice Design</div>
+            <h2 class="modal-title">设计历史旁白音色</h2>
+            <div class="modal-note">根据声音描述生成一套可用于 MiniMax TTS 的音色。试听音频按 MiniMax 规则计费，生成后会保存 voice_id。</div>
+          </div>
+          <span class="tag tag-accent">{{ designVoiceTarget?.provider }}</span>
+        </div>
+        <label class="field">
+          <span class="field-label">音色名称</span>
+          <input v-model="designVoiceForm.voice_name" class="input" placeholder="历史纪实男声" />
+        </label>
+        <label class="field">
+          <span class="field-label">声音描述</span>
+          <textarea v-model="designVoiceForm.prompt" class="textarea" rows="6" maxlength="1000" placeholder="描述年龄、音域、口音、语速、情绪和使用场景" />
+          <span class="field-hint">建议写清楚年龄、音色、普通话/口音、语速、咬字和叙事场景；不要要求夸张方言。</span>
+        </label>
+        <label class="field">
+          <span class="field-label">试听文稿 <span class="dim">（不超过 500 字）</span></span>
+          <textarea v-model="designVoiceForm.preview_text" class="textarea mono" rows="4" maxlength="500" placeholder="输入一段能体现历史叙事、停连和情绪变化的文稿" />
+        </label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px">
+          <input v-model="designVoiceForm.aigc_watermark" type="checkbox" />
+          <span class="field-label">试听末尾添加 AIGC 节奏标识</span>
+        </label>
+        <div v-if="designVoiceResult" class="test-result ok">
+          <div class="test-result-head"><Check :size="14" /> 音色已保存到 MiniMax 音色库</div>
+          <div class="test-result-preview mono">voice_id: {{ designVoiceResult.voice_id }}</div>
+          <audio v-if="designVoiceResult.trial_audio_url" controls :src="designVoiceResult.trial_audio_url" style="width:100%" />
+          <div v-else class="field-hint">接口未返回试听音频，但 voice_id 已保存。</div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn" @click="designVoiceDialog = false">关闭</button>
+          <button type="submit" class="btn btn-primary" :disabled="designVoiceLoading">
+            <Loader2 v-if="designVoiceLoading" :size="12" class="animate-spin" />
+            <span v-else>生成音色</span>
+          </button>
         </div>
       </form>
     </div>
@@ -549,6 +596,7 @@ const presetDialog = ref(false)
 const cfgTesting = ref(false)
 const cfgTestResult = ref(null)
 const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', modelStr: '', service_type: 'text', priority: 0, settings: '' })
+const cfgEditingKeyConfigured = ref(false)
 const cfgFormSettingsPreset = ref('none')
 const cfgFormShowAdvanced = ref(false)
 const adapterPresetOptions = computed(() => [
@@ -661,7 +709,7 @@ function detectPresetFromSettings(settings) {
   return 'custom'
 }
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
-const providers = ['ali', 'apimart', 'chatfire', 'gemini', 'minimax', 'openai', 'openrouter', 'siliconflow', 'vidu', 'volcengine']
+const providers = ['ali', 'apimart', 'chatfire', 'egaki-chatgpt', 'gemini', 'minimax', 'openai', 'openrouter', 'rightcode', 'siliconflow', 'vidu', 'volcengine']
 const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
 const serviceMeta = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
@@ -676,7 +724,9 @@ const providerPresets = {
     openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
   },
   image: {
+    rightcode: { label: 'RightCode GPT-Image-2', baseUrl: 'https://www.right.codes/draw', models: ['gpt-image-2'] },
     apimart: { label: 'APIMart GPT-Image-2', baseUrl: 'https://api.apimart.ai', models: ['gpt-image-2'] },
+    'egaki-chatgpt': { label: 'Egaki ChatGPT', baseUrl: 'local-egaki', models: ['gpt-image-2'] },
     chatfire: { label: 'ChatFire 推荐', baseUrl: 'https://api.chatfire.site', models: ['doubao-seedream-4-5-251128'] },
     gemini: { label: 'Gemini 推荐', baseUrl: 'https://api.chatfire.site', models: ['gemini-3-pro-image-preview'] },
     volcengine: { label: '火山推荐', baseUrl: 'https://ark.cn-beijing.volces.com', models: ['doubao-seedream-4-0-250828'] },
@@ -699,7 +749,9 @@ const huobaoPresetCards = [
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
 ]
 const endpointPrefixes = {
+  rightcode: '/v1/images/generations',
   apimart: '/v1',
+  'egaki-chatgpt': '',
   chatfire: '/v1',
   openai: '/v1',
   openrouter: '/v1',
@@ -721,6 +773,7 @@ const endpointHint = computed(() => {
 function byType(t) { return cfgs.value.filter(c => c.service_type === t) }
 function countActive(t) { return byType(t).filter(c => c.is_active).length }
 function fmtModel(m) { return Array.isArray(m) ? m.join(', ') : m || '—' }
+function isMiniMaxAudio(c) { return c?.service_type === 'audio' && String(c?.provider || '').toLowerCase() === 'minimax' }
 function presetsByType(type) {
   const group = providerPresets[type] || {}
   return Object.entries(group).map(([provider, preset]) => ({ provider, ...preset }))
@@ -749,10 +802,59 @@ async function syncVoices() {
     voiceSyncing.value = false
   }
 }
+
+const defaultDesignVoicePrompt = '一位45至55岁的成熟男性历史纪实讲述者，声音中低沉稳厚，略带自然颗粒感和轻微沙哑，但咬字清晰有力；以标准普通话为主，带非常轻微的北方语调，不使用夸张东北方言词汇或明显播音腔；语速中等偏慢，停连自然，叙述沉着克制，具有可信度、见识感和故事感，适合面向40岁以上男性观众讲述中国历史、战争史、人物往事和悬疑历史故事。关键时间、人物和转折处有明确重音，情绪从平静到紧张自然变化。'
+const defaultDesignPreviewText = '公元一九三七年，局势已经变得异常紧张。所有人都以为，真正的风暴还在远处。可就在那天夜里，一封被压在旧档案最底层的密信，改变了三个人的命运。'
+const designVoiceDialog = ref(false)
+const designVoiceTarget = ref(null)
+const designVoiceLoading = ref(false)
+const designVoiceResult = ref(null)
+const designVoiceForm = reactive({
+  voice_name: '历史纪实男声',
+  prompt: defaultDesignVoicePrompt,
+  preview_text: defaultDesignPreviewText,
+  aigc_watermark: false,
+})
+
+function openDesignVoice(cfg) {
+  designVoiceTarget.value = cfg
+  designVoiceResult.value = null
+  designVoiceForm.voice_name = '历史纪实男声'
+  designVoiceForm.prompt = defaultDesignVoicePrompt
+  designVoiceForm.preview_text = defaultDesignPreviewText
+  designVoiceForm.aigc_watermark = false
+  designVoiceDialog.value = true
+}
+
+async function submitDesignVoice() {
+  if (!designVoiceTarget.value) return
+  if (!designVoiceForm.prompt.trim()) { toast.warning('请填写声音描述'); return }
+  if (!designVoiceForm.preview_text.trim()) { toast.warning('请填写试听文稿'); return }
+  if (designVoiceForm.preview_text.length > 500) { toast.warning('试听文稿不能超过 500 字'); return }
+
+  designVoiceLoading.value = true
+  designVoiceResult.value = null
+  try {
+    designVoiceResult.value = await voicesAPI.design({
+      config_id: designVoiceTarget.value.id,
+      voice_name: designVoiceForm.voice_name,
+      prompt: designVoiceForm.prompt,
+      preview_text: designVoiceForm.preview_text,
+      aigc_watermark: designVoiceForm.aigc_watermark,
+    })
+    toast.success(`音色设计成功: ${designVoiceResult.value.voice_id}`)
+  } catch (e) {
+    toast.error(e.message)
+  } finally {
+    designVoiceLoading.value = false
+  }
+}
+
 async function toggleCfg(c) { await aiConfigAPI.update(c.id, { is_active: !c.is_active }); loadCfgs() }
 async function delCfg(id) { await aiConfigAPI.del(id); toast.success('已删除'); loadCfgs() }
 function startAddCfg(t) {
   cfgEditId.value = null
+  cfgEditingKeyConfigured.value = false
   cfgTestResult.value = null
   cfgFormShowAdvanced.value = false
   cfgFormSettingsPreset.value = 'none'
@@ -763,6 +865,7 @@ function startAddCfg(t) {
 }
 function startEditCfg(c) {
   cfgEditId.value = c.id
+  cfgEditingKeyConfigured.value = Boolean(c.api_key_configured)
   cfgTestResult.value = null
   cfgFormShowAdvanced.value = false
   const settingsStr = formatSettings(c.settings)
@@ -770,7 +873,7 @@ function startEditCfg(c) {
   Object.assign(cfgForm, {
     name: c.name || '',
     provider: c.provider,
-    api_key: c.api_key || '',
+    api_key: '',
     base_url: c.base_url || '',
     modelStr: fmtModel(c.model),
     service_type: c.service_type,
@@ -801,21 +904,18 @@ async function testDraftCfg() {
   })
 }
 async function testExistingCfg(c) {
-  startEditCfg(c)
-  await testCfgPayload({
-    service_type: c.service_type,
-    provider: c.provider,
-    api_key: c.api_key || '',
-    base_url: c.base_url || '',
-    model: Array.isArray(c.model) ? c.model : [],
-  })
+  await testCfgPayload({ config_id: c.id })
 }
 async function saveCfg() {
   if (!cfgForm.provider) { toast.warning('选择服务商'); return }
   const models = cfgForm.modelStr.split(',').map(s => s.trim()).filter(Boolean)
   const settings = parseSettings(cfgForm.settings)
   try {
-    if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, settings })
+    if (cfgEditId.value) {
+      const payload = { name: cfgForm.name, provider: cfgForm.provider, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, settings }
+      if (cfgForm.api_key.trim()) payload.api_key = cfgForm.api_key.trim()
+      await aiConfigAPI.update(cfgEditId.value, payload)
+    }
     else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, settings })
     cfgDialog.value = false; toast.success('已保存'); loadCfgs()
   } catch (e) { toast.error(e.message) }
@@ -984,7 +1084,7 @@ function getAgentCfg(type) {
 
 const textModelGroups = computed(() => {
   return cfgs.value
-    .filter(c => c.service_type === 'text' && c.is_active && c.api_key)
+    .filter(c => c.service_type === 'text' && c.is_active && c.api_key_configured)
     .map(c => ({
       label: `${c.provider} — ${c.name}`,
       models: Array.isArray(c.model) ? c.model : (c.model ? [c.model] : []),

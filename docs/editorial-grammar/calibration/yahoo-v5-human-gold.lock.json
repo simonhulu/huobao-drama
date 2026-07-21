@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "editorial-vlm-human-gold-lock-v1",
+  "sourceId": "yahoo",
+  "goldSha256": "86599efc6a996552130c279313ec9e1b5af2338a07807b57fc411f7a2a1a7321",
+  "inputSha256": "eb03fd8e5cdaee65d22ed6c6a3206f1fc1aac78b21d33978c175e1a7679c639c",
+  "reviewCount": 10,
+  "targetCount": 25,
+  "frozenAt": "2026-07-21T09:19:10Z"
+}

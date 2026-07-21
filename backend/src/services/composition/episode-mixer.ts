@@ -19,7 +19,8 @@ import { eq } from 'drizzle-orm'
 import { now } from '../../utils/response.js'
 import { logTaskError, logTaskStart, logTaskSuccess, logTaskProgress } from '../../utils/task-logger.js'
 import { getVideoEncoderOptions } from './video-encoder.js'
-import { planBgmCues } from './bgm-cue-planner.js'
+import { planBgmCues, type BgmCue } from './bgm-cue-planner.js'
+import { ensureEpisodeBgmPlan, type EpisodeBgmPlan } from '../music-generation.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../../data/static')
@@ -27,7 +28,7 @@ const DATA_ROOT = path.resolve(__dirname, '../../../../data')
 const BGM_CUE_FADE_SECONDS = 2
 const BGM_CUE_CROSSFADE_SECONDS = 2
 const BGM_TARGET_LUFS = readNumberEnv('EPISODE_BGM_TARGET_LUFS', -18)
-const BGM_MIX_VOLUME = readNumberEnv('EPISODE_BGM_MIX_VOLUME', 0.75)
+const BGM_MIX_VOLUME = readNumberEnv('EPISODE_BGM_MIX_VOLUME', 0.5)
 
 function readNumberEnv(name: string, fallback: number): number {
   const raw = process.env[name]
@@ -76,6 +77,24 @@ function getVideoDuration(filePath: string): Promise<number> {
   })
 }
 
+function normalizeVideo(inputPath: string, outputPath: string, targetWidth: number, targetHeight: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+    ffmpeg(inputPath)
+      .videoFilter(`scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease,pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2,format=yuv420p`)
+      .audioCodec('aac')
+      .audioBitrate('192k')
+      .outputOptions([
+        '-color_range', 'mpeg',
+        '-movflags', '+faststart',
+      ])
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+}
+
 async function buildConcatVideo(shots: Shot[], outputPath: string): Promise<void> {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true })
 
@@ -93,6 +112,7 @@ async function buildConcatVideo(shots: Shot[], outputPath: string): Promise<void
 
   // 使用 filter_complex concat，避免 concat demuxer 在音频参数变化时产生 DTS 错乱、
   // 时长翻倍等问题。每个镜头的音视频先统一格式后再拼接。
+  console.log('[EpisodeMixer] filter_complex concat fallback, shots:', shots.length)
   return new Promise((resolve, reject) => {
     let cmd = ffmpeg()
     for (const s of shots) {
@@ -324,7 +344,7 @@ async function prepareBgmCue(
 }
 
 async function buildBgmMix(
-  shots: Array<{ videoDuration: number; bgmPath?: string | null }>,
+  cues: BgmCue[],
   totalDuration: number,
   outputPath: string,
   tempDir: string,
@@ -336,10 +356,8 @@ async function buildBgmMix(
     start: number
   }
   const bgmInputs: BgmInput[] = []
-  const cues = planBgmCues(shots)
 
   logTaskProgress('EpisodeMixer', 'bgm-cue-plan', {
-    shots: shots.length,
     cues: cues.length,
     cueDurations: cues.map(cue => cue.duration),
   })
@@ -456,6 +474,55 @@ async function buildBgmMix(
   })
 }
 
+async function buildSilentAudio(duration: number, outputPath: string): Promise<void> {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input('anullsrc=r=48000:cl=stereo')
+      .inputOptions(['-f', 'lavfi'])
+      .outputOptions([
+        '-t', String(Math.max(0.1, duration)),
+        '-c:a', 'aac',
+        '-ar', '48000',
+        '-b:a', '192k',
+      ])
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run()
+  })
+}
+
+async function concatVideosCopy(
+  segments: Array<{ videoPath: string; hasAudio: boolean }>,
+  outputPath: string,
+  tempDir: string,
+): Promise<void> {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+  const listPath = path.join(tempDir, `${uuid()}_lead_in_list.txt`)
+  const lines = segments.map(s => `file '${toAbsPath(s.videoPath).replace(/'/g, "'\\''")}'`)
+  fs.writeFileSync(listPath, lines.join('\n') + '\n')
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg()
+        .input(listPath)
+        .inputOptions(['-f', 'concat', '-safe', '0'])
+        .outputOptions([
+          '-c:v', 'copy',
+          '-c:a', 'copy',
+          '-movflags', '+faststart',
+        ])
+        .output(outputPath)
+        .on('end', () => resolve())
+        .on('error', (err) => reject(err))
+        .run()
+    })
+  } finally {
+    try { fs.unlinkSync(listPath) } catch {}
+  }
+}
+
 export async function mixEpisode(
   episodeId: number,
   outputPath: string,
@@ -475,30 +542,62 @@ export async function mixEpisode(
 
   const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
 
-  const shots: Shot[] = []
-  let totalDuration = 0
+  const tempDir = path.join(STORAGE_ROOT, 'temp')
+  fs.mkdirSync(tempDir, { recursive: true })
 
-  async function prependVideo(url: string | null | undefined) {
+  // 以正文镜头的参数作为整集输出标准。
+  let targetWidth = 1920
+  let targetHeight = 1080
+  const firstStoryboardVideo = storyboards.find(sb => sb.composedVideoUrl)?.composedVideoUrl
+  if (firstStoryboardVideo) {
+    const firstAbs = toAbsPath(firstStoryboardVideo)
+    if (fs.existsSync(firstAbs)) {
+      const meta = await new Promise<ffmpeg.FfprobeData>((resolve, reject) => {
+        ffmpeg.ffprobe(firstAbs, (err, data) => {
+          if (err) reject(err)
+          else resolve(data)
+        })
+      })
+      const videoStream = meta.streams.find(s => s.codec_type === 'video')
+      if (videoStream?.width && videoStream?.height) {
+        targetWidth = videoStream.width
+        targetHeight = videoStream.height
+      }
+    }
+  }
+
+  // 1. 先处理片头/前情提要，但暂时不加入正文时间轴。
+  const normalizedTempFiles: string[] = []
+  const leadIns: Array<{ path: string; duration: number }> = []
+
+  async function normalizeLeadIn(url: string | null | undefined) {
     if (!url) return
     const abs = toAbsPath(url)
     if (!fs.existsSync(abs)) return
-    const duration = await getVideoDuration(abs)
-    shots.push({
-      storyboardId: 0,
-      videoPath: url,
-      narrationPath: null,
-      narrationDuration: 0,
-      videoDuration: duration,
-      bgmPath: null,
-    })
-    totalDuration += duration
+    const normalizedPath = path.join(tempDir, `${uuid()}_normalized.mp4`)
+    try {
+      await normalizeVideo(abs, normalizedPath, targetWidth, targetHeight)
+    } catch (err: any) {
+      logTaskError('EpisodeMixer', 'normalize-lead-in-skipped', {
+        episodeId,
+        source: url,
+        error: err.message,
+      })
+      return
+    }
+    normalizedTempFiles.push(normalizedPath)
+    const duration = await getVideoDuration(normalizedPath)
+    leadIns.push({ path: normalizedPath, duration })
   }
 
   if (episode) {
-    await prependVideo(episode.introVideoUrl)
-    await prependVideo(episode.recapVideoUrl)
+    await normalizeLeadIn(episode.introVideoUrl)
+    await normalizeLeadIn(episode.recapVideoUrl)
   }
 
+  // 2. 正文镜头（解说、BGM 都基于这些镜头计算）。
+  const mainShots: Shot[] = []
+  let mainDuration = 0
   for (const sb of storyboards) {
     if (!sb.composedVideoUrl) {
       throw new Error(`Storyboard ${sb.id} has no composed video`)
@@ -518,7 +617,7 @@ export async function mixEpisode(
       const abs = toAbsPath(sb.bgmAudioUrl)
       if (fs.existsSync(abs)) bgmPath = sb.bgmAudioUrl
     }
-    shots.push({
+    mainShots.push({
       storyboardId: sb.id,
       videoPath: sb.composedVideoUrl,
       narrationPath,
@@ -526,104 +625,131 @@ export async function mixEpisode(
       videoDuration,
       bgmPath,
     })
-    totalDuration += videoDuration
+    mainDuration += videoDuration
   }
 
-  const tempDir = path.join(STORAGE_ROOT, 'temp')
-  fs.mkdirSync(tempDir, { recursive: true })
-  const concatVideoPath = path.join(tempDir, `${uuid()}_concat.mp4`)
+  const mainConcatPath = path.join(tempDir, `${uuid()}_main_concat.mp4`)
   const narrationMixPath = path.join(tempDir, `${uuid()}_narration.m4a`)
   const bgmMixPath = path.join(tempDir, `${uuid()}_bgm.m4a`)
+  const mainBodyPath = path.join(tempDir, `${uuid()}_main_body.mp4`)
+  const silentAudioPath = path.join(tempDir, `${uuid()}_silent.m4a`)
 
   try {
-    await buildConcatVideo(shots, concatVideoPath)
+    // 3. 拼接正文视频。
+    await buildConcatVideo(mainShots, mainConcatPath)
 
-    // 准备集级别 BGM：先把短镜头聚合为音乐 cue，避免每个镜头都重启 BGM。
-    const bgmShots = shots.filter(s => s.bgmPath)
-    const hasBgm = bgmShots.length > 0
-
+    // 4. 正文 BGM：基于正文镜头做情绪幕布规划，不受片头/前情提要干扰。
+    let bgmCues: BgmCue[] = []
+    if (episode?.bgmPlanJson) {
+      try {
+        const plan = JSON.parse(episode.bgmPlanJson) as EpisodeBgmPlan
+        bgmCues = plan.cues
+      } catch {
+        bgmCues = []
+      }
+    }
+    if (bgmCues.length === 0) {
+      const episodePlan = await ensureEpisodeBgmPlan(episodeId)
+      if (episodePlan) {
+        bgmCues = episodePlan.cues
+      }
+    }
+    if (bgmCues.length === 0) {
+      bgmCues = planBgmCues(mainShots.map(s => ({ videoDuration: s.videoDuration, bgmPath: s.bgmPath })))
+    }
+    const hasBgm = bgmCues.length > 0
     if (hasBgm) {
-      await buildBgmMix(
-        shots.map(s => ({ videoDuration: s.videoDuration, bgmPath: s.bgmPath })),
-        totalDuration,
-        bgmMixPath,
-        tempDir,
-      )
+      await buildBgmMix(bgmCues, mainDuration, bgmMixPath, tempDir)
     }
 
-    const narrationShots = shots.filter(s => s.narrationPath && s.narrationDuration > 0)
+    // 5. 正文旁白。
+    const narrationShots = mainShots.filter(s => s.narrationPath && s.narrationDuration > 0)
+    if (narrationShots.length > 0) {
+      await buildNarrationMix(mainShots, mainDuration, narrationMixPath)
+    }
 
-    if (narrationShots.length === 0 && !hasBgm) {
-      // 没有旁白也没有 BGM 时直接复用拼接结果，避免生成 lavfi 静音文件
-      fs.renameSync(concatVideoPath, outputPath)
-    } else {
-      if (narrationShots.length > 0) {
-        await buildNarrationMix(shots, totalDuration, narrationMixPath)
+    // 6. 混出“正文成片”（视频 + 音频）。即使没有旁白/BGM 也保留音频轨，便于后面统一拼接。
+    const audioInputs: string[] = []
+    if (narrationShots.length > 0) audioInputs.push(narrationMixPath)
+    if (hasBgm) audioInputs.push(bgmMixPath)
+    if (audioInputs.length === 0) {
+      await buildSilentAudio(mainDuration, silentAudioPath)
+      audioInputs.push(silentAudioPath)
+    }
+
+    const audioInputIndices = audioInputs.map((_, i) => i + 1)
+    const filterComplex = audioInputIndices.length === 1
+      ? `[${audioInputIndices[0]}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`
+      : `${audioInputIndices.map(i => `[${i}:a]`).join('')}amix=inputs=${audioInputIndices.length}:duration=first:dropout_transition=0:normalize=0[aout]`
+
+    await new Promise<void>((resolve, reject) => {
+      let cmd = ffmpeg(mainConcatPath)
+      for (const audioInput of audioInputs) {
+        cmd = cmd.input(audioInput)
       }
 
-      // 最终 mux：视频（无音频）+ 旁白混音 + BGM
-      const inputs: string[] = [concatVideoPath]
-      const audioInputIndices: number[] = []
-      if (narrationShots.length > 0) {
-        inputs.push(narrationMixPath)
-        audioInputIndices.push(inputs.length - 1)
-      }
-      if (hasBgm) {
-        inputs.push(bgmMixPath)
-        audioInputIndices.push(inputs.length - 1)
-      }
-
-      const audioCount = audioInputIndices.length
-      const filterComplex = audioCount === 0
-        ? ''
-        : audioCount === 1
-          ? `[${audioInputIndices[0]}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`
-          : `${audioInputIndices.map(i => `[${i}:a]`).join('')}amix=inputs=${audioCount}:duration=first:dropout_transition=0:normalize=0[aout]`
-
-      await new Promise<void>((resolve, reject) => {
-        let cmd = ffmpeg(inputs[0])
-        for (let i = 1; i < inputs.length; i++) {
-          cmd = cmd.input(inputs[i])
-        }
-
-        const outputOptions = [
+      cmd
+        .outputOptions([
           '-c:v', 'copy',
           '-map', '0:v',
           '-c:a', 'aac',
           '-ar', '48000',
           '-b:a', '192k',
           '-movflags', '+faststart',
-        ]
-        if (filterComplex) {
-          outputOptions.push('-filter_complex', filterComplex)
-          outputOptions.push('-map', '[aout]')
-        }
+          '-filter_complex', filterComplex,
+          '-map', '[aout]',
+        ])
+        .output(mainBodyPath)
+        .on('end', () => resolve())
+        .on('error', (err) => reject(err))
+        .run()
+    })
 
-        cmd
-          .outputOptions(outputOptions)
-          .output(outputPath)
-          .on('end', () => resolve())
-          .on('error', (err) => reject(err))
-          .run()
-      })
+    // 7. 最后把片头/前情提要拼到正文前面。
+    if (leadIns.length === 0) {
+      fs.renameSync(mainBodyPath, outputPath)
+    } else {
+      const segments = leadIns
+        .map(li => ({ videoPath: li.path, hasAudio: true }))
+        .concat({ videoPath: mainBodyPath, hasAudio: true })
+      await concatVideosCopy(segments, outputPath, tempDir)
+    }
 
-      try { fs.unlinkSync(narrationMixPath) } catch {}
-      try { fs.unlinkSync(bgmMixPath) } catch {}
-      try { fs.unlinkSync(concatVideoPath) } catch {}
-      for (const f of fs.readdirSync(tempDir)) {
-        if (f.endsWith('_bgm_cue.m4a')) {
-          try { fs.unlinkSync(path.join(tempDir, f)) } catch {}
-        }
+    // 8. 清理临时文件。
+    const tempsToClean = [
+      mainConcatPath,
+      narrationMixPath,
+      bgmMixPath,
+      mainBodyPath,
+      silentAudioPath,
+      ...normalizedTempFiles,
+    ]
+    for (const f of tempsToClean) {
+      try { fs.unlinkSync(f) } catch {}
+    }
+    for (const f of fs.readdirSync(tempDir)) {
+      if (f.endsWith('_bgm_cue.m4a')) {
+        try { fs.unlinkSync(path.join(tempDir, f)) } catch {}
       }
     }
 
     const finalDuration = await getAudioDuration(outputPath)
-    logTaskSuccess('EpisodeMixer', 'mix-episode', { episodeId, outputPath, duration: finalDuration })
+    const finalVideoDuration = await getVideoDuration(outputPath)
+    console.log(`[EpisodeMixer] final output audio=${finalDuration}s video=${finalVideoDuration}s`)
+    logTaskSuccess('EpisodeMixer', 'mix-episode', { episodeId, outputPath, duration: finalDuration, videoDuration: finalVideoDuration })
     return { outputPath, duration: finalDuration }
   } catch (err: any) {
-    try { fs.unlinkSync(concatVideoPath) } catch {}
-    try { fs.unlinkSync(narrationMixPath) } catch {}
-    try { fs.unlinkSync(bgmMixPath) } catch {}
+    const tempsToClean = [
+      mainConcatPath,
+      narrationMixPath,
+      bgmMixPath,
+      mainBodyPath,
+      silentAudioPath,
+      ...normalizedTempFiles,
+    ]
+    for (const f of tempsToClean) {
+      try { fs.unlinkSync(f) } catch {}
+    }
     for (const f of fs.readdirSync(tempDir)) {
       if (f.endsWith('_bgm_cue.m4a')) {
         try { fs.unlinkSync(path.join(tempDir, f)) } catch {}

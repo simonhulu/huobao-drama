@@ -1,0 +1,147 @@
+{
+  "schemaVersion": "editorial-vlm-review-input-v2",
+  "sourceId": "fixture-source",
+  "reviewPlanDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "reviews": [
+    {
+      "id": "fixture-boundary-001",
+      "window": {
+        "startSeconds": 10.0,
+        "endSeconds": 12.0
+      },
+      "overview": {
+        "imagePaths": [
+          "__FIXTURE_JPEG__"
+        ],
+        "samples": [
+          {"index": 0, "frameIndex": 300, "timeSeconds": 10.0},
+          {"index": 1, "frameIndex": 315, "timeSeconds": 10.5},
+          {"index": 2, "frameIndex": 330, "timeSeconds": 11.0},
+          {"index": 3, "frameIndex": 345, "timeSeconds": 11.5},
+          {"index": 4, "frameIndex": 360, "timeSeconds": 12.0}
+        ]
+      },
+      "targets": [
+        {
+          "targetRef": {
+            "id": "observation-target-000001",
+            "anchorFrameIndex": 318,
+            "anchorTimeSeconds": 10.6,
+            "candidateIds": ["event-001"],
+            "candidateTimesSeconds": [10.6],
+            "separability": "independent"
+          },
+          "intervalRef": {
+            "intervalIndex": 1,
+            "previousSample": {"index": 1, "frameIndex": 315, "timeSeconds": 10.5},
+            "currentSample": {"index": 2, "frameIndex": 330, "timeSeconds": 11.0}
+          },
+          "microSequence": {
+            "imagePaths": ["__FIXTURE_JPEG__"],
+            "samples": [
+              {"index": 0, "frameIndex": 312, "timeSeconds": 10.4, "frameOffset": -6},
+              {"index": 1, "frameIndex": 315, "timeSeconds": 10.5, "frameOffset": -3},
+              {"index": 2, "frameIndex": 318, "timeSeconds": 10.6, "frameOffset": 0},
+              {"index": 3, "frameIndex": 321, "timeSeconds": 10.7, "frameOffset": 3},
+              {"index": 4, "frameIndex": 324, "timeSeconds": 10.8, "frameOffset": 6}
+            ]
+          }
+        },
+        {
+          "targetRef": {
+            "id": "observation-target-000002",
+            "anchorFrameIndex": 348,
+            "anchorTimeSeconds": 11.6,
+            "candidateIds": ["event-002"],
+            "candidateTimesSeconds": [11.6],
+            "separability": "independent"
+          },
+          "intervalRef": {
+            "intervalIndex": 3,
+            "previousSample": {"index": 3, "frameIndex": 345, "timeSeconds": 11.5},
+            "currentSample": {"index": 4, "frameIndex": 360, "timeSeconds": 12.0}
+          },
+          "microSequence": {
+            "imagePaths": ["__FIXTURE_JPEG__"],
+            "samples": [
+              {"index": 0, "frameIndex": 342, "timeSeconds": 11.4, "frameOffset": -6},
+              {"index": 1, "frameIndex": 345, "timeSeconds": 11.5, "frameOffset": -3},
+              {"index": 2, "frameIndex": 348, "timeSeconds": 11.6, "frameOffset": 0},
+              {"index": 3, "frameIndex": 351, "timeSeconds": 11.7, "frameOffset": 3},
+              {"index": 4, "frameIndex": 354, "timeSeconds": 11.8, "frameOffset": 6}
+            ]
+          }
+        }
+      ],
+      "adjacentSubtitles": [
+        {
+          "startSeconds": 9.8,
+          "endSeconds": 11.2,
+          "text": "The company was already losing ground."
+        }
+      ],
+      "machineEvidence": {
+        "candidateIds": ["event-001", "event-002"],
+        "candidates": [
+          {"id": "event-001", "timeSeconds": 10.6, "score": 0.68, "detectors": ["ffmpeg_scene"]},
+          {"id": "event-002", "timeSeconds": 11.6, "score": 0.73, "detectors": ["ffmpeg_scene"]}
+        ],
+        "visual": [{"candidateId": "event-001", "score": 0.68}],
+        "audio": [{"timeSeconds": 10.62, "detector": "side_onset", "score": 0.54}]
+      }
+    },
+    {
+      "id": "fixture-beat-002",
+      "window": {
+        "startSeconds": 20.0,
+        "endSeconds": 22.0
+      },
+      "overview": {
+        "imagePaths": ["__FIXTURE_JPEG__"],
+        "samples": [
+          {"index": 0, "frameIndex": 600, "timeSeconds": 20.0},
+          {"index": 1, "frameIndex": 615, "timeSeconds": 20.5},
+          {"index": 2, "frameIndex": 630, "timeSeconds": 21.0},
+          {"index": 3, "frameIndex": 645, "timeSeconds": 21.5},
+          {"index": 4, "frameIndex": 660, "timeSeconds": 22.0}
+        ]
+      },
+      "targets": [
+        {
+          "targetRef": {
+            "id": "observation-target-000003",
+            "anchorFrameIndex": 633,
+            "anchorTimeSeconds": 21.1,
+            "candidateIds": ["event-003"],
+            "candidateTimesSeconds": [21.1],
+            "separability": "independent"
+          },
+          "intervalRef": {
+            "intervalIndex": 2,
+            "previousSample": {"index": 2, "frameIndex": 630, "timeSeconds": 21.0},
+            "currentSample": {"index": 3, "frameIndex": 645, "timeSeconds": 21.5}
+          },
+          "microSequence": {
+            "imagePaths": ["__FIXTURE_JPEG__"],
+            "samples": [
+              {"index": 0, "frameIndex": 627, "timeSeconds": 20.9, "frameOffset": -6},
+              {"index": 1, "frameIndex": 630, "timeSeconds": 21.0, "frameOffset": -3},
+              {"index": 2, "frameIndex": 633, "timeSeconds": 21.1, "frameOffset": 0},
+              {"index": 3, "frameIndex": 636, "timeSeconds": 21.2, "frameOffset": 3},
+              {"index": 4, "frameIndex": 639, "timeSeconds": 21.3, "frameOffset": 6}
+            ]
+          }
+        }
+      ],
+      "adjacentSubtitles": [],
+      "machineEvidence": {
+        "candidateIds": ["event-003"],
+        "candidates": [
+          {"id": "event-003", "timeSeconds": 21.1, "score": 0.61, "detectors": ["ffmpeg_scene"]}
+        ],
+        "visual": [],
+        "audio": []
+      }
+    }
+  ]
+}

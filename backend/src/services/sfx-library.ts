@@ -129,6 +129,12 @@ export function buildMapping(_packs?: SfxPack[]): SfxMapping {
         if (stat.isDirectory()) {
           walk(fullPath)
         } else if (isAudioFile(fullPath)) {
+          const ext = extensionOf(fullPath)
+          // If an .ogg file has an .mp3 sibling, prefer the MP3 for browser playback.
+          if (ext === '.ogg') {
+            const mp3Sibling = fullPath.replace(/\.ogg$/i, '.mp3')
+            if (fs.existsSync(mp3Sibling)) continue
+          }
           const relativePath = path.relative(SFX_LIBRARY_ROOT, fullPath).replace(/\\/g, '/')
           entries.push({
             pack: packName,

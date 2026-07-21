@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { eq } from 'drizzle-orm'
@@ -8,9 +8,15 @@ import { AiProviderError, classifyImageError, computeRetryDelay } from '../utils
 
 const dbDir = mkdtempSync(join(tmpdir(), 'huobao-image-limiter-'))
 process.env.DB_PATH = join(dbDir, 'test.db')
+process.env.STORAGE_PATH = join(dbDir, 'static')
 
 const { ImageGenerationLimiter, executeImageGeneration } = await import('./image-generation.js')
 const { db, schema } = await import('../db/index.js')
+
+const png1x1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+  'base64',
+)
 
 test('ImageGenerationLimiter caps concurrent executions', async () => {
   const limiter = new ImageGenerationLimiter(2, 60_000, 100)
@@ -209,6 +215,75 @@ test('executeImageGeneration fails immediately when async poll returns terminal 
   assert.equal(updated.status, 'failed')
   assert.equal(updated.lastErrorCode, 'content_policy_violation')
   assert.match(updated.errorMsg ?? '', /safety system/)
+})
+
+test('executeImageGeneration completes egaki-chatgpt generation through local provider branch', async () => {
+  const fakeDir = mkdtempSync(join(tmpdir(), 'huobao-egaki-provider-'))
+  const fakeBin = join(fakeDir, 'egaki')
+  const capturePath = join(fakeDir, 'capture.json')
+  writeFileSync(fakeBin, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+const out = args[args.indexOf('-o') + 1]
+fs.writeFileSync(out, Buffer.from('${png1x1.toString('base64')}', 'base64'))
+fs.writeFileSync('${capturePath}', JSON.stringify({
+  args,
+  openaiKey: process.env.OPENAI_API_KEY || null
+}))
+`, { mode: 0o755 })
+
+  const originalEgakiBin = process.env.EGAKI_BIN
+  const originalOpenAIKey = process.env.OPENAI_API_KEY
+  process.env.EGAKI_BIN = fakeBin
+  process.env.OPENAI_API_KEY = 'sk-should-not-leak'
+
+  const ts = new Date().toISOString()
+  const configId = Number(db.insert(schema.aiServiceConfigs).values({
+    serviceType: 'image',
+    provider: 'egaki-chatgpt',
+    name: 'Egaki ChatGPT image',
+    baseUrl: 'local-egaki',
+    apiKey: 'unused',
+    model: JSON.stringify(['gpt-image-2']),
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const generationId = Number(db.insert(schema.imageGenerations).values({
+    provider: 'egaki-chatgpt',
+    prompt: 'cinematic frame',
+    model: 'gpt-image-2',
+    size: '1920x1080',
+    seed: 123,
+    referenceImages: JSON.stringify([`data:image/png;base64,${png1x1.toString('base64')}`]),
+    status: 'processing',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  try {
+    const result = await executeImageGeneration(generationId, { configId })
+    assert.equal(result.image_generation_id, generationId)
+    assert.match(result.local_path, /^static\/images\/.+\.png$/)
+    assert.deepEqual(readFileSync(join(process.env.STORAGE_PATH!, '..', result.local_path)), png1x1)
+
+    const capture = JSON.parse(readFileSync(capturePath, 'utf8'))
+    assert.equal(capture.openaiKey, null)
+    assert.equal(capture.args[capture.args.indexOf('--aspect-ratio') + 1], '3:2')
+    assert.equal(capture.args.includes('--seed'), false)
+  } finally {
+    if (originalEgakiBin == null) delete process.env.EGAKI_BIN
+    else process.env.EGAKI_BIN = originalEgakiBin
+    if (originalOpenAIKey == null) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = originalOpenAIKey
+  }
+
+  const [updated] = db.select().from(schema.imageGenerations)
+    .where(eq(schema.imageGenerations.id, generationId))
+    .all()
+  assert.equal(updated.status, 'completed')
+  assert.match(updated.localPath ?? '', /^static\/images\/.+\.png$/)
+  assert.match(updated.taskId ?? '', /^egaki-local-/)
 })
 
 test('classifyImageError extracts Retry-After from 429', () => {

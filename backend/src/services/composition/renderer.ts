@@ -10,10 +10,81 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import type { AudioLayer, MotionPlan, RenderResult, StoryboardComposition, VideoLayer } from './types.js'
-import { getVideoEncoderOptions } from './video-encoder.js'
+import { getVideoEncoderOptions, getVideoDecodeOptions } from './video-encoder.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FPS = 30
+
+function formatMotionNumber(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  return Number(value.toFixed(6)).toString()
+}
+
+function normalizeMotionKeyframes(motion: MotionPlan): MotionPlan['keyframes'] {
+  const sorted = motion.keyframes
+    .filter((keyframe) => (
+      Number.isFinite(keyframe.t)
+      && Number.isFinite(keyframe.focusX)
+      && Number.isFinite(keyframe.focusY)
+      && Number.isFinite(keyframe.zoom)
+    ))
+    .map((keyframe) => ({
+      ...keyframe,
+      t: Math.min(1, Math.max(0, keyframe.t)),
+    }))
+    .sort((a, b) => a.t - b.t)
+
+  const unique = sorted.filter((keyframe, index) => index === 0 || keyframe.t !== sorted[index - 1].t)
+  if (unique.length === 0) return []
+
+  if (unique[0].t > 0) {
+    unique.unshift({ ...unique[0], t: 0 })
+  }
+  if (unique[unique.length - 1].t < 1) {
+    unique.push({ ...unique[unique.length - 1], t: 1 })
+  }
+  return unique
+}
+
+function buildEasingExpression(progress: string, easing: NonNullable<MotionPlan['keyframes'][number]['easing']> = 'linear'): string {
+  switch (easing) {
+    case 'ease-in':
+      return `${progress}*${progress}`
+    case 'ease-out':
+      return `1-(1-${progress})*(1-${progress})`
+    case 'ease-in-out':
+      return `if(lt(${progress},0.5),2*${progress}*${progress},1-2*(1-${progress})*(1-${progress}))`
+    case 'linear':
+    default:
+      return progress
+  }
+}
+
+function buildSegmentedMotionExpression(
+  keyframes: MotionPlan['keyframes'],
+  property: 'focusX' | 'focusY' | 'zoom',
+  totalFrames: number,
+): string {
+  const denominator = Math.max(1, totalFrames - 1)
+  const frameProgress = `on/${denominator}`
+  let expression = formatMotionNumber(keyframes[keyframes.length - 1][property])
+
+  for (let index = keyframes.length - 2; index >= 0; index -= 1) {
+    const start = keyframes[index]
+    const end = keyframes[index + 1]
+    const segmentSpan = Math.max(0.000001, end.t - start.t)
+    const localProgress = `((${frameProgress}-${formatMotionNumber(start.t)})/${formatMotionNumber(segmentSpan)})`
+    const easedProgress = buildEasingExpression(localProgress, end.easing)
+    const startValue = formatMotionNumber(start[property])
+    const endValue = formatMotionNumber(end[property])
+    const value = end.transition === 'cut' || end.transition === 'flash' || end.transition === 'dip-black'
+      ? startValue
+      : `${startValue}+(${endValue}-${startValue})*(${easedProgress})`
+    expression = `if(lt(${frameProgress},${formatMotionNumber(end.t)}),${value},${expression})`
+  }
+
+  return expression
+}
 
 export function motionPlanToZoompan(
   motion: MotionPlan | undefined,
@@ -24,27 +95,39 @@ export function motionPlanToZoompan(
   if (!motion || motion.kind === 'static') return null
 
   const totalFrames = Math.max(1, Math.round(duration * FPS))
-  const kfs = motion.keyframes
+  const kfs = normalizeMotionKeyframes(motion)
   if (!kfs || kfs.length < 2) return null
 
-  // 单段 Ken Burns / 平移：用线性插值
-  if (kfs.length === 2) {
-    const start = kfs[0]
-    const end = kfs[1]
-    const zExpr = `${start.zoom}+(${end.zoom - start.zoom})*on/${totalFrames - 1 || 1}`
-    const xExpr = `iw*(${start.focusX}+(${end.focusX - start.focusX})*on/${totalFrames - 1 || 1})-iw/(2*zoom)`
-    const yExpr = `ih*(${start.focusY}+(${end.focusY - start.focusY})*on/${totalFrames - 1 || 1})-ih/(2*zoom)`
-    return `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=${totalFrames}:s=${width}x${height}:fps=${FPS}`
-  }
-
-  // 多段关键帧：用 sendcmd + zoompan 表达式分段
-  // 为了简化，先退化成第一段到最后一端的线性运动；后续可按 t 分段插值
-  const start = kfs[0]
-  const end = kfs[kfs.length - 1]
-  const zExpr = `${start.zoom}+(${end.zoom - start.zoom})*on/${totalFrames - 1 || 1}`
-  const xExpr = `iw*(${start.focusX}+(${end.focusX - start.focusX})*on/${totalFrames - 1 || 1})-iw/(2*zoom)`
-  const yExpr = `ih*(${start.focusY}+(${end.focusY - start.focusY})*on/${totalFrames - 1 || 1})-ih/(2*zoom)`
+  const zExpr = buildSegmentedMotionExpression(kfs, 'zoom', totalFrames)
+  const focusXExpr = buildSegmentedMotionExpression(kfs, 'focusX', totalFrames)
+  const focusYExpr = buildSegmentedMotionExpression(kfs, 'focusY', totalFrames)
+  const xExpr = `max(0,min(iw-iw/zoom,iw*(${focusXExpr})-iw/(2*zoom)))`
+  const yExpr = `max(0,min(ih-ih/zoom,ih*(${focusYExpr})-ih/(2*zoom)))`
   return `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=${totalFrames}:s=${width}x${height}:fps=${FPS}`
+}
+
+export function buildMotionTransitionFilters(motion: MotionPlan | undefined, duration: number): string[] {
+  if (!motion) return []
+
+  const filters: string[] = []
+  const keyframes = normalizeMotionKeyframes(motion)
+  for (const keyframe of keyframes) {
+    const time = Math.min(duration, Math.max(0, keyframe.t * duration))
+    if (keyframe.transition === 'flash') {
+      const start = Math.max(0, time - 0.04)
+      const end = Math.min(duration, time + 0.12)
+      filters.push(
+        `drawbox=x=0:y=0:w=iw:h=ih:color=white@0.88:t=fill:enable='between(t\\,${start.toFixed(3)}\\,${end.toFixed(3)})'`,
+      )
+    }
+
+    if (keyframe.transition === 'dip-black') {
+      const fadeDuration = Math.min(0.55, Math.max(0.18, duration * 0.08))
+      const start = Math.max(0, time - fadeDuration)
+      filters.push(`fade=t=out:st=${start.toFixed(3)}:d=${(time - start).toFixed(3)}:color=black`)
+    }
+  }
+  return filters
 }
 
 function buildBaseVideoFilter(layer: VideoLayer): string {
@@ -56,6 +139,7 @@ function buildBaseVideoFilter(layer: VideoLayer): string {
     filters.push(zoompan)
   }
   filters.push(`trim=duration=${duration}`)
+  filters.push(...buildMotionTransitionFilters(motion, duration))
   return filters.join(',')
 }
 
@@ -265,6 +349,9 @@ export async function renderStoryboardComposition(
 
     if (comp.video.type === 'image') {
       cmd = cmd.inputOptions(['-loop', '1'])
+    } else {
+      // macOS 用 VideoToolbox 硬解视频输入
+      cmd = cmd.inputOptions(getVideoDecodeOptions())
     }
 
     const outputOptions = [

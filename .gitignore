@@ -3,6 +3,12 @@ node_modules/
 
 # Build output
 dist/
+remotion/out/
+remotion/dist/
+remotion/public/cutout-poc/
+
+# Remotion headless Chrome
+.remotion-chrome/
 
 # IDE
 .idea/
@@ -29,6 +35,10 @@ data/drama_generator.db-shm
 data/huobao_drama.db
 data/huobao_drama.db-wal
 data/huobao_drama.db-shm
+data/backups/
+data/temp/
+data/secrets/
+data/.ai-config-encryption-key
 data/public.sql
 data/*.bak*
 data/static/
@@ -59,3 +69,17 @@ backend/data.db
 backend/dev.db
 backend/src/db/*.db
 .worktrees/
+
+# cheat-on-content credentials and local runtime state
+.auth/
+.auth-xhs/
+.auth-linkedin/
+.cheat-secrets.json
+.cheat-cache/
+.cheat-hooks/
+.debug/
+.claude/
+
+# Keep the content work directories trackable even when a global gitignore
+# contains a broad `scripts` rule.
+!scripts/

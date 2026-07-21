@@ -57,28 +57,6 @@ function getEpisodeAspectRatio(episodeId: number) {
   return episode?.aspectRatio ?? null
 }
 
-function validateStoryboardBindings(episodeId: number, sceneId: number | null | undefined, characterIds: number[] | undefined) {
-  const episodeSceneIds = new Set(
-    db.select().from(schema.episodeScenes)
-      .where(eq(schema.episodeScenes.episodeId, episodeId)).all()
-      .map(link => link.sceneId),
-  )
-  const episodeCharacterIds = new Set(
-    db.select().from(schema.episodeCharacters)
-      .where(eq(schema.episodeCharacters.episodeId, episodeId)).all()
-      .map(link => link.characterId),
-  )
-
-  if (sceneId != null && !episodeSceneIds.has(sceneId)) {
-    throw new Error('scene_id 必须来自当前集已关联场景')
-  }
-
-  const invalidCharacterIds = (characterIds || []).filter(id => !episodeCharacterIds.has(id))
-  if (invalidCharacterIds.length) {
-    throw new Error('character_ids 必须来自当前集已关联角色')
-  }
-}
-
 // POST /storyboards
 app.post('/', async (c) => {
   const body = await c.req.json()
@@ -90,7 +68,6 @@ app.post('/', async (c) => {
     characterIds: body.character_ids,
   })
   logTaskPayload('StoryboardAPI', 'create body', body)
-  validateStoryboardBindings(body.episode_id, body.scene_id, body.character_ids)
   const res = db.insert(schema.storyboards).values({
     episodeId: body.episode_id,
     storyboardNumber: body.storyboard_number || 1,
@@ -155,12 +132,6 @@ app.put('/:id', async (c) => {
       getEpisodeAspectRatio(storyboard.episodeId),
     )
   }
-
-  validateStoryboardBindings(
-    storyboard.episodeId,
-    'scene_id' in body ? body.scene_id : storyboard.sceneId,
-    'character_ids' in body ? body.character_ids : getStoryboardCharacterIds(id),
-  )
 
   db.update(schema.storyboards).set(updates).where(eq(schema.storyboards.id, id)).run()
   if ('character_ids' in body) syncStoryboardCharacters(id, body.character_ids || [])

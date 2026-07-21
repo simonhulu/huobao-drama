@@ -6,6 +6,7 @@ import { db, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { resolveStoryboardNarrationTextForTTS } from './narration-generation.js'
+import { getVideoEncoderOptions } from './composition/video-encoder.js'
 
 const IGNORE_TTS_SPEAKERS = /^(环境音|环境声|音效|效果音|sfx|sound ?effect|bgm|背景音|背景音乐|ambient)$/i
 const IGNORE_TTS_TEXT = /^(无|无对白|无台词|无旁白|无需配音|无需对白|none|null|n\/a|na|环境音|环境声|音效|效果音|纯音效|纯环境音|只有环境音|仅环境音|背景音|背景音乐|bgm|sfx|ambient)$/i
@@ -584,14 +585,12 @@ export async function generateSubtitlePreview(storyboardId: number): Promise<str
     cmd
       .outputOptions([
         '-t', String(previewDuration),
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '23',
+        ...getVideoEncoderOptions(),
         '-pix_fmt', 'yuv420p',
         '-r', '30',
         '-an',
       ])
-      // 先缩放确保宽高为偶数（libx264 要求），再烧录字幕
+      // 先缩放确保宽高为偶数（编码器要求），再烧录字幕
       .videoFilter(`scale=trunc(iw/2)*2:trunc(ih/2)*2,subtitles=${escapedAssPath}`)
       .output(outputPath)
       .on('end', () => resolve())

@@ -1,0 +1,346 @@
+{
+  "schemaVersion": "editorial-vlm-human-gold-v1",
+  "sourceId": "yahoo",
+  "calibration": {
+    "model": "gpt-4o",
+    "promptVersion": "observable-editorial-review-v5.1-target-microsequences",
+    "annotationSchemaVersion": "observed-edit-review-v2",
+    "annotationSchemaDigest": "548c042c6c6eb10189f63b858deece52b3da8c5310205cd97015fa1c24388efe",
+    "requestContractDigest": "4095658902562825c5ee80167183f218ed4b793ff7f3711d877d33858d92275d"
+  },
+  "input": {
+    "schemaVersion": "editorial-vlm-review-input-v2",
+    "reviewPlanDigest": "3d4787f1d681f10884a05fe1faf295a83663bde8dc93c01f3ede7df135dc8567",
+    "sha256": "eb03fd8e5cdaee65d22ed6c6a3206f1fc1aac78b21d33978c175e1a7679c639c"
+  },
+  "evidence": {
+    "reviewAssetsManifestSha256": "34921567a55a7de58b9a452a6efe2d8996ff3e45d11eb26ee75b23b5ebafd7fe",
+    "contactSheetSha256ByReview": {
+      "review-unit-000001": "f56af3a0e307eaffdcbeaff7b384415d8b982f4ba03e4c89eb171eaf4d4cad0e",
+      "review-unit-000002": "ae30b7085d0ec19932319642891fe2a2437e5c01ecec5766a6f56be23da8e0b7",
+      "review-unit-000003": "a94057b39752bb85162babc32ca83b93c136023c7c94078c555301452b993749",
+      "review-unit-000008": "a33199e84b0f2045d5fe29af640883b289ae1b76e0bd065c0eeb1c3a75076185",
+      "review-unit-000012": "9fbc07eb269a48742b64b9ebac920f7eab78a549d71b1f41c02cbd8b4f1ce80f",
+      "review-unit-000013": "2cc4b897db7ab5e8a71ee65bbd92a1070ffd90137597254fe49c3185f3cddbe3",
+      "review-unit-000018": "d79ab61b3b28635f554e1b819761d51f9cb509dc987f2dec3ee495df96fe2daf",
+      "review-unit-000019": "322422f3630fb76312f8c0bedc92900bea653d78d76af818d399808f88a9ffc0",
+      "review-unit-000029": "6d3ec4d3829509751608a9ac707a12bcbb7cc230692df73868ce6c4a67636a57",
+      "review-unit-000037": "2b1e48bbe831f285cd5a96c8f39f1adecce885c5461c7dc685f2462e08e1b837"
+    }
+  },
+  "gate": {
+    "requiredReviewPassRate": 1,
+    "requiredTargetPassRate": 1
+  },
+  "reviews": [
+    {
+      "reviewId": "review-unit-000001",
+      "humanSummary": "The Yahoo logo enters from a blank field and then continues shrinking; the setup is not replaced.",
+      "targets": [
+        {
+          "targetId": "observation-target-000001",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["layer_entry", "text_appear", "mask_reveal"]],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["Target samples 0-4 progress from an almost blank field to a complete Yahoo logo without a new setup."]
+        }
+      ],
+      "requiredContinuousTracks": [
+        {
+          "behaviors": ["scale_down"],
+          "directions": ["out"],
+          "subjectScopes": ["layer"],
+          "layerTypes": ["logo"],
+          "startAtMost": 1,
+          "endAtLeast": 4
+        }
+      ],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["logo"]],
+        "visibleTextAny": [["yahoo"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000002",
+      "humanSummary": "The map composition is assembled in place: headline replacement first, underline and small caption second.",
+      "targets": [
+        {
+          "targetId": "observation-target-000002",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["text_replace", "layer_replace", "text_appear"]],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The world map remains while the Yahoo wordmark gives way to the most valuable headline."]
+        },
+        {
+          "targetId": "observation-target-000003",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["layer_transform", "layer_entry", "text_appear", "mask_reveal", "crop_reveal"]],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["A purple underline and small caption assemble under the stable headline and map."]
+        }
+      ],
+      "requiredContinuousTracks": [
+        {
+          "behaviors": ["scale_up"],
+          "directions": ["in"],
+          "subjectScopes": ["layer"],
+          "layerTypes": ["map"],
+          "startAtMost": 0,
+          "endAtLeast": 4
+        }
+      ],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["map"], ["text"]],
+        "visibleTextAny": [["most valuable"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000003",
+      "humanSummary": "A graphic bridge replaces the map setup with a monitor setup, after which the globe and title assemble in layers.",
+      "targets": [
+        {
+          "targetId": "observation-target-000004",
+          "acceptedEditClasses": ["graphic_transition", "blur_bridge"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The map composition moves out through a blurred graphic bridge and a framed monitor composition replaces it."]
+        },
+        {
+          "targetId": "observation-target-000005",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [
+            ["mask_reveal", "crop_reveal", "layer_transform"],
+            ["layer_entry"]
+          ],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["Globe fragments and most visited text assemble inside the already established monitor frame."]
+        },
+        {
+          "targetId": "observation-target-000006",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["mask_reveal", "crop_reveal", "layer_transform"]],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The underline and remaining globe/title layers finish assembling without replacing the monitor setup."]
+        }
+      ],
+      "requiredContinuousTracks": [],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["map"], ["interface"], ["text"]],
+        "visibleTextAny": [["most visited"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000008",
+      "humanSummary": "The central metric changes from 90's to $1 million; the later visual candidate is stable and coincides with an audio onset.",
+      "targets": [
+        {
+          "targetId": "observation-target-000016",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["text_replace", "layer_replace"]],
+          "acceptedAudioRelations": [
+            {"assessability": "machine_evidence_available", "relation": "no_clear_relation"},
+            {"assessability": "machine_evidence_available", "relation": "postlap"}
+          ],
+          "humanEvidence": ["The ring and overall composition persist while the central wording changes to $1 million."]
+        },
+        {
+          "targetId": "observation-target-000017",
+          "acceptedEditClasses": ["no_local_delta"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "machine_evidence_available", "relation": "synchronous_accent"}],
+          "humanEvidence": ["All five target samples retain the same $1 million state; the supplied onset is approximately 15 ms before the anchor."]
+        }
+      ],
+      "requiredContinuousTracks": [],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["shape"], ["text"]],
+        "visibleTextAny": [["$1 million", "1 million"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000012",
+      "humanSummary": "The title setup is replaced by black in a boundary whose exact cut-versus-fade family is not uniquely visible at the sampled cadence.",
+      "targets": [
+        {
+          "targetId": "observation-target-000021",
+          "acceptedEditClasses": ["ambiguous"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "machine_evidence_available", "relation": "synchronous_accent"}],
+          "humanEvidence": ["The title is present in samples 0-1 and the frame is fully black from sample 2; dense source-frame review also shows no resolved intermediate state."]
+        }
+      ],
+      "requiredContinuousTracks": [],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["text"]],
+        "visibleTextAny": [["rise & fall", "rise and fall"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000013",
+      "humanSummary": "A matte-like reveal emerges from black, followed by a purple bar, title text assembly, and a final stable candidate.",
+      "targets": [
+        {
+          "targetId": "observation-target-000022",
+          "acceptedEditClasses": ["matte_transition"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["Black gives way to a blurred white field and irregular black matte shapes, establishing a new title setup."]
+        },
+        {
+          "targetId": "observation-target-000023",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["layer_transform", "layer_entry", "mask_reveal", "crop_reveal"]],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["A horizontal purple bar reveals over the already established black matte figure."]
+        },
+        {
+          "targetId": "observation-target-000024",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["text_appear", "layer_entry", "mask_reveal", "crop_reveal"]],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The Rise title appears progressively while the matte figure and purple bar remain fixed."]
+        },
+        {
+          "targetId": "observation-target-000025",
+          "acceptedEditClasses": ["no_local_delta"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["All five target samples show the same completed The Rise title composition."]
+        }
+      ],
+      "requiredContinuousTracks": [],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["matte", "shape", "texture"], ["text"]],
+        "visibleTextAny": [["the rise"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000018",
+      "humanSummary": "A large 90's graphic bridges into archival footage; one later target is a true archival hard cut and two targets are stable.",
+      "targets": [
+        {
+          "targetId": "observation-target-000030",
+          "acceptedEditClasses": ["graphic_transition", "blur_bridge"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The white question card is replaced through an oversized blurred 90's graphic before archival footage becomes visible."]
+        },
+        {
+          "targetId": "observation-target-000031",
+          "acceptedEditClasses": ["no_local_delta"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["All target samples remain on the same archival shot with the 90's overlay."]
+        },
+        {
+          "targetId": "observation-target-000032",
+          "acceptedEditClasses": ["hard_cut"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["Adjacent target samples discontinuously replace one archival camera setup with another while retaining the overlay."]
+        },
+        {
+          "targetId": "observation-target-000033",
+          "acceptedEditClasses": ["no_local_delta"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["All five target samples remain on the second archival shot."]
+        }
+      ],
+      "requiredContinuousTracks": [],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["archival_video", "live_action_video"], ["text"]],
+        "visibleTextAny": [["90's", "90s"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000019",
+      "humanSummary": "Chromatic blur and distortion bridge the archival setup into a purple globe graphic.",
+      "targets": [
+        {
+          "targetId": "observation-target-000034",
+          "acceptedEditClasses": ["distortion", "graphic_transition"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["Samples 3-4 visibly distort and recolor the archival frame before the purple globe setup replaces it."]
+        }
+      ],
+      "requiredContinuousTracks": [],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["archival_video", "live_action_video"], ["shape", "map", "texture"]],
+        "visibleTextAny": [["90's", "90s"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000029",
+      "humanSummary": "The view count increments over a stable eye, the eye setup exits through a graphic boundary, then the however card assembles.",
+      "targets": [
+        {
+          "targetId": "observation-target-000047",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["text_counter_change"]],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The eye and background remain fixed while the metric advances through 111K, 116K, 122K, 128K, and 133K."]
+        },
+        {
+          "targetId": "observation-target-000048",
+          "acceptedEditClasses": ["graphic_transition"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The eye and counter composition move out and a blank title field with the entering however word replaces it."]
+        },
+        {
+          "targetId": "observation-target-000049",
+          "acceptedEditClasses": ["within_setup_change"],
+          "requiredChangeTypeAny": [["layer_transform", "text_appear", "layer_entry", "mask_reveal", "crop_reveal"]],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The however word, underline, and small caption finish assembling on the same title field."]
+        }
+      ],
+      "requiredContinuousTracks": [],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["shape"], ["text"]],
+        "visibleTextAny": [["however"]]
+      }
+    },
+    {
+      "reviewId": "review-unit-000037",
+      "humanSummary": "Four successive discontinuous archival setup replacements form a rapid montage.",
+      "targets": [
+        {
+          "targetId": "observation-target-000065",
+          "acceptedEditClasses": ["hard_cut"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The 1994 Netscape graphic is replaced discontinuously by a dark live-action close shot."]
+        },
+        {
+          "targetId": "observation-target-000066",
+          "acceptedEditClasses": ["hard_cut"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The close shot is replaced discontinuously by two people viewed at a monitor."]
+        },
+        {
+          "targetId": "observation-target-000067",
+          "acceptedEditClasses": ["hard_cut"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The monitor-facing shot is replaced discontinuously by an overhead computer shot."]
+        },
+        {
+          "targetId": "observation-target-000068",
+          "acceptedEditClasses": ["hard_cut"],
+          "requiredChangeTypeAny": [],
+          "acceptedAudioRelations": [{"assessability": "not_assessable", "relation": "unknown"}],
+          "humanEvidence": ["The overhead shot is replaced discontinuously by a rear view of people at a workstation."]
+        }
+      ],
+      "requiredContinuousTracks": [],
+      "requiredUnitEvidence": {
+        "layerTypeAny": [["archival_video", "live_action_video"], ["text"]],
+        "visibleTextAny": [["1994"]]
+      }
+    }
+  ]
+}

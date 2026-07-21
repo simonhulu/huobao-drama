@@ -10,6 +10,7 @@ import { v4 as uuid } from 'uuid'
 import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
+import { normalizeTtsText } from '../utils/tts-text.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -103,6 +104,13 @@ export async function generateTTS(params: TTSParams): Promise<string> {
 export async function generateTTSWithMetadata(params: TTSParams): Promise<TTSResult> {
   const config = getAudioConfigById(params.configId)
   const adapter = getTTSAdapter(config.provider)
+
+  // 统一清洗：移除零宽字符、装饰分隔线、CJK 间多余空格等
+  const cleanedText = normalizeTtsText(params.text)
+  if (!cleanedText) {
+    throw new Error('TTS text is empty after normalization')
+  }
+  params = { ...params, text: cleanedText }
 
   logTaskStart('AudioTask', 'tts-generate', {
     provider: config.provider,

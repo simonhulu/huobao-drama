@@ -1,0 +1,88 @@
+{
+  "schemaVersion": "editorial-vlm-calibration-run-v1",
+  "calibrationId": "yahoo-v5.2-gpt4o-20260721",
+  "sourceId": "yahoo",
+  "goldSha256": "86599efc6a996552130c279313ec9e1b5af2338a07807b57fc411f7a2a1a7321",
+  "inputSha256": "eb03fd8e5cdaee65d22ed6c6a3206f1fc1aac78b21d33978c175e1a7679c639c",
+  "createdAt": "2026-07-21T10:27:21.647Z",
+  "calibration": {
+    "model": "gpt-4o",
+    "promptVersion": "observable-editorial-review-v5.2-setup-first",
+    "annotationSchemaVersion": "observed-edit-review-v2",
+    "annotationSchemaDigest": "548c042c6c6eb10189f63b858deece52b3da8c5310205cd97015fa1c24388efe",
+    "requestContractDigest": "1cd15a018cb739dea5283024aab3fdeb212c29790b600d841ec5b1cbcb280427"
+  },
+  "semanticSupplementSha256": "a71d217432e87df1d05f51a003c0534d3523234177f72efc94a7fb4a3e56fb54",
+  "reviews": [
+    {
+      "reviewId": "review-unit-000001",
+      "cacheKey": "dbb842168e11aeb4392303614a8a89d265b32337b16b700bb617124b82b55aa7",
+      "requestBodyDigest": "363eff0b3877f9a134c698090ea4b12fbe13d360759b5eab4a18004be2616401",
+      "targetCount": 1,
+      "imageCount": 10
+    },
+    {
+      "reviewId": "review-unit-000002",
+      "cacheKey": "3f21c9b27a9e99ac1e791c213e96ab4904be06dc53fe323fec3a0ffa28976eb1",
+      "requestBodyDigest": "01a628a5e4d3563d327e3533b7f057c86a758b3387f4d244f566f881f53f23f4",
+      "targetCount": 2,
+      "imageCount": 15
+    },
+    {
+      "reviewId": "review-unit-000003",
+      "cacheKey": "94b991b843c8762ee2a4453a179dbfd4a4077120baf1947d9129567e79427168",
+      "requestBodyDigest": "b39a6f3f9fe423e94e628a5ee807818702aaad7aec557d5f338a713cff6686be",
+      "targetCount": 3,
+      "imageCount": 20
+    },
+    {
+      "reviewId": "review-unit-000008",
+      "cacheKey": "6e02f9837cd03e3f8067e04572f30460b96df7d821ab789515f67c51611c3a7b",
+      "requestBodyDigest": "4985f42986916780413114bba390e3e91a9982fde9a9a80c0ca27a1e2f144e99",
+      "targetCount": 2,
+      "imageCount": 15
+    },
+    {
+      "reviewId": "review-unit-000012",
+      "cacheKey": "c8734749e63d177ba28cb0167d192eb942f5b76bc70a8ed44714c66ee9758e4a",
+      "requestBodyDigest": "934d54af09c777381cc7f03e43cf4d5360e0a21901a2c476d9d3d57210c2c3e8",
+      "targetCount": 1,
+      "imageCount": 10
+    },
+    {
+      "reviewId": "review-unit-000013",
+      "cacheKey": "abe1ab728f97be9b094c4d807856a3fe5dffa00d5a82e671a5cafe9019470d11",
+      "requestBodyDigest": "ad983a767bea8a7a5a150d0a6ed6c0e33befa5a6584128d55750a681745cdb45",
+      "targetCount": 4,
+      "imageCount": 25
+    },
+    {
+      "reviewId": "review-unit-000018",
+      "cacheKey": "9e0067844b132152f7e499fca80973b92e4ceccceb526ee0b4ca0a1238bc9453",
+      "requestBodyDigest": "f39b029715c233feb8998b5b2d21d88c920603e8a1bf107141a73fc0af2a0fa0",
+      "targetCount": 4,
+      "imageCount": 25
+    },
+    {
+      "reviewId": "review-unit-000019",
+      "cacheKey": "1da1e312caf12a8a8ad6c500b416d5e970c231c664729f437a78446fd923b603",
+      "requestBodyDigest": "5a2e9c9cafe715b4076de55390b184a3c4ee8ec57ef64a1f6d2084a722f11f15",
+      "targetCount": 1,
+      "imageCount": 10
+    },
+    {
+      "reviewId": "review-unit-000029",
+      "cacheKey": "793e5b2fa15594c70e6f086e9954f34a50c4aa101d249d65d5207aa57b2e5f5d",
+      "requestBodyDigest": "b7de3c832317954ad5808a5d9d9de42410e8d2bd152e75484b874be27b547a3a",
+      "targetCount": 3,
+      "imageCount": 20
+    },
+    {
+      "reviewId": "review-unit-000037",
+      "cacheKey": "8b6c34b98ca2dfd86c294d9919b9fd14e292e6a3948803a2ddb60e556e643675",
+      "requestBodyDigest": "6915a0ff8a1086339738d844cc20caad8e6efc68f1d37cdcf3d3f2217e81a88d",
+      "targetCount": 4,
+      "imageCount": 25
+    }
+  ]
+}

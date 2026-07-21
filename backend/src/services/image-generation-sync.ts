@@ -2,11 +2,16 @@ import { and, eq, like } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import type { CreationTask, TransactionClient } from './tasks/types.js'
+import { syncRemotionAssetForImageGeneration } from './remotion-asset-sync.js'
 
 interface ImageGenerationResult {
   image_generation_id: number
   local_path: string
   image_url?: string | null
+}
+
+function writesStoryboardComposedImage(frameType: string | null | undefined): boolean {
+  return !frameType || frameType === 'default' || frameType === 'composed'
 }
 
 function readImageGenerationId(payload: unknown): number | null {
@@ -32,7 +37,7 @@ function readResult(task: CreationTask): ImageGenerationResult | null {
 }
 
 export function syncRelatedImageTables(
-  tx: TransactionClient,
+  tx: TransactionClient | typeof db,
   generationId: number,
   localPath: string,
   imageUrl?: string | null,
@@ -48,6 +53,9 @@ export function syncRelatedImageTables(
       imageUrl: imageUrl ?? record.imageUrl ?? null,
       localPath,
       status: 'completed',
+      errorMsg: null,
+      lastErrorCode: null,
+      lastErrorDetail: null,
       updatedAt: now(),
       completedAt: now(),
     })
@@ -58,7 +66,7 @@ export function syncRelatedImageTables(
     const sbUpdate: Record<string, unknown> = { updatedAt: now() }
     if (record.frameType === 'first_frame') sbUpdate.firstFrameImage = localPath
     else if (record.frameType === 'last_frame') sbUpdate.lastFrameImage = localPath
-    else sbUpdate.composedImage = localPath
+    else if (writesStoryboardComposedImage(record.frameType)) sbUpdate.composedImage = localPath
     tx.update(schema.storyboards)
       .set(sbUpdate)
       .where(eq(schema.storyboards.id, record.storyboardId))
@@ -78,10 +86,17 @@ export function syncRelatedImageTables(
       .where(eq(schema.scenes.id, record.sceneId))
       .run()
   }
+
+  syncRemotionAssetForImageGeneration(tx, generationId, {
+    status: 'completed',
+    localPath,
+    sourceUrl: imageUrl ?? null,
+    completed: true,
+  })
 }
 
 function setImageGenerationFailed(
-  tx: TransactionClient,
+  tx: TransactionClient | typeof db,
   generationId: number,
   errorMessage: string | null,
   errorCode?: string | null,
@@ -96,20 +111,30 @@ function setImageGenerationFailed(
     })
     .where(eq(schema.imageGenerations.id, generationId))
     .run()
+  syncRemotionAssetForImageGeneration(tx, generationId, {
+    status: 'failed',
+    errorCode: errorCode ?? null,
+    errorMessage: errorMessage ?? 'Task failed',
+  })
 }
 
 function setImageGenerationCanceled(
-  tx: TransactionClient,
+  tx: TransactionClient | typeof db,
   generationId: number,
 ): void {
   tx.update(schema.imageGenerations)
     .set({ status: 'canceled', updatedAt: now() })
     .where(eq(schema.imageGenerations.id, generationId))
     .run()
+  syncRemotionAssetForImageGeneration(tx, generationId, {
+    status: 'canceled',
+    errorCode: 'canceled',
+    errorMessage: 'Task canceled',
+  })
 }
 
 function setImageGenerationProcessing(
-  tx: TransactionClient,
+  tx: TransactionClient | typeof db,
   generationId: number,
   errorMessage?: string | null,
   errorCode?: string | null,
@@ -124,10 +149,38 @@ function setImageGenerationProcessing(
     })
     .where(eq(schema.imageGenerations.id, generationId))
     .run()
+  syncRemotionAssetForImageGeneration(tx, generationId, {
+    status: 'processing',
+    errorCode: errorCode ?? null,
+    errorMessage: errorMessage ?? null,
+  })
+}
+
+function setImageGenerationQueued(
+  tx: TransactionClient | typeof db,
+  generationId: number,
+  errorMessage?: string | null,
+  errorCode?: string | null,
+): void {
+  tx.update(schema.imageGenerations)
+    .set({
+      status: 'pending',
+      errorMsg: errorMessage ?? null,
+      lastErrorCode: errorCode ?? null,
+      lastErrorDetail: errorMessage ?? null,
+      updatedAt: now(),
+    })
+    .where(eq(schema.imageGenerations.id, generationId))
+    .run()
+  syncRemotionAssetForImageGeneration(tx, generationId, {
+    status: 'queued',
+    errorCode: errorCode ?? null,
+    errorMessage: errorMessage ?? null,
+  })
 }
 
 export function syncImageGenerationTaskState(
-  tx: TransactionClient,
+  tx: TransactionClient | typeof db,
   task: CreationTask,
 ): void {
   if (task.type !== 'image.generate') return
@@ -154,7 +207,12 @@ export function syncImageGenerationTaskState(
 
   if (task.status === 'queued') {
     const errorCode = task.errorCode ?? task.retryReason
-    setImageGenerationProcessing(tx, generationId, task.errorMessage, errorCode)
+    setImageGenerationQueued(tx, generationId, task.errorMessage, errorCode)
+    return
+  }
+
+  if (task.status === 'running') {
+    setImageGenerationProcessing(tx, generationId, task.errorMessage, task.errorCode)
     return
   }
 }
@@ -231,6 +289,13 @@ export function reconcileImageGenerationState(): { processed: number; updated: n
   for (const record of processing) {
     processed++
     const generationId = record.id
+
+    // 封面生成的 image generation 记录由 cover.generate 任务直接管理，不走 image.generate task，
+    // 调和时不应因找不到 image.generate 任务而将其标记为失败。
+    if (record.imageType === 'cover' || record.imageType === 'cover_base') {
+      continue
+    }
+
     const task = findTaskByImageGenerationId(generationId)
 
     db.transaction((tx) => {

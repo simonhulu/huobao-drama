@@ -27,9 +27,10 @@ export function createRecapComposeHandler(): TaskHandler<RecapComposePayload> {
       const recapVideoUrl = await composeRecapForEpisode({
         episodeId,
         episodeNumber: ep.episodeNumber,
-        recapScript: ep.recapScript || '',
-        openingHook: ep.openingHook,
         dramaId: ep.dramaId,
+        narrationVoiceId: ep.narrationVoiceId,
+        narrationSpeed: ep.narrationSpeed,
+        aspectRatio: ep.aspectRatio,
       })
 
       db.update(schema.episodes)

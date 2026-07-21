@@ -18,6 +18,7 @@ interface UseTasksOptions {
   episodeId?: MaybeRef<number | null | undefined>
   pollMs?: number
   enableStreaming?: boolean
+  activeOnly?: boolean
 }
 
 function optionValue(value: any) {
@@ -61,6 +62,7 @@ export function useTasks(options: UseTasksOptions = {}) {
       const rows = await taskAPI.list({
         drama_id: dramaId || undefined,
         episode_id: episodeId || undefined,
+        active_only: options.activeOnly,
       })
       tasks.value = Array.isArray(rows) ? (rows as CreationTask[]) : []
       lastLoadedAt.value = new Date()

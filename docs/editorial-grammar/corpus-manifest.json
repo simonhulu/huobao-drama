@@ -1,0 +1,210 @@
+{
+  "schemaVersion": "corpus-manifest-v1",
+  "timeUnit": "seconds",
+  "syncSpotCheckFractions": [
+    0.1,
+    0.5,
+    0.9
+  ],
+  "totals": {
+    "sourceCount": 4,
+    "mp4Bytes": 583331625,
+    "srtBytes": 409167,
+    "allBytes": 583740792,
+    "formatDurationSeconds": 12169.016235,
+    "subtitleCueCount": 5504,
+    "subtitleCoverageSeconds": 11799.834,
+    "subtitleCoverageRatio": 0.969662113365,
+    "subtitleGapCount": 76,
+    "maxSubtitleGapSeconds": 26.44
+  },
+  "sources": [
+    {
+      "id": "yahoo",
+      "mp4": {
+        "path": "/Users/zhangshijie/Downloads/The INSANE Reason That Yahoo! Lost Everything.mp4",
+        "bytes": 71147093,
+        "sha256": "6a068e6c6f746e9d9d3a60f4c6605e0799009ddd8b5887fb9ee1e02b357cf4da"
+      },
+      "formatDurationSeconds": 955.542857,
+      "video": {
+        "duration": 955.4545,
+        "start": 0.041708,
+        "fps": {
+          "numerator": 24000,
+          "denominator": 1001
+        },
+        "width": 1280,
+        "height": 720,
+        "codec": "h264"
+      },
+      "audio": {
+        "duration": 955.542857,
+        "start": 0,
+        "sampleRate": 44100,
+        "channels": 2,
+        "codec": "aac"
+      },
+      "srt": {
+        "path": "/Users/zhangshijie/Downloads/[English (United Kingdom)] The INSANE Reason That Yahoo! Lost Everything [DownSub.com].srt",
+        "bytes": 23456,
+        "sha256": "ebea8649b833a6dc22276ab6713bef492e94f831417a7664d6521c0f1a673f4b"
+      },
+      "subtitle": {
+        "cueCount": 196,
+        "firstStart": 0.88,
+        "lastEnd": 953.84,
+        "coverageSeconds": 929.2,
+        "coverageRatio": 0.972431527475,
+        "gapCount": 20,
+        "maxGapSeconds": 7.12
+      },
+      "risks": []
+    },
+    {
+      "id": "youtube",
+      "mp4": {
+        "path": "/Users/zhangshijie/Downloads/The INSANE Truth About YouTube.mp4",
+        "bytes": 137144235,
+        "sha256": "ff0a8dd3cd61f8142992f7caa6b8e50390f3bc4622c8b55e2a9e018be0d465ce"
+      },
+      "formatDurationSeconds": 2373.961723,
+      "video": {
+        "duration": 2373.9,
+        "start": 0,
+        "fps": {
+          "numerator": 30,
+          "denominator": 1
+        },
+        "width": 640,
+        "height": 360,
+        "codec": "h264"
+      },
+      "audio": {
+        "duration": 2373.961723,
+        "start": 0,
+        "sampleRate": 44100,
+        "channels": 2,
+        "codec": "aac"
+      },
+      "srt": {
+        "path": "/Users/zhangshijie/Downloads/[English (auto-generated)] The INSANE Truth About YouTube [DownSub.com].srt",
+        "bytes": 66462,
+        "sha256": "fb78044a3a7d1ca006fbde54930bdacf15f4bc26d8b85dea0446d3d0760c6ecf"
+      },
+      "subtitle": {
+        "cueCount": 942,
+        "firstStart": 0.48,
+        "lastEnd": 2375.72,
+        "coverageSeconds": 2266.03,
+        "coverageRatio": 0.954535188182,
+        "gapCount": 13,
+        "maxGapSeconds": 13.72
+      },
+      "risks": [
+        {
+          "id": "subtitle-media-end-overrun",
+          "severity": "medium",
+          "cueIndex": 942,
+          "subtitleEndSeconds": 2375.72,
+          "mediaEndSeconds": 2373.961723,
+          "overrunSeconds": 1.758277,
+          "requiredAction": "clamp_subtitle_end_to_media_end"
+        }
+      ]
+    },
+    {
+      "id": "tencent",
+      "mp4": {
+        "path": "/Users/zhangshijie/Downloads/The Secret Chinese Company That Owns Everything.mp4",
+        "bytes": 216921846,
+        "sha256": "cdc05660767eebc507d7cc429f1865e590df4b259b2886a8f75cb433add91bd5"
+      },
+      "formatDurationSeconds": 4725.53941,
+      "video": {
+        "duration": 4725.52,
+        "start": 0,
+        "fps": {
+          "numerator": 25,
+          "denominator": 1
+        },
+        "width": 640,
+        "height": 360,
+        "codec": "h264"
+      },
+      "audio": {
+        "duration": 4725.53941,
+        "start": 0,
+        "sampleRate": 44100,
+        "channels": 2,
+        "codec": "aac"
+      },
+      "srt": {
+        "path": "/Users/zhangshijie/Downloads/[English (auto-generated)] The Secret Chinese Company That Owns Everything [DownSub.com].srt",
+        "bytes": 169188,
+        "sha256": "c62fb46daed4f88e2fc7d547f5511f012d66768db021d5b9919c5f6ba5537330"
+      },
+      "subtitle": {
+        "cueCount": 2311,
+        "firstStart": 0.399,
+        "lastEnd": 4724.749,
+        "coverageSeconds": 4610.284,
+        "coverageRatio": 0.975610105006,
+        "gapCount": 23,
+        "maxGapSeconds": 12.11
+      },
+      "risks": []
+    },
+    {
+      "id": "netflix",
+      "mp4": {
+        "path": "/Users/zhangshijie/Downloads/Why Netflix is Collapsing_ The Truth About Netflix's Empire.mp4",
+        "bytes": 158118451,
+        "sha256": "c008ce5d3698a20caf6473adb0d0dde4046cb40db1d663bffc2844666268bf47"
+      },
+      "formatDurationSeconds": 4113.972245,
+      "video": {
+        "duration": 4113.96,
+        "start": 0,
+        "fps": {
+          "numerator": 25,
+          "denominator": 1
+        },
+        "width": 640,
+        "height": 360,
+        "codec": "h264"
+      },
+      "audio": {
+        "duration": 4113.972245,
+        "start": 0,
+        "sampleRate": 44100,
+        "channels": 2,
+        "codec": "aac"
+      },
+      "srt": {
+        "path": "/Users/zhangshijie/Downloads/[English (auto-generated)] Why Netflix is Collapsing The Truth About Netflix's Empire [DownSub.com].srt",
+        "bytes": 150061,
+        "sha256": "28ff6efd3e22f1cb2a8b2294b8912779a9b33283d09900092b4a7f2b0229ea11"
+      },
+      "subtitle": {
+        "cueCount": 2055,
+        "firstStart": 0.8,
+        "lastEnd": 4108.4,
+        "coverageSeconds": 3994.32,
+        "coverageRatio": 0.970915641168,
+        "gapCount": 20,
+        "maxGapSeconds": 26.44
+      },
+      "risks": [
+        {
+          "id": "outro-sync-spot-check",
+          "severity": "low-medium",
+          "subtitleTailGapSeconds": 5.572245,
+          "spotCheckStartSeconds": 4108.4,
+          "spotCheckEndSeconds": 4113.972245,
+          "requiredAction": "spot_check_outro_audio_video_subtitle_alignment"
+        }
+      ]
+    }
+  ]
+}

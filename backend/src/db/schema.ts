@@ -2,10 +2,34 @@
  * Drizzle schema — 精确匹配现有 SQLite 数据库列名
  * 从 PRAGMA table_info() 逆向生成
  */
-import { sqliteTable, text, integer, real, primaryKey } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, text, integer, real, primaryKey, unique, customType } from 'drizzle-orm/sqlite-core'
+import { decryptSecret, encryptSecret } from '../services/secret-crypto.js'
+
+const encryptedText = customType<{ data: string; driverData: string }>({
+  dataType() {
+    return 'text'
+  },
+  fromDriver(value) {
+    return decryptSecret(value)
+  },
+  toDriver(value) {
+    return encryptSecret(value)
+  },
+})
+
+export const mediaAccounts = sqliteTable('media_accounts', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  handle: text('handle'),
+  positioningJson: text('positioning_json').notNull().default('{}'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  deletedAt: text('deleted_at'),
+})
 
 export const dramas = sqliteTable('dramas', {
   id: integer('id').primaryKey({ autoIncrement: true }),
+  mediaAccountId: integer('media_account_id'),
   title: text('title').notNull(),
   videoTitle: text('video_title'),
   description: text('description'),
@@ -20,6 +44,7 @@ export const dramas = sqliteTable('dramas', {
   tags: text('tags'),
   hook: text('hook'),
   metadata: text('metadata'),
+  projectPositioningJson: text('project_positioning_json'),
   introTemplateId: text('intro_template_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -73,6 +98,8 @@ export const episodes = sqliteTable('episodes', {
   narrationMode: text('narration_mode').default('rewrite'),
   openingHook: text('opening_hook'),
   cliffhanger: text('cliffhanger'),
+  creativeBriefJson: text('creative_brief_json'),
+  directorPlanJson: text('director_plan_json'),
   metadata: text('metadata'),
   recapScript: text('recap_script'),
   recapVideoUrl: text('recap_video_url'),
@@ -80,6 +107,17 @@ export const episodes = sqliteTable('episodes', {
   seriesHook: text('series_hook'),
   retentionBeats: text('retention_beats'),
   energyCurve: text('energy_curve'),
+  bgmAudioUrl: text('bgm_audio_url'),
+  secondaryBgmAudioUrl: text('secondary_bgm_audio_url'),
+  bgmPlanJson: text('bgm_plan_json'),
+  preTtsAudioUrl: text('pre_tts_audio_url'),
+  preTtsTitlesJson: text('pre_tts_titles_json'),
+  coverPrompt: text('cover_prompt'),
+  coverImage4x3Url: text('cover_image_4x3_url'),
+  coverImage3x4Url: text('cover_image_3x4_url'),
+  coverImage4x3GenId: integer('cover_image_4x3_gen_id'),
+  coverImage3x4GenId: integer('cover_image_3x4_gen_id'),
+  coverDesignJson: text('cover_design_json'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
@@ -173,6 +211,8 @@ export const storyboards = sqliteTable('storyboards', {
   firstFrameImage: text('first_frame_image'),
   lastFrameImage: text('last_frame_image'),
   referenceImages: text('reference_images'),
+  gridSheetImage: text('grid_sheet_image'),
+  gridCells: text('grid_cells'),
   videoUrl: text('video_url'),
   ttsAudioUrl: text('tts_audio_url'),
   narrationAudioUrl: text('narration_audio_url'),
@@ -214,7 +254,7 @@ export const aiServiceConfigs = sqliteTable('ai_service_configs', {
   provider: text('provider'),
   name: text('name').notNull(),
   baseUrl: text('base_url').notNull(),
-  apiKey: text('api_key').notNull(),
+  apiKey: encryptedText('api_key').notNull(),
   model: text('model'),
   endpoint: text('endpoint'),
   queryEndpoint: text('query_endpoint'),
@@ -248,6 +288,7 @@ export const aiVoices = sqliteTable('ai_voices', {
   description: text('description'),                // 描述数组 JSON
   language: text('language'),                     // 语言标签
   provider: text('provider').notNull(),           // minimax
+  voiceType: text('voice_type').notNull().default('system'), // system / voice_generation / voice_cloning
   createdAt: text('created_at').notNull(),
 })
 
@@ -270,6 +311,7 @@ export const agentConfigs = sqliteTable('agent_configs', {
 export const imageGenerations = sqliteTable('image_generations', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   storyboardId: integer('storyboard_id'),
+  episodeId: integer('episode_id'),
   dramaId: integer('drama_id'),
   sceneId: integer('scene_id'),
   characterId: integer('character_id'),
@@ -336,6 +378,35 @@ export const videoGenerations = sqliteTable('video_generations', {
   updatedAt: text('updated_at').notNull(),
   completedAt: text('completed_at'),
   deletedAt: text('deleted_at'),
+})
+
+// 可复用视频素材库：Grok/egaki 生成的视频片段，按年代/场景/事件打标签供跨集复用
+export const videoAssets = sqliteTable('video_assets', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  dramaId: integer('drama_id'),
+  episodeId: integer('episode_id'),
+  storyboardId: integer('storyboard_id'),
+  prompt: text('prompt'),
+  model: text('model'),
+  provider: text('provider'),
+  mode: text('mode'), // t2v | i2v
+  sourceImage: text('source_image'), // i2v 首帧图
+  era: text('era'), // 年代标签，如 清末1850s
+  sceneTag: text('scene_tag'), // 场景标签，如 战场/朝堂/市井
+  eventTag: text('event_tag'), // 事件标签，如 金田起义/攻城
+  mood: text('mood'),
+  durationSec: real('duration_sec'),
+  resolution: text('resolution'),
+  aspectRatio: text('aspect_ratio'),
+  localPath: text('local_path'),
+  status: text('status').default('pending'), // pending | completed | failed
+  errorMsg: text('error_msg'),
+  useCount: integer('use_count').default(0),
+  lastUsedAt: text('last_used_at'),
+  designJson: text('design_json'), // 镜头设计稿（构思/色彩/光线/情绪/运镜）
+  refsJson: text('refs_json'), // Shot.Cafe 专业构图参考
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 })
 
 export const videoMerges = sqliteTable('video_merges', {
@@ -452,3 +523,152 @@ export const creationTaskDependencies = sqliteTable('creation_task_dependencies'
   dependsOnTaskId: integer('depends_on_task_id').notNull(),
   createdAt: text('created_at').notNull(),
 })
+
+export const episodePublishRecords = sqliteTable('episode_publish_records', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  episodeId: integer('episode_id').notNull(),
+  platform: text('platform').notNull(),
+  status: text('status').notNull().default('pending'),
+  taskId: integer('task_id'),
+  draftUrl: text('draft_url'),
+  errorMessage: text('error_message'),
+  sessionKey: text('session_key'),
+  checkpointJson: text('checkpoint_json'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => ({
+  uniqEpisodePlatform: unique().on(table.episodeId, table.platform),
+}))
+
+// Remotion has its own production domain. These tables intentionally do not
+// reuse storyboard media columns: a Remotion project can be regenerated from
+// the same source episode without changing the legacy episode pipeline.
+export const remotionProjects = sqliteTable('remotion_projects', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  slug: text('slug').notNull().unique(),
+  sourceType: text('source_type').notNull(),
+  sourceEpisodeId: integer('source_episode_id'),
+  sourceDramaId: integer('source_drama_id'),
+  mediaAccountId: integer('media_account_id'),
+  title: text('title').notNull(),
+  sourceSnapshotJson: text('source_snapshot_json').notNull(),
+  positioningSnapshotJson: text('positioning_snapshot_json'),
+  sourceHash: text('source_hash').notNull(),
+  status: text('status').notNull().default('draft'),
+  currentStage: text('current_stage').notNull().default('source_snapshot'),
+  schemaVersion: integer('schema_version').notNull().default(1),
+  version: integer('version').notNull().default(1),
+  progressCurrent: integer('progress_current').default(0),
+  progressTotal: integer('progress_total').default(0),
+  progressMessage: text('progress_message'),
+  finalVideoUrl: text('final_video_url'),
+  metadataJson: text('metadata_json'),
+  errorCode: text('error_code'),
+  errorMessage: text('error_message'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+  deletedAt: text('deleted_at'),
+})
+
+export const remotionStageRuns = sqliteTable('remotion_stage_runs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  projectId: integer('project_id').notNull(),
+  stage: text('stage').notNull(),
+  stageVersion: integer('stage_version').notNull().default(1),
+  status: text('status').notNull().default('pending'),
+  inputHash: text('input_hash'),
+  inputJson: text('input_json'),
+  outputJson: text('output_json'),
+  taskId: integer('task_id'),
+  errorCode: text('error_code'),
+  errorMessage: text('error_message'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+}, (table) => ({
+  uniqProjectStageVersion: unique().on(table.projectId, table.stage, table.stageVersion),
+}))
+
+export const remotionShots = sqliteTable('remotion_shots', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  projectId: integer('project_id').notNull(),
+  sourceStoryboardId: integer('source_storyboard_id'),
+  shotNumber: integer('shot_number').notNull(),
+  title: text('title'),
+  narration: text('narration'),
+  dialogue: text('dialogue'),
+  durationMs: integer('duration_ms').notNull(),
+  shotType: text('shot_type').notNull(),
+  visualPlanJson: text('visual_plan_json').notNull(),
+  sourceEvidenceJson: text('source_evidence_json'),
+  status: text('status').notNull().default('planned'),
+  errorCode: text('error_code'),
+  errorMessage: text('error_message'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  deletedAt: text('deleted_at'),
+}, (table) => ({
+  uniqProjectShotNumber: unique().on(table.projectId, table.shotNumber),
+}))
+
+export const remotionAssets = sqliteTable('remotion_assets', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  projectId: integer('project_id').notNull(),
+  shotId: integer('shot_id'),
+  assetKey: text('asset_key').notNull(),
+  assetType: text('asset_type').notNull(),
+  provider: text('provider'),
+  status: text('status').notNull().default('planned'),
+  promptJson: text('prompt_json'),
+  sourceUrl: text('source_url'),
+  localPath: text('local_path'),
+  thumbnailPath: text('thumbnail_path'),
+  mimeType: text('mime_type'),
+  width: integer('width'),
+  height: integer('height'),
+  durationMs: integer('duration_ms'),
+  imageGenerationId: integer('image_generation_id'),
+  taskId: integer('task_id'),
+  licenseJson: text('license_json'),
+  contentHash: text('content_hash'),
+  version: integer('version').notNull().default(1),
+  metadataJson: text('metadata_json'),
+  errorCode: text('error_code'),
+  errorMessage: text('error_message'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+  deletedAt: text('deleted_at'),
+}, (table) => ({
+  uniqProjectAssetKey: unique().on(table.projectId, table.assetKey, table.version),
+}))
+
+export const remotionRenders = sqliteTable('remotion_renders', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  projectId: integer('project_id').notNull(),
+  shotId: integer('shot_id'),
+  renderKind: text('render_kind').notNull(),
+  status: text('status').notNull().default('queued'),
+  inputHash: text('input_hash'),
+  propsJson: text('props_json'),
+  outputPath: text('output_path'),
+  outputUrl: text('output_url'),
+  width: integer('width'),
+  height: integer('height'),
+  fps: integer('fps'),
+  durationMs: integer('duration_ms'),
+  qaJson: text('qa_json'),
+  taskId: integer('task_id'),
+  errorCode: text('error_code'),
+  errorMessage: text('error_message'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  startedAt: text('started_at'),
+  completedAt: text('completed_at'),
+}, (table) => ({
+  idxProjectRender: unique().on(table.projectId, table.renderKind, table.shotId),
+}))

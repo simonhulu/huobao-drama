@@ -12,8 +12,13 @@ import { eq } from 'drizzle-orm'
 import { now } from '../utils/response.js'
 import { getMusicConfig } from './ai.js'
 import { getMusicAdapter } from './adapters/registry.js'
-import { inferStoryboardAudioProfile } from './audio-profile.js'
+import { inferEpisodeAudioProfiles, inferStoryboardAudioProfile, type EmotionBucket } from './audio-profile.js'
 import { resolveLocalBgmForEmotion, resolveLocalBgmForProfile } from './local-bgm-library.js'
+import {
+  planEpisodeBgmCues,
+  type EpisodeBgmCue,
+  type EpisodeBgmTrack,
+} from './composition/bgm-cue-planner.js'
 import { recordGeneratedMusic } from './music-library.js'
 import { getAudioDuration } from './ffmpeg-compose.js'
 import {
@@ -347,12 +352,34 @@ export async function ensureStoryboardBGM(
   }
 }
 
+export interface EpisodeBgmPlan {
+  tracks: EpisodeBgmTrack[]
+  cues: EpisodeBgmCue[]
+}
+
+function readNumberEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+const EPISODE_BGM_SECONDARY_MIN_SECONDS = readNumberEnv('EPISODE_BGM_SECONDARY_MIN_SECONDS', 30)
+const EPISODE_BGM_SECONDARY_MIN_RATIO = readNumberEnv('EPISODE_BGM_SECONDARY_MIN_RATIO', 0.15)
+
 /**
- * 集级别 BGM：整集使用同一段音乐，避免每个镜头 BGM 重启。
- * 优先复用本集任意已生成的 BGM；否则用第一个有 bgmPrompt 的镜头生成一次，
- * 并更新到全部分镜。
+ * 为整集生成/匹配 1–3 条 BGM，并按情绪幕布生成 cue 计划。
+ *
+ * 设计原则（参考电影配乐）：
+ * - 一部 5 分钟短片通常只有 1–4 个音乐 cue，而不是每个镜头都换音乐。
+ * - 同一情绪幕布内使用同一段音乐 bed 循环或延续。
+ * - 只在真正的情绪/叙事转折点切换音乐。
  */
-export async function ensureEpisodeBGM(episodeId: number, options?: { force?: boolean }): Promise<string | null> {
+export async function ensureEpisodeBgmPlan(
+  episodeId: number,
+  options?: { force?: boolean },
+): Promise<EpisodeBgmPlan | null> {
+  const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   const sbs = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(schema.storyboards.storyboardNumber)
@@ -360,48 +387,152 @@ export async function ensureEpisodeBGM(episodeId: number, options?: { force?: bo
 
   if (sbs.length === 0) return null
 
-  // 复用本集已有 BGM
-  if (!options?.force) {
-    for (const sb of sbs) {
-      if (sb.bgmAudioUrl) {
-        const abs = toAbsPath(sb.bgmAudioUrl)
+  logTaskStart('MusicTask', 'episode-bgm-plan', { episodeId, shots: sbs.length })
+
+  const totalDuration = sbs.reduce((sum, sb) => sum + (sb.duration || 8), 0)
+  const profiles = inferEpisodeAudioProfiles(episodeId)
+
+  // 统计各情绪桶的累计时长
+  const bucketDurations = new Map<EmotionBucket, number>()
+  for (const sb of sbs) {
+    const profile = profiles.get(sb.id)
+    const bucket = profile?.emotionBucket ?? 'neutral'
+    const duration = sb.duration || 8
+    bucketDurations.set(bucket, (bucketDurations.get(bucket) || 0) + duration)
+  }
+
+  const sortedBuckets = Array.from(bucketDurations.entries())
+    .filter(([_, duration]) => duration > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([bucket]) => bucket)
+
+  if (sortedBuckets.length === 0) {
+    logTaskSuccess('MusicTask', 'episode-bgm-plan', { episodeId, reason: 'no-emotion-detected' })
+    return null
+  }
+
+  // 主导情绪桶 + 可选的副情绪桶
+  const primaryBucket = sortedBuckets[0]
+  const secondaryThreshold = Math.max(
+    EPISODE_BGM_SECONDARY_MIN_SECONDS,
+    totalDuration * EPISODE_BGM_SECONDARY_MIN_RATIO,
+  )
+  // 最多再选一条副情绪音乐，避免引入过多轨道导致音乐碎片化
+  const secondaryBuckets = sortedBuckets
+    .slice(1)
+    .filter(bucket => (bucketDurations.get(bucket) || 0) >= secondaryThreshold)
+    .slice(0, 1)
+
+  const selectedBuckets = [primaryBucket, ...secondaryBuckets]
+
+  async function resolveTrackForBucket(bucket: EmotionBucket): Promise<EpisodeBgmTrack | null> {
+    const repSb = sbs.find(sb => (profiles.get(sb.id)?.emotionBucket ?? 'neutral') === bucket)
+    const profile = repSb ? profiles.get(repSb.id) : undefined
+    const prompt = repSb?.bgmPrompt?.trim() || profile?.bgmPrompt || ''
+    const intensity = profile?.bgmIntensity ?? 'medium'
+
+    // 1. 复用本集已保存的对应轨道（非强制模式下）
+    if (!options?.force && episode) {
+      const existingPrimary = episode.bgmAudioUrl
+      const existingSecondary = episode.secondaryBgmAudioUrl
+      if (bucket === primaryBucket && existingPrimary) {
+        const abs = toAbsPath(existingPrimary)
         if (fs.existsSync(abs)) {
-          // 统一全部分镜使用同一段 BGM
-          db.update(schema.storyboards)
-            .set({ bgmAudioUrl: sb.bgmAudioUrl, updatedAt: now() })
-            .where(eq(schema.storyboards.episodeId, episodeId))
-            .run()
-          logTaskProgress('MusicTask', 'reuse-episode-bgm', { episodeId, bgmAudioUrl: sb.bgmAudioUrl })
-          return sb.bgmAudioUrl
+          logTaskProgress('MusicTask', 'reuse-primary-track', { episodeId, bucket, bgmAudioUrl: existingPrimary })
+          return { path: existingPrimary, emotionBucket: bucket, role: 'primary' }
+        }
+      }
+      if (secondaryBuckets.includes(bucket) && existingSecondary) {
+        const abs = toAbsPath(existingSecondary)
+        if (fs.existsSync(abs)) {
+          logTaskProgress('MusicTask', 'reuse-secondary-track', { episodeId, bucket, bgmAudioUrl: existingSecondary })
+          return { path: existingSecondary, emotionBucket: bucket, role: 'secondary' }
         }
       }
     }
-  }
 
-  const first = sbs.find(sb => sb.bgmPrompt?.trim())
-  if (!first) return null
+    // 2. 从本地素材库匹配
+    const localBgm = resolveLocalBgmForProfile(bucket, {
+      prompt,
+      intensity,
+      seed: `${episodeId}:${bucket}`,
+    })
+    if (localBgm) {
+      logTaskProgress('MusicTask', 'episode-local-bgm', { episodeId, bucket, bgmAudioUrl: localBgm })
+      return { path: localBgm, emotionBucket: bucket, role: bucket === primaryBucket ? 'primary' : 'secondary' }
+    }
 
-  const bgmAudioUrl = await generateBGM(first.bgmPrompt!.trim())
-  const firstProfile = inferStoryboardAudioProfile(first.id)
-  let duration = 0
-  if (bgmAudioUrl) {
+    // 3. 生成新 BGM（失败时回退本地兜底）
+    if (!prompt) return null
     try {
-      duration = await getAudioDuration(toAbsPath(bgmAudioUrl))
-    } catch (durErr: any) {
-      logTaskProgress('MusicTask', 'duration-read-failed', { episodeId, error: durErr.message || String(durErr) })
+      const generated = await generateBGM(prompt)
+      let duration = 0
+      if (generated) {
+        try { duration = await getAudioDuration(toAbsPath(generated)) } catch {}
+      }
+      recordGeneratedMusic(generated, {
+        prompt,
+        emotionBucket: bucket,
+        intensity,
+        episodeId,
+        duration,
+      })
+      logTaskProgress('MusicTask', 'episode-generated-bgm', { episodeId, bucket, bgmAudioUrl: generated })
+      return { path: generated, emotionBucket: bucket, role: bucket === primaryBucket ? 'primary' : 'secondary' }
+    } catch (err: any) {
+      logTaskProgress('MusicTask', 'episode-generation-fallback', { episodeId, bucket, error: err.message || String(err) })
+      const fallback = resolveLocalBgmForEmotion(bucket)
+      if (fallback) {
+        return { path: fallback, emotionBucket: bucket, role: bucket === primaryBucket ? 'primary' : 'secondary' }
+      }
+      return null
     }
   }
-  recordGeneratedMusic(bgmAudioUrl, {
-    prompt: first.bgmPrompt!.trim(),
-    emotionBucket: firstProfile.emotionBucket,
-    intensity: firstProfile.bgmIntensity,
-    episodeId,
-    duration,
-  })
-  db.update(schema.storyboards)
-    .set({ bgmAudioUrl, updatedAt: now() })
-    .where(eq(schema.storyboards.episodeId, episodeId))
+
+  const tracks: EpisodeBgmTrack[] = []
+  for (const bucket of selectedBuckets) {
+    const track = await resolveTrackForBucket(bucket)
+    if (track) tracks.push(track)
+  }
+
+  if (tracks.length === 0) {
+    logTaskSuccess('MusicTask', 'episode-bgm-plan', { episodeId, reason: 'no-tracks-resolved' })
+    return null
+  }
+
+  // 如果只有一个情绪桶，全部轨道都设为主情绪
+  if (tracks.length === 1) {
+    tracks[0].role = 'primary'
+    tracks[0].emotionBucket = primaryBucket
+  }
+
+  const cues = planEpisodeBgmCues(
+    sbs.map(sb => ({ id: sb.id, videoDuration: sb.duration || 8 })),
+    profiles,
+    tracks,
+    { minActDuration: readNumberEnv('EPISODE_BGM_MIN_ACT_SECONDS', 25) },
+  )
+
+  const primaryTrack = tracks.find(t => t.role === 'primary')
+  const secondaryTrack = tracks.find(t => t.role === 'secondary')
+
+  const plan: EpisodeBgmPlan = { tracks, cues }
+  db.update(schema.episodes)
+    .set({
+      bgmAudioUrl: primaryTrack?.path ?? tracks[0].path,
+      secondaryBgmAudioUrl: secondaryTrack?.path ?? null,
+      bgmPlanJson: JSON.stringify(plan),
+      updatedAt: now(),
+    })
+    .where(eq(schema.episodes.id, episodeId))
     .run()
-  logTaskSuccess('MusicTask', 'episode-bgm-generated', { episodeId, bgmAudioUrl })
-  return bgmAudioUrl
+
+  logTaskSuccess('MusicTask', 'episode-bgm-plan', {
+    episodeId,
+    tracks: tracks.length,
+    cues: cues.length,
+    primaryBucket,
+    secondaryBuckets,
+  })
+  return plan
 }

@@ -283,3 +283,32 @@ test('startTaskWorkerLoop can execute tasks concurrently', async () => {
   assert.equal(running, 0)
   assert.equal(maxRunning, 4)
 })
+
+test('runWorkerOnce respects types filter and skips non-matching tasks', async () => {
+  clearTaskHandlers()
+  registerTaskHandler('test.allowed', {
+    resumable: true,
+    maxAttempts: 1,
+    run: async () => ({ allowed: true }),
+  })
+  registerTaskHandler('test.blocked', {
+    resumable: true,
+    maxAttempts: 1,
+    run: async () => ({ blocked: true }),
+  })
+  const allowedTask = createTask({
+    type: 'test.allowed',
+    idempotencyKey: 'worker-types-allowed',
+  })
+  const blockedTask = createTask({
+    type: 'test.blocked',
+    idempotencyKey: 'worker-types-blocked',
+  })
+
+  const ran = await runWorkerOnce({ workerId: 'worker-types', types: ['test.allowed'] })
+
+  assert.equal(ran, true)
+  assert.equal(getTask(allowedTask.id)?.status, 'succeeded')
+  assert.equal(getTask(blockedTask.id)?.status, 'queued')
+  assert.equal(getTask(blockedTask.id)?.leaseOwner, null)
+})

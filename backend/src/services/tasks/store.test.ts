@@ -97,6 +97,28 @@ test('listTasks filters by episode and status, and requestCancel marks the task'
   assert.equal(listed[0].cancelRequested, true)
 })
 
+test('listTasks activeOnly returns only queued and running tasks', () => {
+  const queued = createTask({
+    type: 'test.active.queued',
+    idempotencyKey: 'active-queued',
+  })
+  const running = createTask({
+    type: 'test.active.running',
+    idempotencyKey: 'active-running',
+  })
+  transitionTask(running.id, 'running')
+  const succeeded = createTask({
+    type: 'test.active.succeeded',
+    idempotencyKey: 'active-succeeded',
+  })
+  transitionTask(succeeded.id, 'succeeded')
+
+  const activeIds = new Set(listTasks({ activeOnly: true }).map(task => task.id))
+  assert.equal(activeIds.has(queued.id), true)
+  assert.equal(activeIds.has(running.id), true)
+  assert.equal(activeIds.has(succeeded.id), false)
+})
+
 test('acquireNextQueuedTask orders by priority desc, scheduled_at asc, id asc', () => {
   const low = createTask({
     type: 'image.generate',

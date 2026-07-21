@@ -176,7 +176,8 @@ test('POST /:id/smart-split creates episodes from structured AI output', async (
     .orderBy(schema.episodes.episodeNumber)
     .all()
 
-  // Tight pacing merges the two short episodes into one based on actual text duration.
+  // Pacing mode no longer amplifies duration; the two short episodes are merged
+  // and the duration is estimated from actual text length, clamped to the preset min.
   assert.equal(rows.length, 1)
   const row = rows[0]!
   assert.equal(row.episodeNumber, 1)
@@ -185,7 +186,7 @@ test('POST /:id/smart-split creates episodes from structured AI output', async (
   assert.equal(row.audioConfigId, audioConfigId)
   assert.equal(row.aspectRatio, '9:16')
   assert.equal(row.renderMode, 'image_story')
-  assert.ok(row.duration && row.duration >= 90)
+  assert.ok(row.duration && row.duration >= 60)
   assert.match(
     row.content || '',
     /婚礼前夜，她还在试戒指，未婚夫却突然消失。/,
@@ -197,6 +198,13 @@ test('POST /:id/smart-split creates episodes from structured AI output', async (
   assert.match(row.description || '', /婚礼前夜，新娘发现未婚夫突然失踪/)
   assert.equal(row.openingHook, null)
   assert.equal(row.cliffhanger, null)
+
+  assert.ok(Array.isArray(json.data.cover_task_ids))
+  assert.equal(json.data.cover_task_ids.length, json.data.created_episodes.length)
+  const coverTasks = db.select().from(schema.creationTasks)
+    .where(eq(schema.creationTasks.type, 'cover.generate'))
+    .all()
+  assert.equal(coverTasks.length, json.data.created_episodes.length)
 })
 
 test('POST /:id/smart-split rejects invalid request body', async () => {
@@ -340,4 +348,7 @@ test('POST /:id/smart-split reuses the default empty placeholder episode', async
   assert.equal(row.title, '婚礼前夜')
   assert.match(row.content || '', /婚礼前夜/)
   assert.match(row.content || '', /这个人从来没有登记过身份。/)
+
+  assert.ok(Array.isArray(json.data.cover_task_ids))
+  assert.equal(json.data.cover_task_ids.length, json.data.created_episodes.length)
 })

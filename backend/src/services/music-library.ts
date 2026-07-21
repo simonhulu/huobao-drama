@@ -84,6 +84,12 @@ function listMusicFiles(): MusicFileInfo[] {
       if (stat.isDirectory()) {
         walk(fullPath)
       } else if (/\.(mp3|m4a|wav|ogg|flac)$/i.test(entry)) {
+        const ext = path.extname(entry).toLowerCase()
+        // If an .ogg file has an .mp3 sibling, prefer the MP3 for browser playback.
+        if (ext === '.ogg') {
+          const mp3Sibling = fullPath.replace(/\.ogg$/i, '.mp3')
+          if (fs.existsSync(mp3Sibling)) continue
+        }
         const relFromMusic = path.relative(MUSIC_DIR, fullPath).replace(/\\/g, '/')
         results.push({
           filename: entry,

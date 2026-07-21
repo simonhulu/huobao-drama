@@ -1,4 +1,7 @@
 import './load-env.js'
+import { installGlobalJsonRepair } from './utils/json-repair.js'
+installGlobalJsonRepair()
+
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { Hono } from 'hono'
@@ -29,12 +32,16 @@ import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
 import library from './routes/library.js'
 import introTemplates from './routes/introTemplates.js'
+import remotion from './routes/remotion.js'
+import mediaAccounts from './routes/mediaAccounts.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { startTaskWorkerLoop } from './services/tasks/worker.js'
+import { listRegisteredTaskTypes } from './services/tasks/registry.js'
 import { registerAgentRunHandler } from './services/tasks/handlers/agent-run.js'
 import { registerImageGenerateHandler } from './services/tasks/handlers/image-generate.js'
 import { registerVideoGenerateHandler } from './services/tasks/handlers/video-generate.js'
 import { registerTTSGenerateHandlers } from './services/tasks/handlers/tts-generate.js'
+import { registerTTSPreGenerateHandler } from './services/tasks/handlers/tts-pre-generate.js'
 import { registerGridHandlers } from './services/tasks/handlers/grid-generate.js'
 import { registerComposeStoryboardHandler } from './services/tasks/handlers/compose-storyboard.js'
 import { registerComposeEpisodeHandler } from './services/tasks/handlers/compose-episode.js'
@@ -44,6 +51,9 @@ import { registerDramaPreProductionHandler } from './services/tasks/handlers/dra
 import { registerHookDesignHandler } from './services/tasks/handlers/hook-design.js'
 import { registerIntroComposeHandler } from './services/tasks/handlers/intro-compose.js'
 import { registerRecapComposeHandler } from './services/tasks/handlers/recap-compose.js'
+import { registerCoverGenerateHandler } from './services/tasks/handlers/cover-generate.js'
+import { registerPublishWeChatChannelsHandler } from './services/tasks/handlers/publish-wechat-channels.js'
+import { registerPublishDouyinHandler } from './services/tasks/handlers/publish-douyin.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -86,6 +96,8 @@ api.route('/health', health)
 api.route('/ai-voices', aiVoices)
 api.route('/library', library)
 api.route('/intro-templates', introTemplates)
+api.route('/remotion', remotion)
+api.route('/media-accounts', mediaAccounts)
 
 app.route('/api/v1', api)
 
@@ -93,6 +105,7 @@ registerAgentRunHandler()
 registerImageGenerateHandler()
 registerVideoGenerateHandler()
 registerTTSGenerateHandlers()
+registerTTSPreGenerateHandler()
 registerGridHandlers()
 registerComposeStoryboardHandler()
 registerComposeEpisodeHandler()
@@ -102,18 +115,42 @@ registerDramaPreProductionHandler()
 registerHookDesignHandler()
 registerIntroComposeHandler()
 registerRecapComposeHandler()
+registerCoverGenerateHandler()
+registerPublishWeChatChannelsHandler()
+registerPublishDouyinHandler()
 
-let worker: ReturnType<typeof startTaskWorkerLoop> | undefined
+const workers: ReturnType<typeof startTaskWorkerLoop>[] = []
 if (process.env.TASK_WORKER_DISABLED !== '1') {
-  const workerConcurrency = Math.max(1, Number(process.env.TASK_WORKER_CONCURRENCY || 8))
-  worker = startTaskWorkerLoop({ workerId: `worker-${process.pid}`, concurrency: workerConcurrency })
+  const imageWorkerConcurrency = Math.max(1, Number(process.env.IMAGE_TASK_WORKER_CONCURRENCY || 4))
+  const generalWorkerConcurrency = Math.max(1, Number(process.env.GENERAL_TASK_WORKER_CONCURRENCY || process.env.TASK_WORKER_CONCURRENCY || 12))
+
+  // Image generation gets its own pool so TTS/compose/merge tasks cannot starve it.
+  // Maintenance is disabled here because the general pool already runs global recovery.
+  workers.push(startTaskWorkerLoop({
+    workerId: `worker-image-${process.pid}`,
+    concurrency: imageWorkerConcurrency,
+    types: ['image.generate', 'image.episode'],
+    runMaintenance: false,
+  }))
+
+  // Everything else shares the general pool.
+  const allTypes = listRegisteredTaskTypes()
+  const imageTypes = new Set(['image.generate', 'image.episode'])
+  const generalTypes = allTypes.filter(type => !imageTypes.has(type))
+  if (generalTypes.length > 0) {
+    workers.push(startTaskWorkerLoop({
+      workerId: `worker-general-${process.pid}`,
+      concurrency: generalWorkerConcurrency,
+      types: generalTypes,
+    }))
+  }
 }
 
 async function shutdown(signal: string) {
-  console.log(`[shutdown] received ${signal}, waiting for worker to finish...`)
+  console.log(`[shutdown] received ${signal}, waiting for ${workers.length} worker pool(s) to finish...`)
   try {
     const timeoutMs = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS) || 120_000
-    await worker?.stop(timeoutMs)
+    await Promise.all(workers.map(worker => worker.stop(timeoutMs)))
   } catch (error) {
     console.error('[shutdown] worker stop error:', error)
   }
@@ -128,8 +165,20 @@ process.once('SIGTERM', () => void shutdown('SIGTERM'))
 app.route('/webhooks', webhooks)
 
 // Serve static files (storage)
+// Hono's built-in MIME table does not include .m4a, so it serves generated TTS
+// audio as application/octet-stream and browsers refuse to play it. Patch the
+// Content-Type after serveStatic returns for any .m4a request.
+app.use('/static/*', async (c, next) => {
+  await next()
+  if (c.req.path.toLowerCase().endsWith('.m4a')) {
+    const ct = c.res.headers.get('Content-Type')
+    if (!ct || ct === 'application/octet-stream') {
+      c.res.headers.set('Content-Type', 'audio/mp4')
+    }
+  }
+})
 app.use('/static/*', serveStatic({ root: path.join(projectRoot, 'data') }))
-app.use('/sfx/*', serveStatic({ root: path.join(projectRoot, 'data', 'sfx') }))
+app.use('/sfx/*', serveStatic({ root: path.join(projectRoot, 'data') }))
 
 // Serve frontend (production build)
 const distPath = path.join(projectRoot, 'frontend', 'dist')
@@ -137,5 +186,6 @@ app.use('*', serveStatic({ root: distPath }))
 app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
 
 const port = Number(process.env.PORT || 5679)
-console.log(`🚀 Huobao Drama TS server on http://localhost:${port}`)
-serve({ fetch: app.fetch, port })
+const hostname = process.env.HOST || '127.0.0.1'
+console.log(`Huobao Drama TS server on http://${hostname}:${port}`)
+serve({ fetch: app.fetch, port, hostname })

@@ -37,7 +37,7 @@ export function createHookDesignHandler(): TaskHandler<HookDesignPayload> {
       if (!episodeId) throw new Error('episode_id is required')
 
       logTaskStart('HookDesignTask', 'hook-design', { episodeId })
-      ctx.progress('Designing hooks and recap scripts', 0, 1)
+      ctx.progress('Designing hooks', 0, 1)
 
       const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
       if (!ep) throw new Error(`Episode ${episodeId} not found`)
@@ -75,18 +75,34 @@ export function createHookDesignHandler(): TaskHandler<HookDesignPayload> {
         plotChain: sharedPlotChain ?? [],
       })
 
+      function clampRecapScript(text: string | undefined): string | undefined {
+        if (!text) return text
+        if (text.length <= 50) return text
+        // Hard truncate at 48 chars, preferring a sentence/clause boundary.
+        let cut = 48
+        while (cut > 10 && !['。', '，', '；', '！', '？', '.', ',', ';', '!', '?'].includes(text[cut])) {
+          cut--
+        }
+        if (cut <= 10) cut = 48
+        const trimmed = text.slice(0, cut + 1).replace(/[，。；！？,.;!?]+$/, '')
+        return trimmed + '。'
+      }
+
       const now = new Date().toISOString()
       for (const hook of result.episodeHooks) {
         const target = allEpisodes.find(e => e.episodeNumber === hook.episodeNumber)
         if (!target) continue
+        const updates: Record<string, any> = {
+          openingHook: hook.openingHook,
+          cliffhanger: hook.cliffhangerHook,
+          seriesHook: result.seriesHook,
+          updatedAt: now,
+        }
+        if (hook.recapScript !== undefined) {
+          updates.recapScript = clampRecapScript(hook.recapScript)
+        }
         db.update(schema.episodes)
-          .set({
-            openingHook: hook.openingHook,
-            cliffhanger: hook.cliffhangerHook,
-            recapScript: hook.recapScript,
-            seriesHook: result.seriesHook,
-            updatedAt: now,
-          })
+          .set(updates)
           .where(eq(schema.episodes.id, target.id))
           .run()
       }

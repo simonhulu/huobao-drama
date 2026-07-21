@@ -1,0 +1,18 @@
+This is a second-pass audit, not a request for a longer explanation. Re-open all five target frames and change the first-pass JSON only when the pixels support it.
+
+Audit the boundary first. If the established composition is replaced, do not call it within_setup_change. A graphic or blur bridge between two designed compositions is graphic_transition or blur_bridge; an irregular matte or shape reveal from black is matte_transition; a resolved frame-to-frame replacement is hard_cut; and a black boundary without a visible intermediate state is ambiguous. Do not infer a fade from a black frame alone.
+
+Apply these visual disambiguation rules before choosing an editClass:
+
+- If a target sample contains recognizable remnants of the outgoing graphic and recognizable parts of the incoming designed graphic at the same time, especially with defocus or smeared edges, classify the boundary as blur_bridge or graphic_transition, never hard_cut. A map/title dissolving into a monitor frame and an eye graphic giving way to an entering word are examples of this same rule.
+- If black gives way to a white or light field through irregular black shapes, blobs, cut-out silhouettes, or an uneven aperture, classify it as matte_transition. The irregular matte is the transition evidence even when the new title is not yet readable.
+- If the source title is present in the first samples and the frame is fully black in the later samples, with no sampled partial-opacity or intermediate graphic state, classify it as ambiguous. A black endpoint alone is not enough evidence for fade_to_black.
+- If red/cyan channel separation, color fringing, geometric warp, scanline-like displacement, or other chromatic deformation is visible before the next setup, classify it as distortion (graphic_transition is acceptable only when the deformation is not the dominant evidence). Do not reduce visible glitch or chromatic warp to hard_cut.
+- Inspect each target frame for footage replacement even when a persistent title, date, or overlay remains unchanged. If the underlying archival/live-action image changes discontinuously while the overlay persists, classify it as hard_cut and describe the footage subject in the evidence.
+- Treat a horizontal colored bar, an underline, globe or line-art fragments, an eye aperture, and a small caption as independently visible layers. When one appears, exits, moves, or finishes assembling, create its own change object; do not hide it inside a generic shape/background change.
+- For globe or line-art assembly, name the subject as globe, globe outline, globe fragments, world graphic, or line art and use layer_entry, layer_transform, mask_reveal, or crop_reveal as supported by the frames. For a colored bar, name purple bar or purple underline. For the eye, name eye graphic or eye aperture.
+- Re-check persistent compositions frame by frame. If an underlying image, counter, or graphic changes while the rest of the setup remains, use within_setup_change and identify the changed layer; do not call it no_local_delta merely because the overall layout is familiar.
+
+Audit stability next. If all five target frames retain the same completed state, use no_local_delta and remove speculative changes and tracks. For real within-setup changes, use concrete nouns and quote visible words, logos, map or globe graphics, captions, and semantic UI numbers. Every required visible layer change should have its own change object with an observed mechanism.
+
+Keep continuousTracks only when the same layer behavior is clearly visible across at least two overview intervals and does not cross a definite boundary. Keep unitEvidence as a static overview inventory, including the layer categories and readable text that are actually visible.

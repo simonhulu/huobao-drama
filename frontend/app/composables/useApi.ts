@@ -75,6 +75,14 @@ export const dramaAPI = {
   preProduction: (id: number) => api.post(`/dramas/${id}/pre-production`, {}),
 }
 
+export const mediaAccountAPI = {
+  list: () => api.get<any[]>('/media-accounts'),
+  get: (id: number) => api.get<any>(`/media-accounts/${id}`),
+  create: (data: any) => api.post('/media-accounts', data),
+  update: (id: number, data: any) => api.put(`/media-accounts/${id}`, data),
+  del: (id: number) => api.del(`/media-accounts/${id}`),
+}
+
 export const episodeAPI = {
   create: (data: any) => api.post('/episodes', data),
   update: (id: number, data: any) => api.put(`/episodes/${id}`, data),
@@ -85,6 +93,14 @@ export const episodeAPI = {
   storyboards: (id: number) => api.get(`/episodes/${id}/storyboards`),
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
   generateNarrations: (id: number) => api.post(`/episodes/${id}/generate-narrations`),
+  generateCovers: (id: number, data?: { prompt?: string; config_id?: number; frame_type?: string; cover_design?: any }) => api.post(`/episodes/${id}/generate-covers`, data || {}),
+  covers: (id: number) => api.get(`/episodes/${id}/covers`),
+  enhanceCoverPrompt: (id: number, data?: { prompt?: string }) => api.post(id ? `/episodes/${id}/enhance-cover-prompt` : '/episodes/enhance-cover-prompt', data || {}),
+  publishWeChatChannels: (id: number) => api.post(`/episodes/${id}/publish/wechat-channels`),
+  confirmPublishWeChatChannels: (id: number, taskId: number) => api.post(`/episodes/${id}/publish/wechat-channels/confirm`, { task_id: taskId }),
+  publishDouyin: (id: number, publish = false) => api.post(`/episodes/${id}/publish/douyin`, { publish }),
+  confirmPublishDouyin: (id: number, taskId: number) => api.post(`/episodes/${id}/publish/douyin/confirm`, { task_id: taskId }),
+  publishRecords: (id: number) => api.get(`/episodes/${id}/publish-records`),
 }
 
 export const storyboardAPI = {
@@ -124,13 +140,29 @@ export const gridAPI = {
   status: (id: number) => api.get(`/grid/status/${id}`),
   split: (d: any) => api.post('/grid/split', d),
 }
+export const gridEpisodeAPI = {
+  generate: (epId: number, d?: { force?: boolean; onlyStoryboardIds?: number[] }) =>
+    api.post(`/grid/episode/${epId}/generate`, d ?? {}),
+  render: (epId: number) => api.post(`/grid/episode/${epId}/render`, {}),
+  cells: (epId: number) => api.get(`/grid/episode/${epId}/cells`),
+  productions: (offset = 0, limit = 10, filters?: { account_id?: number | null; drama_id?: number | null; status?: string | null; q?: string | null }) => {
+    const query = new URLSearchParams()
+    query.set('offset', String(offset))
+    query.set('limit', String(limit))
+    if (filters?.account_id) query.set('account_id', String(filters.account_id))
+    if (filters?.drama_id) query.set('drama_id', String(filters.drama_id))
+    if (filters?.status) query.set('status', filters.status)
+    if (filters?.q) query.set('q', filters.q)
+    return api.get<{ items: any[]; total: number }>(`/grid/productions?${query.toString()}`)
+  },
+}
 export const videoAPI = {
   generate: (d: any) => api.post('/videos', d),
   get: (id: number) => api.get(`/videos/${id}`),
 }
 export const composeAPI = {
-  shot: (id: number, force = false) => api.post(`/compose/storyboards/${id}/compose`, { force }),
-  all: (epId: number, force = false) => api.post(`/compose/episodes/${epId}/compose-all`, { force }),
+  shot: (id: number, force = false, forceAudio = false) => api.post(`/compose/storyboards/${id}/compose`, { force, force_audio: forceAudio }),
+  all: (epId: number, force = false, forceAudio = false) => api.post(`/compose/episodes/${epId}/compose-all`, { force, force_audio: forceAudio }),
   status: (epId: number) => api.get(`/compose/episodes/${epId}/compose-status`),
   generateSubtitles: (epId: number) => api.post(`/compose/episodes/${epId}/subtitles`),
   subtitlePreview: (sbId: number) => api.post(`/compose/storyboards/${sbId}/subtitle-preview`),
@@ -143,15 +175,21 @@ export const ttsAPI = {
 export const mergeAPI = {
   merge: (epId: number) => api.post(`/merge/episodes/${epId}/merge`),
   status: (epId: number) => api.get(`/merge/episodes/${epId}/merge`),
+  downloadUrl: (epId: number, absolute = false) => {
+    const path = `/api/v1/merge/episodes/${epId}/download-video`
+    if (absolute && process.dev) return `http://127.0.0.1:5679${path}`
+    return path
+  },
 }
 export const taskAPI = {
   create: (d: any) => api.post('/tasks', d),
-  list: (params?: { drama_id?: number; episode_id?: number; status?: string; type?: string }) => {
+  list: (params?: { drama_id?: number; episode_id?: number; status?: string; type?: string; active_only?: boolean }) => {
     const query = new URLSearchParams()
     if (params?.drama_id) query.set('drama_id', String(params.drama_id))
     if (params?.episode_id) query.set('episode_id', String(params.episode_id))
     if (params?.status) query.set('status', params.status)
     if (params?.type) query.set('type', params.type)
+    if (params?.active_only) query.set('active_only', 'true')
     return api.get(`/tasks${query.size ? `?${query.toString()}` : ''}`)
   },
   get: (id: number) => api.get(`/tasks/${id}`),
@@ -200,6 +238,8 @@ export const skillsAPI = {
 export const voicesAPI = {
   list: (provider?: string) => api.get(`/ai-voices${provider ? `?provider=${provider}` : ''}`),
   sync: () => api.post('/ai-voices/sync', {}),
+  design: (data: { config_id?: number; voice_name?: string; prompt: string; preview_text: string; aigc_watermark?: boolean }) =>
+    api.post('/ai-voices/design', data),
   autoAssign: (episodeId: number, overwrite = false) =>
     api.post('/characters/auto-assign-voices', { episode_id: episodeId, overwrite }),
   dedupePitches: (episodeId: number) =>
@@ -219,4 +259,19 @@ export const libraryAPI = {
 export const healthAPI = {
   workers: () => api.get<{ healthy_count: number; total_count: number; timeout_ms: number; workers: any[] }>('/health/workers'),
   imageMetrics: () => api.get<{ total: number; pending: number; processing: number; completed: number; failed: number; completed_last_24h: number }>('/metrics/image-generation'),
+}
+
+export const remotionAPI = {
+  tree: () => api.get<any[]>('/remotion/projects/tree'),
+  list: (params?: { source_episode_id?: number; status?: string }) => {
+    const query = new URLSearchParams()
+    if (params?.source_episode_id) query.set('source_episode_id', String(params.source_episode_id))
+    if (params?.status) query.set('status', params.status)
+    return api.get<any[]>(`/remotion/projects${query.size ? `?${query.toString()}` : ''}`)
+  },
+  get: (id: number) => api.get<any>(`/remotion/projects/${id}`),
+  stages: (id: number) => api.get<any[]>(`/remotion/projects/${id}/stages`),
+  assets: (id: number) => api.get<any[]>(`/remotion/projects/${id}/assets`),
+  tasks: (id: number) => api.get<any[]>(`/remotion/projects/${id}/tasks`),
+  renders: (id: number) => api.get<any[]>(`/remotion/projects/${id}/renders`),
 }

@@ -24,16 +24,22 @@ import { now } from '../utils/response.js'
 import { AiProviderError, classifyImageError } from '../utils/error-taxonomy.js'
 import { syncRelatedImageTables } from './image-generation-sync.js'
 import { aiFetch } from './ai-client.js'
-import { downloadFile, readImageAsCompressedDataUrl, saveBase64Image } from '../utils/storage.js'
+import { downloadFile, saveBase64Image } from '../utils/storage.js'
 import { getImageAdapter } from './adapters/registry.js'
 import { normalizeReferenceImages } from './adapters/reference-images.js'
 import { uploadAPIMartImage } from './adapters/apimart-upload.js'
+import {
+  getEgakiChatGptImageJob,
+  submitEgakiChatGptImageJob,
+  waitForEgakiChatGptImageJob,
+} from './egaki-chatgpt-image.js'
 import type { AIConfig } from './adapters/types'
 import type { TaskContext } from './tasks/types.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
 
 interface GenerateImageParams {
   storyboardId?: number
+  episodeId?: number
   dramaId?: number
   sceneId?: number
   characterId?: number
@@ -42,6 +48,7 @@ interface GenerateImageParams {
   size?: string
   referenceImages?: string[]
   frameType?: string
+  imageType?: string
   configId?: number
   seed?: number
   style?: string
@@ -101,11 +108,20 @@ export class ImageGenerationLimiter {
 const IMAGE_GENERATION_CONCURRENCY = Math.max(1, Number(process.env.IMAGE_GENERATION_CONCURRENCY || 8))
 const IMAGE_GENERATION_INTERVAL_MS = Math.max(1, Number(process.env.IMAGE_GENERATION_INTERVAL_MS || 1000))
 const IMAGE_GENERATION_INTERVAL_CAP = Math.max(1, Number(process.env.IMAGE_GENERATION_INTERVAL_CAP || 8))
+const IMAGE_POLL_TIMEOUT_MS = Math.max(60_000, Number(process.env.IMAGE_POLL_TIMEOUT_MS || 1_200_000))
+const EGAKI_IMAGE_CONCURRENCY = Math.max(1, Number(process.env.EGAKI_IMAGE_CONCURRENCY || 2))
+const EGAKI_IMAGE_INTERVAL_MS = Math.max(1, Number(process.env.EGAKI_IMAGE_INTERVAL_MS || 60_000))
+const EGAKI_IMAGE_INTERVAL_CAP = Math.max(1, Number(process.env.EGAKI_IMAGE_INTERVAL_CAP || 4))
 
 const imageGenerationLimiter = new ImageGenerationLimiter(
   IMAGE_GENERATION_CONCURRENCY,
   IMAGE_GENERATION_INTERVAL_MS,
   IMAGE_GENERATION_INTERVAL_CAP,
+)
+const egakiImageGenerationLimiter = new ImageGenerationLimiter(
+  EGAKI_IMAGE_CONCURRENCY,
+  EGAKI_IMAGE_INTERVAL_MS,
+  EGAKI_IMAGE_INTERVAL_CAP,
 )
 
 class TerminalImagePollError extends Error {
@@ -123,9 +139,11 @@ export function createImageGenerationRecord(params: GenerateImageParams): number
 
   const res = db.insert(schema.imageGenerations).values({
     storyboardId: params.storyboardId,
+    episodeId: params.episodeId,
     dramaId: params.dramaId,
     sceneId: params.sceneId,
     characterId: params.characterId,
+    imageType: params.imageType,
     prompt: params.prompt,
     model: params.model || config.model,
     provider: config.provider,
@@ -222,15 +240,39 @@ export async function executeImageGeneration(
 }
 
 async function runImageGeneration(id: number, config: AIConfig, taskContext?: TaskContext<any>): Promise<void> {
-  const adapter = getImageAdapter(config)
-
   try {
     const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
     const record = rows[0]
     if (!record) return
     if (record.status === 'completed' && record.localPath) return
 
-    if (record.taskId && record.status === 'processing') {
+    if (record.taskId && record.status === 'processing' && config.provider.toLowerCase() === 'egaki-chatgpt') {
+      const existingJob = getEgakiChatGptImageJob(record.taskId)
+      if (existingJob) {
+        logTaskProgress('ImageTask', 'egaki-chatgpt-local-poll-resume', {
+          id,
+          taskId: record.taskId,
+          provider: config.provider,
+          status: existingJob.status,
+        })
+        const localPath = await waitForEgakiChatGptImageJob(record.taskId, {
+          signal: taskContext?.signal,
+          timeoutMs: IMAGE_POLL_TIMEOUT_MS,
+        })
+        db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, null))
+        logTaskSuccess('ImageTask', 'egaki-chatgpt-saved', { id, provider: config.provider, taskId: record.taskId, localPath })
+        return
+      }
+      logTaskWarn('ImageTask', 'egaki-chatgpt-local-job-missing-resubmit', {
+        id,
+        taskId: record.taskId,
+        provider: config.provider,
+      })
+      db.update(schema.imageGenerations)
+        .set({ taskId: null, updatedAt: now() })
+        .where(eq(schema.imageGenerations.id, id))
+        .run()
+    } else if (record.taskId && record.status === 'processing') {
       logTaskProgress('ImageTask', 'poll-resume', {
         id,
         taskId: record.taskId,
@@ -239,6 +281,48 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
       await pollImageTask(id, config, record.taskId)
       return
     }
+
+    if (config.provider.toLowerCase() === 'egaki-chatgpt') {
+      taskContext?.progress('Generating image with egaki ChatGPT', 1, 2)
+      logTaskProgress('ImageTask', 'egaki-chatgpt-start', {
+        id,
+        provider: config.provider,
+        model: record.model || config.model,
+        size: record.size,
+        hasReferenceImages: Boolean(record.referenceImages),
+        seedIgnored: record.seed != null,
+      })
+      const localPath = await egakiImageGenerationLimiter.run(async () => {
+        const jobId = submitEgakiChatGptImageJob({
+          id: record.id,
+          model: record.model || config.model,
+          prompt: record.prompt,
+          size: record.size,
+          seed: record.seed,
+          referenceImages: record.referenceImages,
+        }, {
+          signal: taskContext?.signal,
+        })
+        db.update(schema.imageGenerations)
+          .set({ taskId: jobId, status: 'processing', updatedAt: now() })
+          .where(eq(schema.imageGenerations.id, id))
+          .run()
+        logTaskProgress('ImageTask', 'egaki-chatgpt-local-poll-start', {
+          id,
+          provider: config.provider,
+          taskId: jobId,
+        })
+        return waitForEgakiChatGptImageJob(jobId, {
+          signal: taskContext?.signal,
+          timeoutMs: IMAGE_POLL_TIMEOUT_MS,
+        })
+      })
+      db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, null))
+      logTaskSuccess('ImageTask', 'egaki-chatgpt-saved', { id, provider: config.provider, localPath })
+      return
+    }
+
+    const adapter = getImageAdapter(config)
 
     taskContext?.progress('Building image generation request', 0, 2)
     logTaskProgress('ImageTask', 'build-request', {
@@ -381,12 +465,16 @@ function processImageGeneration(id: number, config: AIConfig): void {
 async function pollImageTask(id: number, config: AIConfig, taskId: string) {
   const adapter = getImageAdapter(config)
   const startedAt = Date.now()
-  const maxDurationMs = 600_000
+  const maxDurationMs = IMAGE_POLL_TIMEOUT_MS
 
   for (let i = 0; i < 120; i++) {
     const settled = getSettledImageGeneration(id)
     if (settled === 'completed') return
-    if (settled === 'failed') throw new TerminalImagePollError(`Image generation ${id} failed during provider wait`)
+    if (settled === 'failed') {
+      const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
+      const detail = record?.errorMsg || record?.lastErrorDetail || 'unknown'
+      throw new TerminalImagePollError(`Image generation ${id} failed during provider wait: ${detail}`)
+    }
 
     if (Date.now() - startedAt >= maxDurationMs) {
       logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: 'Polling exceeded 10 minutes' })
@@ -430,6 +518,12 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
         await handleImageComplete(id, config.provider, pollResp.imageUrl)
         return
       }
+      if (pollResp.status === 'completed' && pollResp.imageBase64) {
+        const mimeType = pollResp.mimeType || 'image/png'
+        logTaskSuccess('ImageTask', 'poll-base64-complete', { id, taskId, mimeType })
+        await handleImageCompleteBase64(id, config.provider, pollResp.imageBase64, mimeType)
+        return
+      }
       if (pollResp.status === 'completed' && !pollResp.imageUrl) {
         const b64 = adapter.extractImageBase64(result)
         if (b64) {
@@ -440,7 +534,11 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
       }
       if (pollResp.status === 'failed') {
         const message = pollResp.error || 'Generation failed'
-        logTaskError('ImageTask', 'poll-failed', { id, taskId, error: message })
+        logTaskError('ImageTask', 'poll-failed', { id, taskId, error: message, rawResponse: result })
+        db.update(schema.imageGenerations)
+          .set({ status: 'failed', errorMsg: message, lastErrorCode: 'provider_failed', lastErrorDetail: JSON.stringify(result).slice(0, 2000), updatedAt: now() })
+          .where(eq(schema.imageGenerations.id, id))
+          .run()
         throw new TerminalImagePollError(message)
       }
     } catch (err: any) {

@@ -10,6 +10,7 @@ export const PROVIDER_PROMPT_LIMITS: Record<string, number> = {
   gemini: 8000,
   ali: 4000,
   volcengine: 4000,
+  rightcode: 4000,
   configurable: 4000,
 }
 

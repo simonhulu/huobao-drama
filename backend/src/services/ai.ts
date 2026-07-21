@@ -169,21 +169,29 @@ export function getNarrationAudioConfig(): AIConfigWithId | null {
   return null
 }
 
-export async function callTextModel(messages: Array<{ role: string; content: string }>, options?: { temperature?: number; maxTokens?: number }): Promise<string> {
+export async function callTextModel(
+  messages: Array<{ role: string; content: string }>,
+  options?: { temperature?: number; maxTokens?: number; responseFormat?: { type: string }; extraBody?: Record<string, any> },
+): Promise<string> {
   const config = getTextConfig()
   const baseUrl = getTextProviderBaseUrl(config)
+  const body: Record<string, any> = {
+    model: config.model,
+    temperature: options?.temperature ?? 0.7,
+    max_tokens: options?.maxTokens,
+    messages,
+    ...options?.extraBody,
+  }
+  if (options?.responseFormat) {
+    body.response_format = options.responseFormat
+  }
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.apiKey}`,
     },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: options?.temperature ?? 0.7,
-      max_tokens: options?.maxTokens,
-      messages,
-    }),
+    body: JSON.stringify(body),
   })
   if (!res.ok) {
     const text = await res.text()
