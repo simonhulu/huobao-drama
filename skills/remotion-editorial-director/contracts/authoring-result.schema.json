@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/authoring-result/v1",
+  "title": "Editorial authoring result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recipeCandidate", "traceByNodeId"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/authoring-result/v1"},
+    "recipeCandidate": {"$ref": "editorial://schema/magnates-remotion-recipe/v2"},
+    "traceByNodeId": {"$ref": "#/$defs/traceMap"}
+  },
+  "$defs": {
+    "traceMap": {
+      "type": "object",
+      "x-editorial-map": true,
+      "minProperties": 1,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 240},
+      "additionalProperties": {"$ref": "#/$defs/decisionTrace"}
+    },
+    "decisionTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semanticUnitIds",
+        "grammarRuleIds",
+        "evidenceClaimIds",
+        "assetIds",
+        "rationale",
+        "fallback"
+      ],
+      "properties": {
+        "semanticUnitIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "grammarRuleIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "evidenceClaimIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "claimIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "assetIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "metricId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "sourceNote": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "rationale": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "fallback": {"type": "string", "minLength": 1, "maxLength": 120}
+      }
+    }
+  }
+}

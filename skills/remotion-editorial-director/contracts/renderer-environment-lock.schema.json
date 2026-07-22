@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/renderer-environment-lock/v1",
+  "title": "Editorial renderer environment lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "lockId",
+    "adapter",
+    "capabilitiesHash",
+    "target",
+    "outputPolicy",
+    "environmentIdentity",
+    "schemaDigests",
+    "lockedAt"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/renderer-environment-lock/v1"},
+    "lockId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "adapter": {"$ref": "editorial://schema/common/v1#/$defs/adapterIdentity"},
+    "capabilitiesHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "target": {"$ref": "editorial://schema/common/v1#/$defs/targetProfile"},
+    "outputPolicy": {"$ref": "editorial://schema/common/v1#/$defs/outputPolicy"},
+    "environmentIdentity": {
+      "$ref": "editorial://schema/adapter-capabilities/v1#/$defs/environmentIdentity"
+    },
+    "schemaDigests": {"$ref": "editorial://schema/common/v1#/$defs/hashMap"},
+    "lockedAt": {"type": "string", "format": "date-time"}
+  }
+}

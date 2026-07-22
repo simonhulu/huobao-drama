@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/timed-transcript/v1",
+  "title": "Timed narration transcript",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "durationSeconds", "spans"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/timed-transcript/v1"},
+    "durationSeconds": {"type": "number", "exclusiveMinimum": 0},
+    "spans": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/span"}
+    }
+  },
+  "$defs": {
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spanId", "startSeconds", "endSeconds", "text"],
+      "properties": {
+        "spanId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "startSeconds": {"type": "number", "minimum": 0},
+        "endSeconds": {"type": "number", "exclusiveMinimum": 0},
+        "text": {"type": "string", "minLength": 1, "maxLength": 10000}
+      }
+    }
+  }
+}

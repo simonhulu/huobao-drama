@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/adapter-request/v1",
+  "title": "Editorial adapter request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adapterProtocolVersion",
+    "operationId",
+    "operation",
+    "recipeSchemaVersion",
+    "workspace",
+    "runDirectory",
+    "target",
+    "inputs",
+    "outputs",
+    "expectedHashes",
+    "deadline"
+  ],
+  "properties": {
+    "adapterProtocolVersion": {"const": 1},
+    "operationId": {"type": "string", "format": "uuid"},
+    "operation": {"enum": ["capabilities", "build-props", "render", "inspect"]},
+    "recipeSchemaVersion": {"const": "magnates-remotion-recipe-v2"},
+    "workspace": {"$ref": "#/$defs/absolutePath"},
+    "runDirectory": {"$ref": "#/$defs/absolutePath"},
+    "target": {"$ref": "editorial://schema/adapter-capabilities/v1#/$defs/targetProfile"},
+    "inputs": {},
+    "outputs": {},
+    "expectedHashes": {"$ref": "#/$defs/hashMap"},
+    "deadline": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "capabilities"}}, "required": ["operation"]},
+      "then": {
+        "properties": {
+          "inputs": {"$ref": "#/$defs/emptyObject"},
+          "outputs": {"$ref": "#/$defs/emptyObject"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"operation": {"const": "build-props"}}, "required": ["operation"]},
+      "then": {
+        "properties": {
+          "inputs": {"$ref": "#/$defs/buildPropsInputs"},
+          "outputs": {"$ref": "#/$defs/buildPropsOutputs"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"operation": {"const": "render"}}, "required": ["operation"]},
+      "then": {
+        "properties": {
+          "inputs": {"$ref": "#/$defs/renderInputs"},
+          "outputs": {"$ref": "#/$defs/renderOutputs"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"operation": {"const": "inspect"}}, "required": ["operation"]},
+      "then": {
+        "properties": {
+          "inputs": {"$ref": "#/$defs/inspectInputs"},
+          "outputs": {"$ref": "#/$defs/inspectOutputs"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "absolutePath": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/"},
+    "hashMap": {
+      "type": "object",
+      "x-editorial-map": true,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 240},
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
+    },
+    "emptyObject": {"type": "object", "additionalProperties": false, "maxProperties": 0},
+    "buildPropsInputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recipePayload", "recipeLock", "assetInventory"],
+      "properties": {
+        "recipePayload": {"$ref": "#/$defs/absolutePath"},
+        "recipeLock": {"$ref": "#/$defs/absolutePath"},
+        "assetInventory": {"$ref": "#/$defs/absolutePath"},
+        "narrationConform": {"$ref": "#/$defs/absolutePath"}
+      }
+    },
+    "buildPropsOutputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["props", "buildTelemetry"],
+      "properties": {
+        "props": {"$ref": "#/$defs/absolutePath"},
+        "buildTelemetry": {"$ref": "#/$defs/absolutePath"}
+      }
+    },
+    "renderInputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["props", "propsHash", "compositionId", "rendererEnvironmentLock"],
+      "properties": {
+        "props": {"$ref": "#/$defs/absolutePath"},
+        "propsHash": {"$ref": "#/$defs/sha256"},
+        "compositionId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+        "rendererEnvironmentLock": {"$ref": "#/$defs/absolutePath"}
+      }
+    },
+    "renderOutputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["media", "renderManifest", "renderTelemetry"],
+      "properties": {
+        "media": {"$ref": "#/$defs/absolutePath"},
+        "renderManifest": {"$ref": "#/$defs/absolutePath"},
+        "renderTelemetry": {"$ref": "#/$defs/absolutePath"}
+      }
+    },
+    "inspectInputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["media", "mediaHash", "renderManifest", "renderTelemetry"],
+      "properties": {
+        "media": {"$ref": "#/$defs/absolutePath"},
+        "mediaHash": {"$ref": "#/$defs/sha256"},
+        "renderManifest": {"$ref": "#/$defs/absolutePath"},
+        "renderTelemetry": {"$ref": "#/$defs/absolutePath"}
+      }
+    },
+    "inspectOutputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inspectReport", "layoutTelemetry"],
+      "properties": {
+        "inspectReport": {"$ref": "#/$defs/absolutePath"},
+        "layoutTelemetry": {"$ref": "#/$defs/absolutePath"}
+      }
+    }
+  }
+}

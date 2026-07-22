@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/evidence/v1",
+  "title": "Editorial evidence lock payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "evidenceId", "sourceArtifacts", "claimIds", "reviewStatus", "lockedAt"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/evidence/v1"},
+    "evidenceId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "sourceArtifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"}
+    },
+    "claimIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+    },
+    "reviewStatus": {"enum": ["approved", "needs_review", "rejected"]},
+    "reviewer": {"$ref": "editorial://schema/common/v1#/$defs/producer"},
+    "lockedAt": {"type": "string", "format": "date-time"}
+  }
+}

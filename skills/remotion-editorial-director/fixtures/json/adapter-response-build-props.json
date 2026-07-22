@@ -1,0 +1,19 @@
+{
+  "adapterProtocolVersion": 1,
+  "operationId": "11111111-1111-4111-8111-111111111111",
+  "operation": "build-props",
+  "status": "ok",
+  "adapter": {"name": "huobao-remotion", "version": "1.0.0"},
+  "capabilities": null,
+  "artifacts": [
+    {
+      "type": "remotion-props",
+      "path": "/project/.editorial-runs/run-fixture-001/adapter/build-props/op-001/remotion-props.json",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schemaId": "editorial://schema/remotion-props/v1"
+    }
+  ],
+  "telemetry": {},
+  "warnings": [],
+  "error": null
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/technique-annotations/v1",
+  "title": "Editorial technique annotations",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "annotationSetId", "sourceHash", "claims", "reviewStatus"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/technique-annotations/v1"},
+    "annotationSetId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "sourceHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "claims": {"type": "array", "items": {"$ref": "#/$defs/techniqueClaim"}},
+    "reviewStatus": {"enum": ["approved", "needs_review", "rejected"]}
+  },
+  "$defs": {
+    "techniqueId": {
+      "enum": [
+        "hard_cut",
+        "dissolve",
+        "blur_bridge",
+        "graphic_transition",
+        "matte_transition",
+        "distortion",
+        "ambiguous",
+        "no_local_delta",
+        "within_setup_change",
+        "layer_entry",
+        "layer_transform",
+        "mask_reveal",
+        "persistent_overlay_footage_cut",
+        "type_on",
+        "text_replace",
+        "text_counter_change",
+        "underline_entry",
+        "push_in",
+        "pull_out",
+        "pan_or_tilt",
+        "scale_track",
+        "globe_line_assembly",
+        "comparison_split"
+      ]
+    },
+    "techniqueClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimId",
+        "sourceId",
+        "timeRange",
+        "semanticUnitIds",
+        "techniqueId",
+        "evidenceType",
+        "frameReferences",
+        "reviewStatus"
+      ],
+      "properties": {
+        "claimId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "sourceId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "timeRange": {"$ref": "editorial://schema/common/v1#/$defs/timeRange"},
+        "semanticUnitIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "techniqueId": {"$ref": "#/$defs/techniqueId"},
+        "evidenceType": {"enum": ["observed", "inferred", "unresolved"]},
+        "frameReferences": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+        },
+        "reviewStatus": {"enum": ["approved", "needs_review", "rejected"]},
+        "notes": {"type": "string", "maxLength": 4000}
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "magnates-remotion-recipe-v1",
+  "durationInFrames": 60,
+  "fps": 30,
+  "title": "Legacy migration fixture",
+  "shots": [
+    {
+      "id": "shot-legacy-001",
+      "durationInFrames": 60,
+      "background": {
+        "src": "legacy-background.png",
+        "kind": "image",
+        "fit": "cover"
+      },
+      "semanticRole": "hook",
+      "camera": {"preset": "hold"}
+    }
+  ]
+}

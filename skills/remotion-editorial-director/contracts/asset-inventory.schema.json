@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/asset-inventory/v1",
+  "title": "Editorial asset inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "inventoryVersion", "assets"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/asset-inventory/v1"},
+    "inventoryVersion": {"const": 1},
+    "assets": {"type": "array", "items": {"$ref": "#/$defs/asset"}}
+  },
+  "$defs": {
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assetId",
+        "kind",
+        "path",
+        "sha256",
+        "byteSize",
+        "mediaMetadata",
+        "subjectIds",
+        "entityIds",
+        "provenance",
+        "licenseStatus"
+      ],
+      "properties": {
+        "assetId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "kind": {"enum": ["image", "video", "audio", "font"]},
+        "path": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+        "sha256": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+        "byteSize": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "mediaMetadata": {"$ref": "#/$defs/mediaMetadata"},
+        "subjectIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "entityIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "provenance": {"$ref": "#/$defs/provenance"},
+        "licenseStatus": {"enum": ["cleared", "project_owned", "restricted", "unknown"]}
+      }
+    },
+    "mediaMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "width": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "height": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "durationSeconds": {"type": "number", "exclusiveMinimum": 0},
+        "frameRate": {"type": "number", "exclusiveMinimum": 0, "maximum": 240},
+        "sampleRate": {"type": "integer", "minimum": 1, "maximum": 768000},
+        "channels": {"type": "integer", "minimum": 1, "maximum": 64},
+        "codec": {"type": "string", "minLength": 1, "maxLength": 80},
+        "mimeType": {"type": "string", "pattern": "^[a-z0-9.+-]+/[a-zA-Z0-9.+-]+$"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "owner"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "owner": {"type": "string", "minLength": 1, "maxLength": 240},
+        "acquiredAt": {"type": "string", "format": "date-time"},
+        "notes": {"type": "string", "maxLength": 4000}
+      }
+    }
+  }
+}

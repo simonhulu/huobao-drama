@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/layout-telemetry/v1",
+  "title": "Editorial layout telemetry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "operationId", "target", "frameCount", "coordinateSpace", "layers"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/layout-telemetry/v1"},
+    "operationId": {"type": "string", "format": "uuid"},
+    "target": {"$ref": "editorial://schema/common/v1#/$defs/targetProfile"},
+    "frameCount": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "coordinateSpace": {"$ref": "#/$defs/coordinateSpace"},
+    "layers": {"type": "array", "items": {"$ref": "#/$defs/layer"}}
+  },
+  "$defs": {
+    "coordinateSpace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "geometryUnits", "translationUnits", "rotationUnits", "intervalSemantics"],
+      "properties": {
+        "origin": {"const": "top_left"},
+        "geometryUnits": {"const": "normalized_output"},
+        "translationUnits": {"const": "output_pixels"},
+        "rotationUnits": {"const": "degrees_clockwise"},
+        "intervalSemantics": {"const": "zero_based_start_inclusive_end_exclusive"}
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layerId", "kind", "interval", "sampling", "sourceAsset", "runs"],
+      "properties": {
+        "layerId": {"type": "string", "minLength": 1, "maxLength": 240},
+        "kind": {"enum": ["background", "text", "graphic", "transition", "mask"]},
+        "interval": {"$ref": "editorial://schema/common/v1#/$defs/frameInterval"},
+        "sampling": {"enum": ["per_frame", "constant"]},
+        "sourceAsset": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/sourceAsset"}
+          ]
+        },
+        "runs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sampleRun"}}
+      }
+    },
+    "sourceAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assetId", "sha256"],
+      "properties": {
+        "assetId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "sha256": {"$ref": "editorial://schema/common/v1#/$defs/sha256"}
+      }
+    },
+    "sampleRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startFrame", "endFrame", "sample"],
+      "properties": {
+        "startFrame": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "endFrame": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "sample": {"$ref": "#/$defs/sample"}
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["boundingBox", "opacity", "transform", "transformOrigin", "maskBounds", "decodeStatus"],
+      "properties": {
+        "boundingBox": {"$ref": "#/$defs/normalizedBox"},
+        "opacity": {"type": "number", "minimum": 0, "maximum": 1},
+        "transform": {"$ref": "#/$defs/transform"},
+        "transformOrigin": {"$ref": "#/$defs/normalizedPoint"},
+        "maskBounds": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/normalizedBox"}
+          ]
+        },
+        "decodeStatus": {"enum": ["decoded", "pending", "failed", "not_applicable"]}
+      }
+    },
+    "normalizedBox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "number", "minimum": 0, "maximum": 1},
+        "y": {"type": "number", "minimum": 0, "maximum": 1},
+        "width": {"type": "number", "minimum": 0, "maximum": 1},
+        "height": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "normalizedPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": {"type": "number", "minimum": 0, "maximum": 1},
+        "y": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "transform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["translateX", "translateY", "scaleX", "scaleY", "rotation"],
+      "properties": {
+        "translateX": {"type": "number"},
+        "translateY": {"type": "number"},
+        "scaleX": {"type": "number", "minimum": 0},
+        "scaleY": {"type": "number", "minimum": 0},
+        "rotation": {"type": "number", "minimum": -360000, "maximum": 360000}
+      }
+    }
+  }
+}

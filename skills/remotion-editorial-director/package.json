@@ -1,0 +1,31 @@
+{
+  "name": "@huobao/remotion-editorial-director-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "generate": "node tests/contracts/generate-contracts.mjs",
+    "generate:check": "node tests/contracts/generate-contracts.mjs --check",
+    "test": "node --test tests/contracts/*.test.mjs",
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext generated/contracts.ts tests/contracts/generated-contracts.type-test.ts",
+    "fast": "node scripts/release-gate.mjs fast",
+    "integration": "node scripts/release-gate.mjs integration",
+    "render-lock": "node scripts/release-gate.mjs render-lock",
+    "release-eval": "node scripts/release-gate.mjs release-eval",
+    "test:fast": "npm run fast",
+    "test:integration": "npm run integration",
+    "test:render-lock": "npm run render-lock",
+    "test:release-eval": "npm run release-eval"
+  },
+  "dependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "canonicalize": "2.1.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

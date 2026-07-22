@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/common/v1",
+  "title": "Editorial shared schema definitions",
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "localPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "not": {"pattern": "^(?:[A-Za-z][A-Za-z0-9+.-]*:|data:)"}
+    },
+    "absolutePath": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/"},
+    "hashMap": {
+      "type": "object",
+      "x-editorial-map": true,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 240},
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"$ref": "#/$defs/stableId"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 120}
+      }
+    },
+    "adapterIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"$ref": "#/$defs/stableId"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 120}
+      }
+    },
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactType", "path", "sha256", "schemaId"],
+      "properties": {
+        "artifactType": {"type": "string", "minLength": 1, "maxLength": 120},
+        "path": {"$ref": "#/$defs/absolutePath"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "schemaId": {"type": "string", "minLength": 1, "maxLength": 240}
+      }
+    },
+    "timeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startSeconds", "endSeconds"],
+      "properties": {
+        "startSeconds": {"type": "number", "minimum": 0},
+        "endSeconds": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "frameInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startFrame", "endFrame"],
+      "properties": {
+        "startFrame": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "endFrame": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    },
+    "targetProfile": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profileId", "width", "height", "fps"],
+          "properties": {
+            "profileId": {"const": "youtube-720p"},
+            "width": {"const": 1280},
+            "height": {"const": 720},
+            "fps": {"const": 30}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profileId", "width", "height", "fps"],
+          "properties": {
+            "profileId": {"const": "youtube-1080p"},
+            "width": {"const": 1920},
+            "height": {"const": 1080},
+            "fps": {"const": 30}
+          }
+        }
+      ]
+    },
+    "safeArea": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["left", "right", "top", "bottom"],
+      "properties": {
+        "left": {"type": "number", "minimum": 0, "maximum": 0.5},
+        "right": {"type": "number", "minimum": 0, "maximum": 0.5},
+        "top": {"type": "number", "minimum": 0, "maximum": 0.5},
+        "bottom": {"type": "number", "minimum": 0, "maximum": 0.5}
+      }
+    },
+    "outputPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container", "codec", "pixelFormat", "audioMode", "safeArea"],
+      "properties": {
+        "container": {"const": "mp4"},
+        "codec": {"const": "h264"},
+        "pixelFormat": {"const": "yuv420p"},
+        "audioMode": {"enum": ["required", "optional", "forbidden"]},
+        "audioCodec": {"const": "aac"},
+        "videoBitrate": {"type": "string", "pattern": "^[1-9][0-9]*(?:k|M)$"},
+        "crf": {"type": "integer", "minimum": 0, "maximum": 51},
+        "safeArea": {"$ref": "#/$defs/safeArea"},
+        "durationToleranceFrames": {"type": "integer", "minimum": 0, "maximum": 10},
+        "audioToleranceFrames": {"type": "integer", "minimum": 0, "maximum": 10},
+        "hardwareAcceleration": {"enum": ["disabled", "required"]}
+      },
+      "oneOf": [{"required": ["videoBitrate"]}, {"required": ["crf"]}]
+    },
+    "toolIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "version", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/absolutePath"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 240},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

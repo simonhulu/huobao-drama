@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/remotion-props/v1",
+  "title": "Editorial Remotion props envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "recipeSchemaVersion",
+    "recipeHash",
+    "durationInFrames",
+    "fps",
+    "compositionId",
+    "target",
+    "projectPropsSchemaId",
+    "assetBindings",
+    "props"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/remotion-props/v1"},
+    "recipeSchemaVersion": {"const": "magnates-remotion-recipe-v2"},
+    "recipeHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "durationInFrames": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "fps": {"const": 30},
+    "compositionId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "target": {"$ref": "editorial://schema/common/v1#/$defs/targetProfile"},
+    "projectPropsSchemaId": {"type": "string", "minLength": 1, "maxLength": 240},
+    "assetBindings": {"$ref": "#/$defs/assetBindingMap"},
+    "props": {"$ref": "#/$defs/projectProps"}
+  },
+  "$defs": {
+    "assetBindingMap": {
+      "type": "object",
+      "x-editorial-map": true,
+      "propertyNames": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+      "additionalProperties": {"$ref": "#/$defs/assetBinding"}
+    },
+    "assetBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha256"],
+      "properties": {
+        "kind": {"enum": ["image", "video", "audio", "font"]},
+        "path": {"$ref": "editorial://schema/common/v1#/$defs/absolutePath"},
+        "sha256": {"$ref": "editorial://schema/common/v1#/$defs/sha256"}
+      }
+    },
+    "projectProps": {
+      "type": "object",
+      "x-editorial-map": true,
+      "additionalProperties": {}
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "adapter": {"name": "huobao-remotion", "version": "1.0.0"},
+  "supportedProtocolVersions": [1],
+  "recipeSchemaVersions": ["magnates-remotion-recipe-v2"],
+  "operations": ["capabilities", "build-props", "render", "inspect"],
+  "compositionIds": ["MagnatesEditorial"],
+  "targetProfiles": [
+    {"profileId": "youtube-720p", "width": 1280, "height": 720, "fps": 30},
+    {"profileId": "youtube-1080p", "width": 1920, "height": 1080, "fps": 30}
+  ],
+  "audioModes": ["required", "optional", "forbidden"],
+  "telemetryFields": [
+    "layerId",
+    "frameInterval",
+    "boundingBox",
+    "opacity",
+    "transform",
+    "maskBounds",
+    "assetId",
+    "decodeStatus"
+  ],
+  "schemaDigests": {
+    "editorial://schema/adapter-request/v1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "editorial://schema/adapter-response/v1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "environmentIdentity": {
+    "remotion": {
+      "path": "/project/remotion/node_modules/.bin/remotion",
+      "version": "4.0.484",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "packageLockHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "browser": {
+      "path": "/project/remotion/.remotion/chrome-headless-shell",
+      "version": "136.0.0",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "fontHashes": {
+      "Inter-Regular.ttf": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "nodeVersion": "v20.19.4",
+    "os": "darwin",
+    "architecture": "arm64",
+    "ffmpeg": {
+      "path": "/opt/homebrew/bin/ffmpeg",
+      "version": "7.1.1",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "ffprobe": {
+      "path": "/opt/homebrew/bin/ffprobe",
+      "version": "7.1.1",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "supportedCodecs": ["h264", "aac"],
+    "adapterExecutableHash": "3333333333333333333333333333333333333333333333333333333333333333",
+    "adapterConfigHash": "4444444444444444444444444444444444444444444444444444444444444444"
+  }
+}

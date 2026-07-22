@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/qa-report/v1",
+  "title": "Editorial global QA report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "recipeHash",
+    "mediaHash",
+    "renderManifestHash",
+    "layoutTelemetryHash",
+    "deterministicStatus",
+    "aestheticStatus",
+    "checks",
+    "aestheticReview",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/qa-report/v1"},
+    "recipeHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "mediaHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "renderManifestHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "layoutTelemetryHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "deterministicStatus": {"enum": ["pass", "fail"]},
+    "aestheticStatus": {"enum": ["not_run", "pass", "fail", "needs_review"]},
+    "checks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/check"}},
+    "aestheticReview": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/aestheticReview"}
+      ]
+    },
+    "createdAt": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkId",
+        "status",
+        "severity",
+        "expected",
+        "observed",
+        "evidenceArtifact",
+        "remediation"
+      ],
+      "properties": {
+        "checkId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "status": {"enum": ["pass", "fail"]},
+        "severity": {"enum": ["blocking", "non_blocking"]},
+        "expected": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "observed": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "evidenceArtifact": {"$ref": "editorial://schema/common/v1#/$defs/artifactReference"},
+        "remediation": {"type": "string", "minLength": 1, "maxLength": 4000}
+      }
+    },
+    "aestheticReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewer", "findings"],
+      "properties": {
+        "reviewer": {"$ref": "editorial://schema/common/v1#/$defs/producer"},
+        "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "summary"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+        "severity": {"enum": ["info", "warning", "blocking"]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 4000}
+      }
+    }
+  }
+}

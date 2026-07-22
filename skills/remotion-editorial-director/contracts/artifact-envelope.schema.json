@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/artifact-envelope/v1",
+  "title": "Editorial durable artifact envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "artifactType",
+    "createdAt",
+    "producer",
+    "inputHashes",
+    "payload",
+    "contentHash"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/artifact-envelope/v1"},
+    "runId": {"type": "string", "pattern": "^run-[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "artifactType": {
+      "enum": [
+        "input-manifest",
+        "timed-transcript",
+        "run",
+        "semantic-outline",
+        "agent-request",
+        "agent-response",
+        "authoring-result",
+        "corpus-evidence",
+        "boundary-samples",
+        "evidence",
+        "technique-annotations",
+        "asset-inventory",
+        "validation-report",
+        "recipe-lock",
+        "recipe-v2",
+        "adapter-config",
+        "adapter-capabilities",
+        "adapter-request",
+        "adapter-response",
+        "renderer-environment-lock",
+        "remotion-props",
+        "render-manifest",
+        "inspect-report",
+        "layout-telemetry",
+        "qa-report",
+        "calibration-policy",
+        "error-codes"
+      ]
+    },
+    "createdAt": {"type": "string", "format": "date-time"},
+    "producer": {"$ref": "#/$defs/producer"},
+    "inputHashes": {"$ref": "#/$defs/hashMap"},
+    "payload": {},
+    "contentHash": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"artifactType": {"const": "input-manifest"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/input-manifest/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "timed-transcript"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/timed-transcript/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "run"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/run/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "semantic-outline"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/semantic-outline/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "agent-request"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/agent-request/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "agent-response"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/agent-response/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "authoring-result"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/authoring-result/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "corpus-evidence"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/corpus-evidence/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "boundary-samples"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/boundary-samples/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "evidence"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/evidence/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "technique-annotations"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/technique-annotations/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "asset-inventory"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/asset-inventory/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "validation-report"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/validation-report/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "recipe-lock"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/recipe-lock/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "recipe-v2"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/magnates-remotion-recipe/v2"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "adapter-config"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/adapter-config/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "adapter-request"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/adapter-request/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "adapter-response"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/adapter-response/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "adapter-capabilities"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/adapter-capabilities/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "renderer-environment-lock"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/renderer-environment-lock/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "remotion-props"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/remotion-props/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "render-manifest"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/render-manifest/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "inspect-report"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/inspect-report/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "layout-telemetry"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/layout-telemetry/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "qa-report"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/qa-report/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "calibration-policy"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/calibration-policy/v1"}}}
+    },
+    {
+      "if": {"properties": {"artifactType": {"const": "error-codes"}}, "required": ["artifactType"]},
+      "then": {"properties": {"payload": {"$ref": "editorial://schema/error-codes/v1"}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 120}
+      }
+    },
+    "hashMap": {
+      "type": "object",
+      "x-editorial-map": true,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 240},
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
+    }
+  }
+}

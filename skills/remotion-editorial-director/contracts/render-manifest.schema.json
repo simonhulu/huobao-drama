@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/render-manifest/v1",
+  "title": "Editorial render manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "operationId",
+    "recipeHash",
+    "propsHash",
+    "compositionId",
+    "environmentLockHash",
+    "target",
+    "outputSettings",
+    "media",
+    "processTiming",
+    "adapter",
+    "layerIntervals",
+    "telemetryLimits"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/render-manifest/v1"},
+    "operationId": {"type": "string", "format": "uuid"},
+    "recipeHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "propsHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "compositionId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "environmentLockHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+    "target": {"$ref": "editorial://schema/common/v1#/$defs/targetProfile"},
+    "outputSettings": {"$ref": "editorial://schema/common/v1#/$defs/outputPolicy"},
+    "media": {"$ref": "#/$defs/media"},
+    "processTiming": {"$ref": "#/$defs/processTiming"},
+    "adapter": {"$ref": "editorial://schema/common/v1#/$defs/adapterIdentity"},
+    "layerIntervals": {"$ref": "#/$defs/layerIntervalMap"},
+    "telemetryLimits": {"$ref": "#/$defs/telemetryLimits"}
+  },
+  "$defs": {
+    "media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "frameCount"],
+      "properties": {
+        "path": {"$ref": "editorial://schema/common/v1#/$defs/absolutePath"},
+        "sha256": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+        "frameCount": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    },
+    "processTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startedAt", "endedAt", "durationMilliseconds"],
+      "properties": {
+        "startedAt": {"type": "string", "format": "date-time"},
+        "endedAt": {"type": "string", "format": "date-time"},
+        "durationMilliseconds": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "layerIntervalMap": {
+      "type": "object",
+      "x-editorial-map": true,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 240},
+      "additionalProperties": {"$ref": "editorial://schema/common/v1#/$defs/frameInterval"}
+    },
+    "telemetryLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximumRenderedFrames",
+        "maximumVisibleLayersPerFrame",
+        "maximumFramePacketBytes",
+        "maximumRawTelemetryBytes"
+      ],
+      "properties": {
+        "maximumRenderedFrames": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "maximumVisibleLayersPerFrame": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "maximumFramePacketBytes": {"type": "integer", "minimum": 1, "maximum": 10485760},
+        "maximumRawTelemetryBytes": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    }
+  }
+}

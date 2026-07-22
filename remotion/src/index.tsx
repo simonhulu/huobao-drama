@@ -20,6 +20,7 @@ import { NarrativeEpisode } from "./NarrativeEpisode";
 import { GridStoryPreview } from "./GridStoryPreview";
 import {
   MagnatesEditorial,
+  MagnatesEditorialPreview,
   MAGNATES_EDITORIAL_DURATION,
   defaultMagnatesEditorialShots,
 } from "./MagnatesEditorial";
@@ -41,13 +42,23 @@ function dimensionsForAspectRatio(aspectRatio?: string) {
 }
 
 function calculateMetadata<
-  Props extends { aspectRatio?: string; durationInFrames?: number; fps?: number }
+  Props extends { aspectRatio?: string; durationInFrames?: number; fps?: number; width?: number; height?: number }
 >({
   props,
 }: Parameters<CalculateMetadataFunction<Props>>[0]): ReturnType<
   CalculateMetadataFunction<Props>
 > {
-  const result: any = dimensionsForAspectRatio(props.aspectRatio);
+  const explicitWidth = props.width;
+  const explicitHeight = props.height;
+  const hasExplicitDimensions = typeof explicitWidth === "number"
+    && typeof explicitHeight === "number"
+    && Number.isInteger(explicitWidth)
+    && Number.isInteger(explicitHeight)
+    && explicitWidth > 0
+    && explicitHeight > 0;
+  const result: any = hasExplicitDimensions
+    ? { width: explicitWidth, height: explicitHeight }
+    : dimensionsForAspectRatio(props.aspectRatio);
   if (typeof props.durationInFrames === "number" && props.durationInFrames > 0) {
     result.durationInFrames = props.durationInFrames;
   }
@@ -292,6 +303,17 @@ const RemotionRoot: React.FC = () => {
       <Composition
         id="MagnatesEditorial"
         component={MagnatesEditorial}
+        durationInFrames={1}
+        fps={30}
+        width={1280}
+        height={720}
+        defaultProps={{} as any}
+        calculateMetadata={calculateMetadata}
+      />
+
+      <Composition
+        id="MagnatesEditorialPreview"
+        component={MagnatesEditorialPreview}
         durationInFrames={MAGNATES_EDITORIAL_DURATION}
         fps={30}
         width={1280}
@@ -300,19 +322,7 @@ const RemotionRoot: React.FC = () => {
           durationInFrames: MAGNATES_EDITORIAL_DURATION,
           fps: 30,
           title: "Magnates editorial grammar demo",
-          shots: defaultMagnatesEditorialShots.map((shot, index) => ({
-            ...shot,
-            background: {
-              ...shot.background,
-              src: staticFile([
-                "war-map/portrait.png",
-                "war-map/background.png",
-                "grid-ep500/sb1_cell1.png",
-                "grid-ep500/sb1_cell2.png",
-                "cutout-poc/subject.png",
-              ][index]),
-            },
-          })),
+          shots: defaultMagnatesEditorialShots,
         }}
         calculateMetadata={calculateMetadata}
       />

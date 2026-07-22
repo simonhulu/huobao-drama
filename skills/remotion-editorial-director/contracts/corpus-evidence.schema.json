@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/corpus-evidence/v1",
+  "title": "Editorial corpus evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "corpusId", "analysisVersion", "sources", "claims"],
+  "properties": {
+    "schemaVersion": {"const": "editorial://schema/corpus-evidence/v1"},
+    "corpusId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+    "analysisVersion": {"type": "string", "minLength": 1, "maxLength": 120},
+    "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}},
+    "claims": {"type": "array", "items": {"$ref": "#/$defs/claim"}}
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId", "mediaHash", "transcriptHash", "calibrationTier"],
+      "properties": {
+        "sourceId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "mediaHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+        "transcriptHash": {"$ref": "editorial://schema/common/v1#/$defs/sha256"},
+        "calibrationTier": {"enum": ["human_gold", "model_reviewed", "machine_only"]}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimId",
+        "sourceId",
+        "timeRange",
+        "statement",
+        "evidenceType",
+        "confidence",
+        "frameReferences"
+      ],
+      "properties": {
+        "claimId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "sourceId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "timeRange": {"$ref": "editorial://schema/common/v1#/$defs/timeRange"},
+        "statement": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "evidenceType": {"enum": ["observed", "inferred", "unresolved"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "semanticUnitIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}
+        },
+        "frameReferences": {"type": "array", "items": {"$ref": "#/$defs/frameReference"}}
+      }
+    },
+    "frameReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame", "path", "sha256"],
+      "properties": {
+        "frame": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "path": {"$ref": "editorial://schema/common/v1#/$defs/absolutePath"},
+        "sha256": {"$ref": "editorial://schema/common/v1#/$defs/sha256"}
+      }
+    }
+  }
+}

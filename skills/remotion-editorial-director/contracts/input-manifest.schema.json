@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "editorial://schema/input-manifest/v1",
+  "title": "Editorial director input manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runSchemaVersion", "operation", "outputRoot"],
+  "properties": {
+    "runSchemaVersion": {"const": 1},
+    "operation": {"enum": ["analyze-reference", "plan-edit", "render-recipe", "produce"]},
+    "referenceCorpus": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/referenceSource"}
+    },
+    "narration": {"$ref": "#/$defs/narration"},
+    "assets": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+    "evidence": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+    "recipeLock": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+    "target": {"$ref": "#/$defs/target"},
+    "adapterConfig": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+    "outputRoot": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+    "modelPolicy": {"$ref": "#/$defs/modelPolicy"},
+    "policy": {"$ref": "#/$defs/runPolicy"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "analyze-reference"}}, "required": ["operation"]},
+      "then": {"required": ["referenceCorpus"]}
+    },
+    {
+      "if": {"properties": {"operation": {"const": "plan-edit"}}, "required": ["operation"]},
+      "then": {"required": ["narration", "assets", "target"]}
+    },
+    {
+      "if": {"properties": {"operation": {"const": "render-recipe"}}, "required": ["operation"]},
+      "then": {"required": ["recipeLock", "target", "adapterConfig"]}
+    },
+    {
+      "if": {"properties": {"operation": {"const": "produce"}}, "required": ["operation"]},
+      "then": {"required": ["narration", "assets", "target", "adapterConfig"]}
+    }
+  ],
+  "$defs": {
+    "referenceSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId", "video", "subtitles"],
+      "properties": {
+        "sourceId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
+        "video": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+        "subtitles": {"$ref": "editorial://schema/common/v1#/$defs/localPath"}
+      }
+    },
+    "narration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["script", "timing"],
+      "properties": {
+        "script": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+        "timing": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+        "audio": {"$ref": "editorial://schema/common/v1#/$defs/localPath"}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "outputPolicy"],
+      "properties": {
+        "profile": {"$ref": "editorial://schema/common/v1#/$defs/targetProfile"},
+        "outputPolicy": {"$ref": "editorial://schema/common/v1#/$defs/outputPolicy"}
+      }
+    },
+    "modelPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authoringMode", "reviewMode"],
+      "properties": {
+        "authoringMode": {"enum": ["agent", "replay", "deterministic"]},
+        "reviewMode": {"enum": ["agent", "replay", "deterministic"]},
+        "authoringReplay": {"$ref": "editorial://schema/common/v1#/$defs/localPath"},
+        "reviewReplay": {"$ref": "editorial://schema/common/v1#/$defs/localPath"}
+      }
+    },
+    "runPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "analysisTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "adapterTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "maxRunBytes": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    }
+  }
+}
