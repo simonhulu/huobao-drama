@@ -86,15 +86,17 @@
                         <span class="task-center-status-dot" :class="'is-' + taskStatus(item.task)" />
                         <span class="batch-task-title">{{ item.label }}</span>
                         <span class="batch-task-status">{{ statusLabel(item.task) }}</span>
-                        <button v-if="canCancel(item.task)" class="btn btn-sm" @click="$emit('cancel', item.task)">取消</button>
+                        <button v-if="canCancel(item.task)" class="btn btn-sm" @click="requestCancel(item.task)">取消</button>
                       </div>
 
                       <div class="batch-task-progress">
                         <div class="batch-progress-top">
-                          <span class="batch-progress-count">{{ item.progress.current }} / {{ item.progress.total }}</span>
-                          <span class="batch-progress-percent">{{ item.progress.percent }}%</span>
+                          <span class="batch-progress-count">
+                            {{ item.progress.total > 0 ? `${item.progress.current} / ${item.progress.total}` : '阶段处理中' }}
+                          </span>
+                          <span v-if="item.progress.total > 0" class="batch-progress-percent">{{ item.progress.percent }}%</span>
                         </div>
-                        <div class="task-progress-track">
+                        <div v-if="item.progress.total > 0" class="task-progress-track">
                           <div class="task-progress-fill" :style="{ width: item.progress.percent + '%' }" />
                         </div>
                       </div>
@@ -102,6 +104,18 @@
                       <div v-if="taskStatusDetail(item.task) || item.progress.message" class="batch-task-meta">
                         <span v-if="taskStatusDetail(item.task)">{{ taskStatusDetail(item.task) }}</span>
                         <span v-if="item.progress.message">· {{ item.progress.message }}</span>
+                      </div>
+
+                      <div v-if="dharmaTelemetry(item.task)" class="dharma-render-telemetry">
+                        <span>{{ dharmaPhaseLabels[dharmaTelemetry(item.task)?.phase || 'preflight'] }}</span>
+                        <span>本阶段 {{ formatDuration(dharmaTelemetry(item.task)?.phaseElapsedMs || 0) }}</span>
+                        <span>已耗时 {{ formatDuration(dharmaTelemetry(item.task)?.elapsedMs || 0) }}</span>
+                        <span v-if="dharmaTelemetry(item.task)?.fps !== null">
+                          {{ dharmaTelemetry(item.task)?.fps }} fps
+                        </span>
+                        <span v-if="dharmaTelemetry(item.task)?.etaMs !== null">
+                          预计剩余 {{ formatDuration(dharmaTelemetry(item.task)?.etaMs || 0) }}
+                        </span>
                       </div>
                     </article>
                   </div>
@@ -118,13 +132,59 @@
       </aside>
     </div>
   </Transition>
+
+  <Transition name="task-center-fade">
+    <div
+      v-if="cancelDialogTask"
+      class="task-cancel-layer"
+      @click.self="closeCancelDialog"
+      @keydown.esc="closeCancelDialog"
+    >
+      <section
+        class="task-cancel-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-cancel-title"
+        aria-describedby="task-cancel-description"
+      >
+        <h2 id="task-cancel-title">取消整集渲染</h2>
+        <p id="task-cancel-description">该操作会终止当前 Remotion 渲染并清理其暂存文件。</p>
+        <form @submit.prevent="submitDharmaCancel">
+          <label class="task-cancel-field">
+            <span>取消原因</span>
+            <textarea ref="cancelReasonInput" v-model="cancelReason" rows="3" maxlength="500" placeholder="请输入取消原因" />
+          </label>
+          <label class="task-cancel-field">
+            <span>操作者标签</span>
+            <input v-model="cancelActor" type="text" maxlength="120" autocomplete="name" placeholder="例如：zhangshijie" />
+          </label>
+          <label class="task-cancel-field">
+            <span>控制令牌</span>
+            <input v-model="cancelControlToken" type="password" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="task-cancel-field">
+            <span>输入 <code>CANCEL {{ taskId(cancelDialogTask) }}</code> 以确认</span>
+            <input v-model="cancelConfirmation" type="text" autocomplete="off" spellcheck="false" />
+          </label>
+          <p v-if="cancelSubmitError" class="task-cancel-submit-error" role="alert">{{ cancelSubmitError }}</p>
+          <div class="task-cancel-actions">
+            <button class="btn btn-ghost" type="button" :disabled="cancelSubmitting" @click="closeCancelDialog">返回</button>
+            <button class="btn task-cancel-confirm" type="submit" :disabled="cancelSubmitting || !canSubmitDharmaCancel">
+              {{ cancelSubmitting ? '提交中' : '确认取消' }}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </Transition>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   deriveBatchTaskGroups,
   isActiveTask,
+  requiresDharmaFullRenderCancelConfirmation,
   taskId,
   taskStatus,
   taskStatusDetail,
@@ -132,6 +192,7 @@ import {
   taskValue,
   type BatchEpisodeGroup,
   type CreationTask,
+  type DharmaRenderTelemetry,
   type TaskStatus,
 } from '~/composables/taskState'
 
@@ -145,6 +206,31 @@ const hasMoved = ref(false)
 const dragStart = ref({ x: 0, y: 0, right: 0, bottom: 0 })
 const expandedDramaKeys = ref(new Set<string>())
 const expandedEpisodeKeys = ref(new Set<string>())
+const cancelDialogTask = ref<CreationTask | null>(null)
+const cancelReason = ref('')
+const cancelActor = ref('')
+const cancelControlToken = ref('')
+const cancelConfirmation = ref('')
+const cancelSubmitting = ref(false)
+const cancelSubmitError = ref('')
+const cancelReasonInput = ref<HTMLTextAreaElement | null>(null)
+let cancelDialogTrigger: HTMLElement | null = null
+
+const dharmaPhaseLabels: Record<DharmaRenderTelemetry['phase'], string> = {
+  preflight: '渲染预检',
+  configuration: '读取渲染配置',
+  props_build: '构建素材与合成参数',
+  input_fingerprint_pre_render: '核对渲染输入',
+  staging_prepare: '准备交付暂存区',
+  remotion_render: '启动 Remotion',
+  remotion_bundle: '打包合成代码',
+  remotion_composition: '读取合成配置',
+  remotion_frames: '渲染画面帧',
+  remotion_encode: '编码封装成片',
+  output_validation: '校验交付文件',
+  publish: '发布交付文件',
+  staging_cleanup: '清理暂存文件',
+}
 
 const props = withDefaults(defineProps<{
   tasks: CreationTask[]
@@ -155,6 +241,7 @@ const props = withDefaults(defineProps<{
   compact?: boolean
   workerHealth?: { healthy_count: number; total_count: number; timeout_ms: number; workers: any[] } | null
   isWorkerHealthy?: boolean
+  telemetryByTaskId?: Record<number, DharmaRenderTelemetry>
 }>(), {
   compact: false,
 })
@@ -162,7 +249,10 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:open': [value: boolean]
   refresh: []
-  cancel: [task: any]
+  cancel: [
+    payload: { task: CreationTask; reason?: string; confirmation?: string; actor?: string; controlToken?: string },
+    complete?: (result: { ok: boolean; error?: string }) => void,
+  ]
   retry: [task: any]
 }>()
 
@@ -224,11 +314,82 @@ function canCancel(task: CreationTask | undefined | null) {
   return isActiveTask(task) && !taskValue(task, 'cancel_requested')
 }
 
+function dharmaTelemetry(task: CreationTask | undefined | null) {
+  return props.telemetryByTaskId?.[taskId(task)] || null
+}
+
+function requestCancel(task: CreationTask) {
+  if (!requiresDharmaFullRenderCancelConfirmation(task)) {
+    emit('cancel', { task })
+    return
+  }
+  cancelDialogTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  cancelDialogTask.value = task
+  cancelReason.value = ''
+  cancelActor.value = ''
+  cancelControlToken.value = ''
+  cancelConfirmation.value = ''
+  cancelSubmitting.value = false
+  cancelSubmitError.value = ''
+  void nextTick(() => cancelReasonInput.value?.focus())
+}
+
+const canSubmitDharmaCancel = computed(() => {
+  const task = cancelDialogTask.value
+  return Boolean(task
+    && cancelReason.value.trim()
+    && cancelActor.value.trim()
+    && cancelControlToken.value.length > 0
+    && cancelConfirmation.value.trim() === `CANCEL ${taskId(task)}`)
+})
+
+function closeCancelDialog() {
+  if (cancelSubmitting.value) return
+  cancelDialogTask.value = null
+  cancelReason.value = ''
+  cancelActor.value = ''
+  cancelControlToken.value = ''
+  cancelConfirmation.value = ''
+  cancelSubmitError.value = ''
+  const trigger = cancelDialogTrigger
+  cancelDialogTrigger = null
+  void nextTick(() => trigger?.focus())
+}
+
+function submitDharmaCancel() {
+  const task = cancelDialogTask.value
+  if (!task || !canSubmitDharmaCancel.value) return
+  cancelSubmitting.value = true
+  cancelSubmitError.value = ''
+  emit('cancel', {
+    task,
+    reason: cancelReason.value.trim(),
+    confirmation: cancelConfirmation.value.trim(),
+    actor: cancelActor.value.trim(),
+    controlToken: cancelControlToken.value,
+  }, result => {
+    if (result.ok) {
+      cancelSubmitting.value = false
+      closeCancelDialog()
+      return
+    }
+    cancelSubmitting.value = false
+    cancelSubmitError.value = result.error || '取消任务失败，请核对任务状态后重试'
+  })
+}
+
 function formatTime(value: Date | string | null | undefined) {
   if (!value) return ''
   const date = value instanceof Date ? value : new Date(value)
   if (Number.isNaN(date.getTime())) return ''
   return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+function formatDuration(milliseconds: number) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1_000))
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return minutes ? `${minutes} 分 ${String(remainder).padStart(2, '0')} 秒` : `${remainder} 秒`
 }
 
 function clampPosition() {
@@ -724,6 +885,109 @@ function onFabClick(e: MouseEvent) {
   margin-top: 8px;
   font-size: 11px;
   color: var(--text-3);
+}
+
+.dharma-render-telemetry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(86,108,150,0.10);
+  color: var(--text-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dharma-render-telemetry span:first-child {
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+.task-cancel-layer {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(19, 25, 36, 0.45);
+}
+
+.task-cancel-dialog {
+  width: min(100%, 420px);
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  box-shadow: var(--shadow-elevated);
+}
+
+.task-cancel-dialog h2 {
+  margin: 0;
+  color: var(--text-0);
+  font-size: 16px;
+}
+
+.task-cancel-dialog p {
+  margin: 8px 0 18px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.task-cancel-field {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  color: var(--text-1);
+  font-size: 12px;
+}
+
+.task-cancel-field textarea,
+.task-cancel-field input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-base);
+  color: var(--text-0);
+  font: inherit;
+  line-height: 1.5;
+  padding: 8px 9px;
+}
+
+.task-cancel-field textarea {
+  resize: vertical;
+}
+
+.task-cancel-field code {
+  color: var(--accent-text);
+}
+
+.task-cancel-submit-error {
+  margin: 12px 0 0;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.task-cancel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.task-cancel-confirm {
+  border-color: rgba(185, 67, 67, 0.3);
+  background: #a33f3f;
+  color: #fff;
+}
+
+.task-cancel-confirm:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .task-center-foot {

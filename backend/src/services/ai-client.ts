@@ -42,7 +42,7 @@ function getImageHttpsProxy(): string | undefined {
 }
 
 function getProxyEnabledProviders(): Set<string> {
-  return new Set((process.env.IMAGE_PROXY_ENABLED_PROVIDERS || 'apimart,chatfire,rightcode,right,rightcodes')
+  return new Set((process.env.IMAGE_PROXY_ENABLED_PROVIDERS || 'apimart,chatfire,rightcode,right,rightcodes,pcore')
     .toLowerCase()
     .split(',')
     .map((s) => s.trim())
@@ -62,6 +62,18 @@ function getProxyAgent(provider: string, url: string): ProxyAgent | undefined {
   if (!proxy) return undefined
 
   return new ProxyAgent(proxy)
+}
+
+export function imageRequestTransport(provider: string, url: string): 'proxy' | 'direct' {
+  const providerLower = provider.toLowerCase()
+  const proxyEnabledProviders = getProxyEnabledProviders()
+  const enabled =
+    proxyEnabledProviders.has(providerLower) ||
+    proxyEnabledProviders.has('all') ||
+    url.toLowerCase().includes('right.codes')
+  if (!enabled) return 'direct'
+  const proxy = url.startsWith('https:') ? getImageHttpsProxy() : getImageHttpProxy()
+  return proxy ? 'proxy' : 'direct'
 }
 
 function mergeOptions(options?: AiClientOptions): Required<AiClientOptions> {

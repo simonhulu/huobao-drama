@@ -7,7 +7,7 @@
     "dev": "node run-tsx.mjs watch src/index.ts",
     "start": "node run-tsx.mjs src/index.ts",
     "build": "tsc",
-    "test": "tsx --test",
+    "test": "TASK_WORKER_DISABLED=1 tsx --test \"src/**/*.test.ts\"",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "typecheck": "tsc --noEmit"

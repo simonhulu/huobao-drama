@@ -48,6 +48,39 @@ export interface TaskProgressInfo {
   text: string
 }
 
+export interface CreationTaskEvent {
+  id?: number | null
+  event_type?: string
+  eventType?: string
+  data?: Record<string, unknown> | null
+  created_at?: string | number | Date | null
+  createdAt?: string | number | Date | null
+  [key: string]: unknown
+}
+
+export type DharmaRenderPhase =
+  | 'preflight'
+  | 'configuration'
+  | 'props_build'
+  | 'input_fingerprint_pre_render'
+  | 'staging_prepare'
+  | 'remotion_render'
+  | 'remotion_bundle'
+  | 'remotion_composition'
+  | 'remotion_frames'
+  | 'remotion_encode'
+  | 'output_validation'
+  | 'publish'
+  | 'staging_cleanup'
+
+export interface DharmaRenderTelemetry {
+  phase: DharmaRenderPhase
+  elapsedMs: number
+  phaseElapsedMs: number
+  fps: number | null
+  etaMs: number | null
+}
+
 export interface GroupedTasks<T = CreationTask> {
   byStatus: Record<TaskStatus, T[]>
   byType: Record<string, T[]>
@@ -105,6 +138,16 @@ export function taskPayloadValue(task: CreationTask | undefined | null, snakeKey
   return undefined
 }
 
+export function requiresDharmaFullRenderCancelConfirmation(task: CreationTask | undefined | null) {
+  if (!task || task.type !== 'dharma.episode_render' || !['queued', 'running'].includes(taskStatus(task))) return false
+
+  const storyboardIds = taskPayloadValue(task, 'only_storyboard_ids')
+  const maxDurationSec = Number(taskPayloadValue(task, 'max_duration_sec'))
+  const isPreview = (Array.isArray(storyboardIds) && storyboardIds.length > 0)
+    || (Number.isFinite(maxDurationSec) && maxDurationSec > 0)
+  return !isPreview
+}
+
 function comparable(value: unknown) {
   if (value == null) return ''
   if (Array.isArray(value) || typeof value === 'object') return JSON.stringify(value)
@@ -113,6 +156,18 @@ function comparable(value: unknown) {
 
 export function isActiveTask(task: CreationTask | undefined | null) {
   return ACTIVE_TASK_STATUSES.has(taskStatus(task))
+}
+
+/** Applies the task snapshot already carried by SSE without reloading the list. */
+export function mergeTaskListUpdate<T extends CreationTask>(
+  tasks: T[],
+  updated: T,
+  activeOnly = false,
+) {
+  const updatedId = taskId(updated)
+  const next = tasks.filter(task => taskId(task) !== updatedId)
+  if (!activeOnly || isActiveTask(updated)) next.push(updated)
+  return next.sort((left, right) => taskId(right) - taskId(left))
 }
 
 export function isFailedTask(task: CreationTask | undefined | null) {
@@ -230,6 +285,156 @@ export function taskProgressInfo(task: CreationTask | undefined | null): TaskPro
   }
 }
 
+function eventValue(event: CreationTaskEvent, snakeKey: string, camelKey = camelize(snakeKey)) {
+  return event[snakeKey] ?? event[camelKey]
+}
+
+export function taskEventId(event: CreationTaskEvent | undefined | null) {
+  const id = Number(event?.id)
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
+export function latestTaskEventId(events: CreationTaskEvent[]) {
+  return events.reduce<number | null>((latest, event) => {
+    const id = taskEventId(event)
+    return id !== null && (latest === null || id > latest) ? id : latest
+  }, null)
+}
+
+/** Keeps prior stage events locally while later requests contain only new IDs. */
+export function mergeTaskEventHistory(
+  existing: CreationTaskEvent[],
+  incoming: CreationTaskEvent[],
+) {
+  const byId = new Map<number, CreationTaskEvent>()
+  const withoutIds: CreationTaskEvent[] = []
+  for (const event of [...existing, ...incoming]) {
+    const id = taskEventId(event)
+    if (id === null) withoutIds.push(event)
+    else byId.set(id, event)
+  }
+  return [
+    ...withoutIds,
+    ...[...byId.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, event]) => event),
+  ]
+}
+
+function eventTimestamp(event: CreationTaskEvent) {
+  const data = event.data && typeof event.data === 'object' ? event.data : null
+  const parse = (raw: unknown) => {
+    if (raw instanceof Date) return raw.getTime()
+    const parsed = typeof raw === 'number' ? raw : Date.parse(String(raw || ''))
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  const stageTimestamp = parse(data?.at)
+  if (stageTimestamp !== null) return stageTimestamp
+  const raw = eventValue(event, 'created_at')
+  if (raw instanceof Date) return raw.getTime()
+  const parsed = typeof raw === 'number' ? raw : Date.parse(String(raw || ''))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function toDharmaRenderPhase(stage: string, remotionStage: string | null): DharmaRenderPhase | null {
+  if (stage === 'remotion_render') {
+    if (remotionStage === 'bundle') return 'remotion_bundle'
+    if (remotionStage === 'composition') return 'remotion_composition'
+    if (remotionStage === 'frames') return 'remotion_frames'
+    if (remotionStage === 'encode') return 'remotion_encode'
+  }
+  return [
+    'preflight',
+    'configuration',
+    'props_build',
+    'input_fingerprint_pre_render',
+    'staging_prepare',
+    'remotion_render',
+    'output_validation',
+    'publish',
+    'staging_cleanup',
+  ].includes(stage) ? stage as DharmaRenderPhase : null
+}
+
+/**
+ * Reduces persisted Dharma render events to the compact status needed by the
+ * task UI. Generic tasks intentionally return null and keep their existing
+ * progress-only presentation.
+ */
+export function deriveDharmaRenderTelemetry(
+  task: CreationTask | undefined | null,
+  events: CreationTaskEvent[],
+  nowMs = Date.now(),
+): DharmaRenderTelemetry | null {
+  if (!task || task.type !== 'dharma.episode_render' || taskStatus(task) !== 'running') return null
+
+  let activeStage: { name: string; startedAt: number } | null = null
+  let remotionStage: { name: string; startedAt: number } | null = null
+  let remotionFramesStartedAt: number | null = null
+
+  for (const event of events) {
+    const type = String(eventValue(event, 'event_type') || '')
+    const data = event.data && typeof event.data === 'object' ? event.data : null
+    const timestamp = eventTimestamp(event)
+    if (!data || timestamp === null) continue
+
+    if (type === 'dharma.episode.render.stage') {
+      const stage = String(data.stage || '')
+      const status = String(data.status || '')
+      if (status === 'started' && stage) {
+        activeStage = { name: stage, startedAt: timestamp }
+        if (stage === 'remotion_render') {
+          remotionFramesStartedAt = null
+          remotionStage = null
+        }
+      } else if (
+        activeStage?.name === stage
+        && ['completed', 'failed', 'canceled'].includes(status)
+      ) {
+        activeStage = null
+      }
+      continue
+    }
+
+    if (type === 'dharma.episode.render.remotion_stage' && activeStage?.name === 'remotion_render') {
+      const stage = String(data.stage || '')
+      if (stage) {
+        remotionStage = { name: stage, startedAt: timestamp }
+        if (stage === 'frames' && remotionFramesStartedAt === null) remotionFramesStartedAt = timestamp
+      }
+    }
+  }
+
+  if (!activeStage) return null
+  const phase = toDharmaRenderPhase(activeStage.name, remotionStage?.name ?? null)
+  if (!phase) return null
+
+  const taskStartedAt = taskValue(task, 'started_at') || taskValue(task, 'created_at')
+  const parsedTaskStartedAt = taskStartedAt instanceof Date
+    ? taskStartedAt.getTime()
+    : Date.parse(String(taskStartedAt || ''))
+  const elapsedStart = Number.isFinite(parsedTaskStartedAt) ? parsedTaskStartedAt : activeStage.startedAt
+  const phaseStartedAt = remotionStage?.startedAt ?? activeStage.startedAt
+  const elapsedMs = Math.max(0, nowMs - elapsedStart)
+  const phaseElapsedMs = Math.max(0, nowMs - phaseStartedAt)
+
+  const current = Number(taskValue(task, 'progress_current') || 0)
+  const total = Number(taskValue(task, 'progress_total') || 0)
+  const frameElapsedMs = remotionFramesStartedAt == null ? 0 : Math.max(0, nowMs - remotionFramesStartedAt)
+  const canEstimate = phase === 'remotion_frames'
+    && current > 0
+    && total > current
+    && frameElapsedMs >= 1_000
+  const fps = canEstimate
+    ? Number((current / (frameElapsedMs / 1_000)).toFixed(2))
+    : null
+  const etaMs = fps && fps > 0
+    ? Math.round(((total - current) / fps) * 1_000)
+    : null
+
+  return { phase, elapsedMs, phaseElapsedMs, fps, etaMs }
+}
+
 export function taskTitle(task: CreationTask | undefined | null) {
   const type = String(task?.type || '')
   const payload = (task?.payload || {}) as Record<string, unknown>
@@ -245,6 +450,7 @@ export function taskTitle(task: CreationTask | undefined | null) {
     'compose.storyboard': '镜头合成',
     'compose.episode': '批量合成',
     'merge.episode': '全集拼接',
+    'remotion.narrative_storyboard.monitor': '全片故事版画格',
   }
   return typeLabels[type] || type || '任务'
 }
@@ -590,7 +796,7 @@ export function deriveBatchTaskGroups(tasks: CreationTask[]): BatchDramaGroup[] 
     const total = Number(taskValue(task, 'progress_total') || 0)
 
     if (!['queued', 'running'].includes(status)) continue
-    if (total <= 0) continue
+    if (total <= 0 && task.type !== 'dharma.episode_render') continue
 
     const key = batchTaskKey(task)
     if (seen.has(key)) continue

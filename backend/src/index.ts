@@ -34,6 +34,7 @@ import library from './routes/library.js'
 import introTemplates from './routes/introTemplates.js'
 import remotion from './routes/remotion.js'
 import mediaAccounts from './routes/mediaAccounts.js'
+import dharma from './routes/dharma.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { startTaskWorkerLoop } from './services/tasks/worker.js'
 import { listRegisteredTaskTypes } from './services/tasks/registry.js'
@@ -54,6 +55,8 @@ import { registerRecapComposeHandler } from './services/tasks/handlers/recap-com
 import { registerCoverGenerateHandler } from './services/tasks/handlers/cover-generate.js'
 import { registerPublishWeChatChannelsHandler } from './services/tasks/handlers/publish-wechat-channels.js'
 import { registerPublishDouyinHandler } from './services/tasks/handlers/publish-douyin.js'
+import { registerDharmaEpisodeHandlers } from './services/tasks/handlers/dharma-episode.js'
+import { registerDharmaFootageGenerateHandler } from './services/tasks/handlers/dharma-footage-generate.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -64,6 +67,7 @@ const app = new Hono()
 app.use('*', cors({
   origin: ['http://localhost:3013', 'http://localhost:3000', 'http://localhost:5679'],
   credentials: true,
+  allowHeaders: ['Content-Type', 'X-Task-Control-Token'],
 }))
 app.use('*', requestLogger)
 app.use('*', errorHandler)
@@ -98,6 +102,7 @@ api.route('/library', library)
 api.route('/intro-templates', introTemplates)
 api.route('/remotion', remotion)
 api.route('/media-accounts', mediaAccounts)
+api.route('/dharma', dharma)
 
 app.route('/api/v1', api)
 
@@ -118,6 +123,8 @@ registerRecapComposeHandler()
 registerCoverGenerateHandler()
 registerPublishWeChatChannelsHandler()
 registerPublishDouyinHandler()
+registerDharmaEpisodeHandlers()
+registerDharmaFootageGenerateHandler()
 
 const workers: ReturnType<typeof startTaskWorkerLoop>[] = []
 if (process.env.TASK_WORKER_DISABLED !== '1') {
@@ -133,15 +140,59 @@ if (process.env.TASK_WORKER_DISABLED !== '1') {
     runMaintenance: false,
   }))
 
-  // Everything else shares the general pool.
+  // Long-running render / compose tasks get their own pool with an extended lease.
+  const longRunningTypes = new Set([
+    'grid.episode_render',
+    'dharma.episode_render',
+    'compose',
+    'merge',
+    'recap-compose',
+    'intro-compose',
+  ])
+  const longRunningConcurrency = Math.max(1, Number(process.env.LONG_RUNNING_TASK_WORKER_CONCURRENCY || 2))
+  const longRunningLeaseMs = Number(process.env.LONG_RUNNING_TASK_WORKER_LEASE_MS) || 1_800_000
   const allTypes = listRegisteredTaskTypes()
+  const longRunning = allTypes.filter(type => longRunningTypes.has(type))
+  if (longRunning.length > 0) {
+    workers.push(startTaskWorkerLoop({
+      workerId: `worker-long-${process.pid}`,
+      concurrency: longRunningConcurrency,
+      types: longRunning,
+      leaseMs: longRunningLeaseMs,
+      runMaintenance: false,
+    }))
+  }
+
+  // Dharma footage generation persists and polls remote image jobs for up to
+  // 20 minutes. Keep it on a long lease, but separate it from scarce render
+  // slots so pcore's verified four-job lifecycle capacity can be used.
+  if (allTypes.includes('dharma.footage_generate')) {
+    const dharmaFootageConcurrency = Math.max(1, Number(
+      process.env.DHARMA_FOOTAGE_WORKER_CONCURRENCY || process.env.PCORE_IMAGE_CONCURRENCY || 4,
+    ))
+    workers.push(startTaskWorkerLoop({
+      workerId: `worker-dharma-footage-${process.pid}`,
+      concurrency: dharmaFootageConcurrency,
+      types: ['dharma.footage_generate'],
+      leaseMs: longRunningLeaseMs,
+      runMaintenance: false,
+    }))
+  }
+
+  // Everything else shares the general pool.
   const imageTypes = new Set(['image.generate', 'image.episode'])
-  const generalTypes = allTypes.filter(type => !imageTypes.has(type))
+  const generalTypes = allTypes.filter(type => (
+    !imageTypes.has(type)
+    && !longRunningTypes.has(type)
+    && type !== 'dharma.footage_generate'
+  ))
   if (generalTypes.length > 0) {
     workers.push(startTaskWorkerLoop({
       workerId: `worker-general-${process.pid}`,
       concurrency: generalWorkerConcurrency,
       types: generalTypes,
+      // Render / mix / compose tasks can run for several minutes; give them a longer lease.
+      leaseMs: Number(process.env.GENERAL_TASK_WORKER_LEASE_MS) || 600_000,
     }))
   }
 }

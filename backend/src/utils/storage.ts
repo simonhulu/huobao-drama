@@ -34,8 +34,11 @@ export async function downloadFile(url: string, subDir: string): Promise<string>
   const dir = path.join(STORAGE_ROOT, subDir)
   fs.mkdirSync(dir, { recursive: true })
 
-  const ext = getExtFromUrl(url)
-  const filename = `${uuid()}${ext}`
+  // Providers often return opaque task URLs without an image extension. Keep
+  // the URL hint for normal assets, then fall back to the response MIME type
+  // (and finally PNG magic bytes) so valid images are never stored as .bin.
+  const extHint = getExtFromUrl(url)
+  const filename = `${uuid()}${extHint}`
   const filePath = path.join(dir, filename)
 
   const dispatcher = getProxyAgent(url)
@@ -45,10 +48,24 @@ export async function downloadFile(url: string, subDir: string): Promise<string>
   if (!resp.ok) throw new Error(`Download failed: ${resp.status}`)
 
   const buffer = Buffer.from(await resp.arrayBuffer())
-  fs.writeFileSync(filePath, buffer)
+  const ext = extHint !== '.bin' ? extHint : getExtFromContent(resp.headers.get('content-type'), buffer)
+  const finalPath = ext === extHint ? filePath : path.join(dir, `${path.basename(filePath, extHint)}${ext}`)
+  fs.writeFileSync(finalPath, buffer)
 
   // 返回相对路径（供 API 返回给前端）
-  return `static/${subDir}/${filename}`
+  return `static/${subDir}/${path.basename(finalPath)}`
+}
+
+function getExtFromContent(contentType: string | null, buffer: Buffer): string {
+  const mime = String(contentType || '').split(';', 1)[0].trim().toLowerCase()
+  if (mime === 'image/png' || buffer.subarray(0, 8).equals(Buffer.from('\x89PNG\r\n\x1a\n', 'binary'))) return '.png'
+  if (mime === 'image/jpeg' || buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return '.jpg'
+  if (mime === 'image/webp' || (
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  )) return '.webp'
+  if (mime === 'image/gif' || buffer.subarray(0, 6).toString('ascii').startsWith('GIF')) return '.gif'
+  return '.bin'
 }
 
 /**

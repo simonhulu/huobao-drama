@@ -60,9 +60,15 @@ async function getMediaDurationSeconds(filePath: string): Promise<number | null>
   }
 }
 
-function validateImageAdapterSettings(settings: any): string | null {
+function validateImageAdapterSettings(settings: any, provider?: unknown): string | null {
   if (settings == null) return null
   if (typeof settings !== 'object') return 'settings must be an object'
+  // pcore's GPT Image 2 is intentionally task-only in this system. Letting a
+  // saved config request synchronous output creates a misleading UI state and
+  // risks bypassing resumable provider-task recovery in future adapter edits.
+  if (['pcore', 'gpt-image2'].includes(String(provider || '').trim().toLowerCase()) && settings.async === false) {
+    return 'pcore GPT Image 2 requires async: true; synchronous mode is not supported'
+  }
   const adapter = settings.adapter
   if (adapter == null) return null
   if (typeof adapter !== 'object') return 'settings.adapter must be an object'
@@ -156,6 +162,17 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
     return {
       method: 'GET',
       url: buildRightCodeTaskUrl(baseUrl, 'connection-probe'),
+      headers: bearerHeaders(apiKey),
+      body: undefined,
+    }
+  }
+
+  if (p === 'gpt-image2' || p === 'gpt-image-2' || p === 'pcore') {
+    return {
+      // The provider exposes no documented models/health endpoint. Use a
+      // harmless GET so testing a config never creates a billable image task.
+      method: 'GET',
+      url: joinProviderUrl(baseUrl, '/v1', '/images/generations/connection-probe'),
       headers: bearerHeaders(apiKey),
       body: undefined,
     }
@@ -306,7 +323,7 @@ app.post('/', async (c) => {
   if (!settingsResult.success) return badRequest(c, settingsResult.error)
 
   if (body.service_type === 'image') {
-    const adapterError = validateImageAdapterSettings(settingsResult.value)
+    const adapterError = validateImageAdapterSettings(settingsResult.value, body.provider)
     if (adapterError) return badRequest(c, adapterError)
   }
 
@@ -452,7 +469,8 @@ app.post('/test', async (c) => {
     })
     const text = await resp.text()
     const reachable = [200, 204, 400, 401, 403].includes(resp.status)
-      || ((provider === 'rightcode' || provider === 'rightcodes' || provider === 'right') && resp.status === 404)
+      || ((provider === 'rightcode' || provider === 'rightcodes' || provider === 'right'
+        || provider === 'gpt-image2' || provider === 'gpt-image-2' || provider === 'pcore') && resp.status === 404)
     const payload = {
       ok: resp.ok,
       reachable,
@@ -527,7 +545,7 @@ app.put('/:id', async (c) => {
     const [existing] = db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id)).all()
     const serviceType = body.service_type || existing?.serviceType
     if (serviceType === 'image') {
-      const adapterError = validateImageAdapterSettings(settingsResult.value)
+      const adapterError = validateImageAdapterSettings(settingsResult.value, body.provider || existing?.provider)
       if (adapterError) return badRequest(c, adapterError)
     }
 

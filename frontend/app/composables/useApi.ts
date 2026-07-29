@@ -1,7 +1,10 @@
 const BASE = '/api/v1'
 
-async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
-  const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } }
+async function req<T = any>(method: string, path: string, body?: any, headers?: Record<string, string>): Promise<T> {
+  const opts: RequestInit = {
+    method,
+    headers: { 'Content-Type': 'application/json', ...headers },
+  }
   if (body) opts.body = JSON.stringify(body)
 
   const start = performance.now()
@@ -58,14 +61,23 @@ async function reqUpload<T = any>(method: string, path: string, body: FormData):
 
 export const api = {
   get: <T = any>(p: string) => req<T>('GET', p),
-  post: <T = any>(p: string, b?: any) => req<T>('POST', p, b),
+  post: <T = any>(p: string, b?: any, headers?: Record<string, string>) => req<T>('POST', p, b, headers),
   put: <T = any>(p: string, b?: any) => req<T>('PUT', p, b),
   del: <T = any>(p: string) => req<T>('DELETE', p),
   upload: <T = any>(p: string, b: FormData) => reqUpload<T>('POST', p, b),
 }
 
 export const dramaAPI = {
-  list: () => api.get<{ items: any[] }>('/dramas'),
+  list: (params?: { page?: number; page_size?: number; genre?: string; status?: string; keyword?: string }) => {
+    const query = new URLSearchParams()
+    if (params?.page) query.set('page', String(params.page))
+    if (params?.page_size) query.set('page_size', String(params.page_size))
+    if (params?.genre) query.set('genre', params.genre)
+    if (params?.status) query.set('status', params.status)
+    if (params?.keyword) query.set('keyword', params.keyword)
+    const qs = query.toString()
+    return api.get<{ items: any[]; pagination?: { page: number; page_size: number; total: number; total_pages: number } }>(`/dramas${qs ? `?${qs}` : ''}`)
+  },
   get: (id: number) => api.get(`/dramas/${id}`),
   create: (data: any) => api.post('/dramas', data),
   update: (id: number, data: any) => api.put(`/dramas/${id}`, data),
@@ -91,6 +103,7 @@ export const episodeAPI = {
   characters: (id: number) => api.get(`/episodes/${id}/characters`),
   scenes: (id: number) => api.get(`/episodes/${id}/scenes`),
   storyboards: (id: number) => api.get(`/episodes/${id}/storyboards`),
+  narrativeHierarchy: (id: number, kind = 'full') => api.get(`/episodes/${id}/narrative-hierarchy?kind=${kind}`),
   pipelineStatus: (id: number) => api.get(`/episodes/${id}/pipeline-status`),
   generateNarrations: (id: number) => api.post(`/episodes/${id}/generate-narrations`),
   generateCovers: (id: number, data?: { prompt?: string; config_id?: number; frame_type?: string; cover_design?: any }) => api.post(`/episodes/${id}/generate-covers`, data || {}),
@@ -141,10 +154,23 @@ export const gridAPI = {
   split: (d: any) => api.post('/grid/split', d),
 }
 export const gridEpisodeAPI = {
-  generate: (epId: number, d?: { force?: boolean; onlyStoryboardIds?: number[] }) =>
+  generate: (epId: number, d?: { force?: boolean; review?: boolean; onlyStoryboardIds?: number[]; useReferenceImages?: boolean }) =>
     api.post(`/grid/episode/${epId}/generate`, d ?? {}),
-  render: (epId: number) => api.post(`/grid/episode/${epId}/render`, {}),
+  review: (epId: number, d?: { onlyStoryboardIds?: number[]; maxRetries?: number }) =>
+    api.post(`/grid/episode/${epId}/review`, d ?? {}),
+  videos: (epId: number, d: { storyboardIds: number[]; tags?: { era?: string; scene?: string; event?: string; mood?: string }; durationSec?: number; resolution?: string; mode?: 't2v' | 'i2v'; force?: boolean }) =>
+    api.post(`/grid/episode/${epId}/videos`, d),
+  render: (epId: number, d?: { onlyStoryboardIds?: number[]; maxDurationSec?: number }) =>
+    api.post(`/grid/episode/${epId}/render`, d ?? {}),
   cells: (epId: number) => api.get(`/grid/episode/${epId}/cells`),
+  videoAssets: (era?: string, opts?: { episode_id?: number; drama_id?: number }) => {
+    const query = new URLSearchParams()
+    if (era) query.set('era', era)
+    if (opts?.episode_id) query.set('episode_id', String(opts.episode_id))
+    if (opts?.drama_id) query.set('drama_id', String(opts.drama_id))
+    const qs = query.toString()
+    return api.get<{ assets: any[] }>(`/grid/videos/assets${qs ? `?${qs}` : ''}`)
+  },
   productions: (offset = 0, limit = 10, filters?: { account_id?: number | null; drama_id?: number | null; status?: string | null; q?: string | null }) => {
     const query = new URLSearchParams()
     query.set('offset', String(offset))
@@ -193,8 +219,19 @@ export const taskAPI = {
     return api.get(`/tasks${query.size ? `?${query.toString()}` : ''}`)
   },
   get: (id: number) => api.get(`/tasks/${id}`),
-  events: (id: number) => api.get(`/tasks/${id}/events`),
-  cancel: (id: number) => api.post(`/tasks/${id}/cancel`),
+  events: (id: number, afterId?: number | null) => {
+    const query = afterId == null ? '' : `?after_id=${afterId}`
+    return api.get(`/tasks/${id}/events${query}`)
+  },
+  cancel: (
+    id: number,
+    body?: { reason?: string; confirmation?: string; actor?: string },
+    controlToken?: string,
+  ) => api.post(
+    `/tasks/${id}/cancel`,
+    body,
+    controlToken ? { 'X-Task-Control-Token': controlToken } : undefined,
+  ),
 }
 export const aiConfigAPI = {
   list: (t?: string) => api.get(`/ai-configs${t ? `?service_type=${t}` : ''}`),
@@ -254,11 +291,83 @@ export const libraryAPI = {
   lookupSfx: (path: string) => api.get<any>(`/library/sfx/lookup?path=${encodeURIComponent(path)}`),
   deleteMusic: (path: string) => api.del(`/library/music?path=${encodeURIComponent(path)}`),
   deleteSfx: (path: string) => api.del(`/library/sfx?path=${encodeURIComponent(path)}`),
+  uploadMusic: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api.upload<{ ok: boolean; path?: string }>('/library/music/upload', form)
+  },
 }
 
 export const healthAPI = {
   workers: () => api.get<{ healthy_count: number; total_count: number; timeout_ms: number; workers: any[] }>('/health/workers'),
   imageMetrics: () => api.get<{ total: number; pending: number; processing: number; completed: number; failed: number; completed_last_24h: number }>('/metrics/image-generation'),
+}
+
+export const sciencePopAPI = {
+  projects: (page = 1, pageSize = 20, keyword?: string) => {
+    const query = new URLSearchParams()
+    query.set('page', String(page))
+    query.set('page_size', String(pageSize))
+    if (keyword) query.set('keyword', keyword)
+    return api.get<{ items: any[]; pagination: any }>(`/science-pop/projects?${query.toString()}`)
+  },
+  create: (data: { title: string; description?: string; episode_title?: string; video_title?: string; aspect_ratio?: string }) =>
+    api.post('/science-pop/projects', data),
+  get: (id: number) => api.get<any>(`/science-pop/projects/${id}`),
+  intake: (id: number, data: { source_video_url?: string; script_content?: string; title?: string; video_title?: string; description?: string }) =>
+    api.put(`/science-pop/projects/${id}/intake`, data),
+  segment: (id: number, data?: { scene_threshold?: number; target_shot_seconds?: number }) =>
+    api.post(`/science-pop/projects/${id}/segment`, data ?? {}),
+  tts: (id: number) => api.post(`/science-pop/projects/${id}/tts`, {}),
+  compose: (id: number) => api.post(`/science-pop/projects/${id}/compose`, {}),
+}
+
+export const dharmaAPI = {
+  footage: (episodeId: number) => api.get(`/dharma/episode/${episodeId}/footage`),
+  imageStyles: () => api.get<{
+    default_style_id: string
+    items: Array<{
+      id: string
+      name: string
+      description: string
+      preview_url: string
+      default_move: 'push' | 'pull' | 'hold' | 'drift_left' | 'drift_right'
+      treatment: 'ink_wash' | 'surreal_dream' | 'minimal_light' | 'legacy_temple'
+      emotions: Array<'curiosity' | 'stillness' | 'tension' | 'acceptance' | 'insight' | 'release'>
+      production: boolean
+    }>
+  }>('/dharma/image-styles'),
+  applyFootage: (episodeId: number, assignments: any[]) =>
+    api.post(`/dharma/episode/${episodeId}/footage`, { assignments }),
+  stockAssets: () => api.get<{ items: any[] }>('/dharma/stock-assets'),
+  generateFootage: (episodeId: number, data: {
+    storyboard_ids: number[]
+    kind: 'image' | 'video'
+    prompt: string
+    model?: string
+    reference_images?: string[]
+    role: 'temple_interior' | 'ritual' | 'temple_exterior' | 'contemplative_nature' | 'human_relationship'
+    emotion: 'curiosity' | 'stillness' | 'tension' | 'acceptance' | 'insight' | 'release'
+    style_id: string
+    move?: 'push' | 'pull' | 'hold' | 'drift_left' | 'drift_right'
+    shot_function?: 'narrative_illustration' | 'atmosphere_bridge'
+    semantic?: {
+      subject_count: number
+      subjects: string
+      relationship: string
+      action: string
+      visible_emotion: string
+      visual_evidence: string
+    }
+  }) =>
+    api.post<{ task_id: number }>(`/dharma/episode/${episodeId}/footage/generate`, data),
+  preflight: (episodeId: number) => api.post(`/dharma/episode/${episodeId}/preflight`, {}),
+  approveProduction: (episodeId: number, data: { fullPlanFingerprint: string; canaryFingerprint?: string; actor: string; reason: string }) =>
+    api.post(`/dharma/episode/${episodeId}/review/approve`, data),
+  renderCanary: (episodeId: number) => api.post<{ task_id: number }>(`/dharma/episode/${episodeId}/canary`, {}),
+  approvePilot: (episodeId: number) => api.post(`/dharma/episode/${episodeId}/pilot/approve`, {}),
+  render: (episodeId: number, opts?: { maxDurationSec?: number; onlyStoryboardIds?: number[] }) =>
+    api.post(`/dharma/episode/${episodeId}/render`, opts ?? {}),
 }
 
 export const remotionAPI = {
@@ -274,4 +383,7 @@ export const remotionAPI = {
   assets: (id: number) => api.get<any[]>(`/remotion/projects/${id}/assets`),
   tasks: (id: number) => api.get<any[]>(`/remotion/projects/${id}/tasks`),
   renders: (id: number) => api.get<any[]>(`/remotion/projects/${id}/renders`),
+  storyboardProgress: (id: number) => api.get<any>(`/remotion/projects/${id}/narrative-storyboard-progress`),
+  renderArtifacts: (id: number) => api.get<{ artifacts: any[] }>(`/remotion/projects/${id}/render-artifacts`),
+  del: (id: number) => api.del(`/remotion/projects/${id}`),
 }

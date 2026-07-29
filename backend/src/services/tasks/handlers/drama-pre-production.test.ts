@@ -14,6 +14,7 @@ const { createDramaPreProductionHandler } = await import('./drama-pre-production
 function createContext(taskId: number, signal = new AbortController().signal, payload: any = { drama_id: 1 }) {
   return {
     taskId,
+    episodeId: null,
     payload,
     signal,
     attempts: 1,

@@ -230,6 +230,33 @@ function findTaskByImageGenerationId(generationId: number): CreationTask | null 
   return rows.length ? normalizeTask(rows[0]) : null
 }
 
+// Dharma footage generation executes the image adapter inside its parent task
+// instead of creating a separate image.generate child task. The periodic
+// reconciler must not mark that in-flight record as orphaned while the parent
+// is legitimately waiting on the provider.
+function findDharmaFootageTaskByImageGenerationId(generationId: number): CreationTask | null {
+  const eventRows = db.select()
+    .from(schema.creationTaskEvents)
+    .where(and(
+      eq(schema.creationTaskEvents.eventType, 'dharma.footage.generation'),
+      like(schema.creationTaskEvents.dataJson, `%\"image_generation_id\":${generationId}%`),
+    ))
+    .all()
+    .sort((a, b) => b.id - a.id)
+
+  for (const event of eventRows) {
+    const [task] = db.select()
+      .from(schema.creationTasks)
+      .where(and(
+        eq(schema.creationTasks.id, event.taskId),
+        eq(schema.creationTasks.type, 'dharma.footage_generate'),
+      ))
+      .all()
+    if (task) return normalizeTask(task)
+  }
+  return null
+}
+
 function normalizeTask(row: typeof schema.creationTasks.$inferSelect): CreationTask {
   function parseJson(value: string | null | undefined) {
     if (!value) return null
@@ -256,12 +283,14 @@ function normalizeTask(row: typeof schema.creationTasks.$inferSelect): CreationT
     progressTotal: row.progressTotal ?? 0,
     progressMessage: row.progressMessage,
     leaseOwner: row.leaseOwner,
+    leaseToken: row.leaseToken,
     leaseExpiresAt: row.leaseExpiresAt,
     attempts: row.attempts ?? 0,
     maxAttempts: row.maxAttempts ?? 1,
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,
     cancelRequested: Boolean(row.cancelRequested),
+    commitClaimedAt: row.commitClaimedAt ?? null,
     priority: row.priority ?? 0,
     scheduledAt: row.scheduledAt ?? null,
     provider: row.provider ?? null,
@@ -293,6 +322,25 @@ export function reconcileImageGenerationState(): { processed: number; updated: n
     // 封面生成的 image generation 记录由 cover.generate 任务直接管理，不走 image.generate task，
     // 调和时不应因找不到 image.generate 任务而将其标记为失败。
     if (record.imageType === 'cover' || record.imageType === 'cover_base') {
+      continue
+    }
+
+    const dharmaTask = findDharmaFootageTaskByImageGenerationId(generationId)
+    if (dharmaTask) {
+      if (!isTerminalStatus(dharmaTask.status)) continue
+      db.transaction((tx) => {
+        if (dharmaTask.status === 'canceled') {
+          setImageGenerationCanceled(tx, generationId)
+        } else {
+          setImageGenerationFailed(
+            tx,
+            generationId,
+            `Dharma footage task ${dharmaTask.id} ${dharmaTask.status} before image generation completed`,
+            dharmaTask.errorCode,
+          )
+        }
+        updated++
+      })
       continue
     }
 

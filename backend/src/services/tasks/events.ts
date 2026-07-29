@@ -16,12 +16,31 @@ export interface TaskEventAddedEvent {
 export type TaskStreamEvent = TaskChangedEvent | TaskEventAddedEvent
 
 class TaskEventBus extends EventEmitter {
+  /**
+   * Task events are best-effort observation. A disconnected SSE consumer must
+   * never turn a committed task or delivery mutation into an application error.
+   */
+  private notify(event: TaskStreamEvent): void {
+    for (const listener of this.rawListeners('task')) {
+      try {
+        listener.call(this, event)
+      } catch (error) {
+        // Keep dispatching to healthy subscribers and leave durable task state intact.
+        try {
+          console.error('[tasks] task event listener failed:', error)
+        } catch {
+          // Notification diagnostics are also best effort.
+        }
+      }
+    }
+  }
+
   notifyTaskChanged(task: CreationTask, reason?: string): void {
-    this.emit('task', { type: 'task.changed', task, reason } satisfies TaskChangedEvent)
+    this.notify({ type: 'task.changed', task, reason } satisfies TaskChangedEvent)
   }
 
   notifyTaskEventAdded(taskId: number, event: CreationTaskEvent): void {
-    this.emit('task', { type: 'task.event_added', taskId, event } satisfies TaskEventAddedEvent)
+    this.notify({ type: 'task.event_added', taskId, event } satisfies TaskEventAddedEvent)
   }
 }
 

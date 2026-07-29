@@ -1,9 +1,17 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
-import { createTask, addTaskDependency, getTask } from '../services/tasks/store.js'
+import {
+  createTask,
+  addTaskDependency,
+  getTask,
+  isFormalDharmaRender,
+  listActiveTasksForEpisodes,
+  listPendingDharmaRenderReconciliationsForEpisodes,
+  requestCancel,
+} from '../services/tasks/store.js'
 import { scheduleAutoStartForEpisode, resetEpisodeStoryboards, scheduleBreakdownAndNarrationForEpisode, scheduleDirectScriptPipeline } from '../services/tasks/auto-pipeline.js'
 import { scheduleCoverGeneration } from '../services/tasks/handlers/cover-generate.js'
 import { confirmPublishWeChatChannels } from '../services/tasks/handlers/publish-wechat-channels.js'
@@ -105,7 +113,7 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'render_mode', 'auto_mode', 'enable_ai_rewrite', 'narration_voice_id', 'narration_speed', 'dialogue_mode', 'narration_mode', 'subtitle_enabled', 'subtitle_font', 'subtitle_color', 'subtitle_size', 'subtitle_position', 'subtitle_margin', 'subtitle_margin_v', 'subtitle_background_color', 'subtitle_stroke_color', 'subtitle_stroke_width', 'opening_hook', 'cliffhanger_hook', 'recap_script', 'series_hook', 'cover_prompt', 'cover_design', 'creative_brief', 'creative_brief_json']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'render_mode', 'auto_mode', 'enable_ai_rewrite', 'narration_voice_id', 'narration_speed', 'dialogue_mode', 'narration_mode', 'subtitle_enabled', 'subtitle_font', 'subtitle_color', 'subtitle_size', 'subtitle_position', 'subtitle_margin', 'subtitle_margin_v', 'subtitle_background_color', 'subtitle_stroke_color', 'subtitle_stroke_width', 'opening_hook', 'cliffhanger_hook', 'recap_script', 'series_hook', 'cover_prompt', 'cover_design', 'creative_brief', 'creative_brief_json', 'bgm_audio_url', 'bgm_plan_json']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
@@ -148,6 +156,9 @@ app.put('/:id', async (c) => {
   }
   const [epBefore] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
   if ('cover_prompt' in updates) drizzleUpdates.coverPrompt = updates.cover_prompt || null
+
+  if ('bgm_audio_url' in updates) drizzleUpdates.bgmAudioUrl = updates.bgm_audio_url || null
+  if ('bgm_plan_json' in updates) drizzleUpdates.bgmPlanJson = updates.bgm_plan_json || null
 
   let extractedCoverDesign = null
   const hasExplicitCoverDesign = 'cover_design' in updates
@@ -690,22 +701,46 @@ app.post('/:id/generate-unified-narration-audio', async (c) => {
   })
 })
 
-// Helper: cancel active/pending tasks for a list of episodes
-function cancelPendingTasksForEpisodes(episodeIds: number[]) {
-  if (!episodeIds.length) return
-  const ts = now()
-  db.update(schema.creationTasks)
-    .set({
-      status: 'canceled',
-      cancelRequested: true,
-      updatedAt: ts,
-      completedAt: ts,
+function dharmaRenderDeletionConflict(c: Context, taskId: number) {
+  return c.json({
+    code: 409,
+    message: '该剧集存在正式 Dharma 整集渲染或待对账交付；请先通过任务控制流程取消或完成对账，再删除剧集',
+    data: { task_id: taskId },
+  }, 409)
+}
+
+/**
+ * Episode deletion must not directly rewrite task state. Ordinary work is
+ * asked to cancel through the task store so the worker can stop safely and an
+ * audit event exists. Formal Dharma delivery is deliberately not canceled
+ * here: it requires the dedicated control token and human confirmation.
+ */
+function requestPendingTaskCancellationsForEpisodes(episodeIds: number[]) {
+  if (!episodeIds.length) return null
+  const activeTasks = listActiveTasksForEpisodes(episodeIds)
+
+  // Preflight the entire deletion batch before changing any ordinary task.
+  // A 409 must be side-effect free when an older formal render is present.
+  const formalRender = activeTasks.find((task) => (
+    task.type === 'dharma.episode_render' && isFormalDharmaRender(task)
+  ))
+  if (formalRender) return formalRender
+
+  const pendingReconciliation = listPendingDharmaRenderReconciliationsForEpisodes(episodeIds)[0]
+  if (pendingReconciliation) return pendingReconciliation
+
+  for (const task of activeTasks) {
+    const cancellation = requestCancel(task.id, {
+      reason: 'Episode deletion requested',
+      actor: 'episode-delete',
+      source: 'episode-delete',
     })
-    .where(and(
-      inArray(schema.creationTasks.episodeId, episodeIds),
-      inArray(schema.creationTasks.status, ['queued', 'running', 'pending']),
-    ))
-    .run()
+    if (cancellation.outcome === 'commit_claimed') return cancellation.task ?? task
+    if (cancellation.outcome !== 'requested' && cancellation.outcome !== 'already_requested' && cancellation.outcome !== 'not_active') {
+      throw new Error(`无法取消待删除剧集的任务 ${task.id}: ${cancellation.outcome}`)
+    }
+  }
+  return null
 }
 
 // Helper: renumber remaining episodes and update drama totals
@@ -743,10 +778,11 @@ app.delete('/:id', async (c) => {
   if (!ep) return notFound(c, 'Episode not found')
   if (ep.deletedAt) return success(c, { id, deleted: false, reason: 'already_deleted' })
 
+  const blockedTask = requestPendingTaskCancellationsForEpisodes([id])
+  if (blockedTask) return dharmaRenderDeletionConflict(c, blockedTask.id)
   resetEpisodeStoryboards(id)
   db.delete(schema.episodeCharacters).where(eq(schema.episodeCharacters.episodeId, id)).run()
   db.delete(schema.episodeScenes).where(eq(schema.episodeScenes.episodeId, id)).run()
-  cancelPendingTasksForEpisodes([id])
 
   db.update(schema.episodes)
     .set({ deletedAt: now(), updatedAt: now() })
@@ -776,12 +812,13 @@ app.post('/bulk-delete', async (c) => {
     return badRequest(c, '批量删除的集必须属于同一 Drama')
   }
 
+  const blockedTask = requestPendingTaskCancellationsForEpisodes(ids)
+  if (blockedTask) return dharmaRenderDeletionConflict(c, blockedTask.id)
   for (const ep of episodes) {
     resetEpisodeStoryboards(ep.id)
     db.delete(schema.episodeCharacters).where(eq(schema.episodeCharacters.episodeId, ep.id)).run()
     db.delete(schema.episodeScenes).where(eq(schema.episodeScenes.episodeId, ep.id)).run()
   }
-  cancelPendingTasksForEpisodes(ids)
 
   db.update(schema.episodes)
     .set({ deletedAt: now(), updatedAt: now() })

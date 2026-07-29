@@ -214,3 +214,23 @@ test('stored-config probes use the decrypted key without sending it to the brows
   assert.doesNotMatch(json.data.response_preview, /legacy-plain-key/)
   assert.match(json.data.response_preview, /\*\*\*/)
 })
+
+test('pcore GPT Image 2 refuses a synchronous image-mode setting', async () => {
+  const response = await route.request('/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      service_type: 'image',
+      provider: 'pcore',
+      name: 'Pcore',
+      base_url: 'https://pcore.ai',
+      api_key: 'test-key',
+      model: ['gpt-image-2'],
+      settings: { async: false },
+    }),
+  })
+
+  const json = await response.json()
+  assert.equal(response.status, 400)
+  assert.match(json.message, /requires async: true/)
+})

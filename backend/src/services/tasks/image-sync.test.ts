@@ -9,7 +9,7 @@ process.env.DB_PATH = join(dbDir, 'test.db')
 
 const { eq } = await import('drizzle-orm')
 const { db, schema } = await import('../../db/index.js')
-const { createTask, transitionTask, scheduleTaskRetry } = await import('./store.js')
+const { appendTaskEvent, createTask, transitionTask, scheduleTaskRetry } = await import('./store.js')
 const { syncImageGenerationTaskState, reconcileImageGenerationState } = await import('../image-generation-sync.js')
 const { now } = await import('../../utils/response.js')
 
@@ -52,12 +52,14 @@ function createImageGeneration(overrides: {
   sceneId?: number
   frameType?: string
   status?: string
+  episodeId?: number
 } = {}) {
   const result = db.insert(schema.imageGenerations).values({
     storyboardId: overrides.storyboardId ?? null,
     characterId: overrides.characterId ?? null,
     sceneId: overrides.sceneId ?? null,
     frameType: overrides.frameType ?? null,
+    episodeId: overrides.episodeId ?? null,
     prompt: 'test prompt',
     status: overrides.status ?? 'processing',
     createdAt: now(),
@@ -284,4 +286,50 @@ test('reconcileImageGenerationState marks orphan processing records as failed', 
   const record = loadImageGeneration(generationId)
   assert.equal(record?.status, 'failed')
   assert.equal(record?.errorMsg, 'No associated task found')
+})
+
+test('reconcileImageGenerationState keeps a Dharma-owned generation alive while its parent waits on the provider', () => {
+  resetTables()
+  const episodeId = 44
+  const generationId = createImageGeneration({ status: 'processing', episodeId })
+  const parent = createTask({
+    type: 'dharma.footage_generate',
+    dramaId: 4,
+    episodeId,
+    payload: { episode_id: episodeId },
+  })
+  transitionTask(parent.id, 'running')
+  appendTaskEvent(parent.id, 'dharma.footage.generation', {
+    kind: 'image',
+    image_generation_id: generationId,
+  })
+
+  const result = reconcileImageGenerationState()
+  assert.equal(result.processed, 1)
+  assert.equal(result.updated, 0)
+  assert.equal(loadImageGeneration(generationId)?.status, 'processing')
+})
+
+test('reconcileImageGenerationState fails an unfinished generation after its Dharma parent fails', () => {
+  resetTables()
+  const episodeId = 45
+  const generationId = createImageGeneration({ status: 'processing', episodeId })
+  const parent = createTask({
+    type: 'dharma.footage_generate',
+    dramaId: 4,
+    episodeId,
+    payload: { episode_id: episodeId },
+  })
+  appendTaskEvent(parent.id, 'dharma.footage.generation', {
+    kind: 'image',
+    image_generation_id: generationId,
+  })
+  transitionTask(parent.id, 'failed', { errorCode: 'provider_timeout' })
+
+  const result = reconcileImageGenerationState()
+  assert.equal(result.updated, 1)
+  const record = loadImageGeneration(generationId)
+  assert.equal(record?.status, 'failed')
+  assert.match(record?.errorMsg || '', new RegExp(`Dharma footage task ${parent.id} failed`))
+  assert.equal(record?.lastErrorCode, 'provider_timeout')
 })

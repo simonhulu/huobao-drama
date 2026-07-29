@@ -23,6 +23,7 @@ describe('cover-generate handler', () => {
 
     const ctx: TaskContext<any> = {
       taskId: 1,
+      episodeId: 999,
       payload: { episode_id: 999, prompt: 'test prompt' },
       signal: new AbortController().signal,
       attempts: 0,

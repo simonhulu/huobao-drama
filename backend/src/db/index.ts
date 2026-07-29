@@ -5,6 +5,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { bindSecretKeyToDatabase, encryptSecret, isEncryptedSecret } from '../services/secret-crypto.js'
+import { reconcileDharmaActiveRenderStartupState } from './dharma-render-startup-reconciliation.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DB_PATH = process.env.DB_PATH || path.resolve(__dirname, '../../../data/huobao_drama.db')
@@ -71,6 +72,7 @@ sqlite.exec(`
     duration INTEGER DEFAULT 0,
     status TEXT DEFAULT 'draft',
     video_url TEXT,
+    source_video_url TEXT,
     thumbnail TEXT,
     image_config_id INTEGER,
     video_config_id INTEGER,
@@ -102,6 +104,7 @@ sqlite.exec(`
     retention_beats TEXT,
     energy_curve TEXT,
     bgm_audio_url TEXT,
+    dharma_input_revision INTEGER NOT NULL DEFAULT 0,
     secondary_bgm_audio_url TEXT,
     bgm_plan_json TEXT,
     pre_tts_audio_url TEXT,
@@ -490,12 +493,14 @@ sqlite.exec(`
     progress_total INTEGER DEFAULT 0,
     progress_message TEXT,
     lease_owner TEXT,
+    lease_token TEXT,
     lease_expires_at TEXT,
     attempts INTEGER DEFAULT 0,
     max_attempts INTEGER DEFAULT 1,
     error_code TEXT,
     error_message TEXT,
     cancel_requested INTEGER DEFAULT 0,
+    commit_claimed_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
@@ -523,6 +528,8 @@ sqlite.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_creation_task_events_task_id
     ON creation_task_events (task_id);
+  CREATE INDEX IF NOT EXISTS idx_creation_task_events_task_id_id
+    ON creation_task_events (task_id, id);
 
   CREATE TABLE IF NOT EXISTS creation_task_dependencies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -697,6 +704,110 @@ sqlite.exec(`
     ON remotion_renders (project_id, id);
   CREATE INDEX IF NOT EXISTS idx_remotion_renders_status
     ON remotion_renders (status);
+
+  CREATE TABLE IF NOT EXISTS narrative_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER NOT NULL,
+    remotion_project_id INTEGER,
+    kind TEXT NOT NULL DEFAULT 'full',
+    style_profile TEXT,
+    duration_ms INTEGER,
+    timing_source TEXT,
+    source_path TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (episode_id, kind)
+  );
+  CREATE TABLE IF NOT EXISTS narrative_sequences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id INTEGER NOT NULL,
+    seq_key TEXT NOT NULL,
+    seq_index INTEGER NOT NULL,
+    title TEXT,
+    start_ms INTEGER,
+    end_ms INTEGER,
+    UNIQUE (plan_id, seq_key)
+  );
+  CREATE TABLE IF NOT EXISTS narration_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sequence_id INTEGER NOT NULL,
+    event_key TEXT NOT NULL,
+    event_index INTEGER NOT NULL,
+    start_ms INTEGER,
+    end_ms INTEGER,
+    text TEXT,
+    UNIQUE (sequence_id, event_key)
+  );
+  CREATE TABLE IF NOT EXISTS visual_beats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    beat_key TEXT NOT NULL,
+    kind TEXT,
+    start_ms INTEGER,
+    end_ms INTEGER,
+    anchor_id TEXT,
+    anchor_verified INTEGER,
+    description TEXT,
+    UNIQUE (event_id, beat_key)
+  );
+  CREATE TABLE IF NOT EXISTS storyboard_sheets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id INTEGER NOT NULL,
+    sequence_id INTEGER,
+    sheet_key TEXT NOT NULL,
+    title TEXT,
+    image_url TEXT,
+    UNIQUE (plan_id, sheet_key)
+  );
+  CREATE TABLE IF NOT EXISTS storyboard_panels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    beat_id INTEGER,
+    event_id INTEGER,
+    sheet_id INTEGER,
+    plan_id INTEGER NOT NULL,
+    panel_key TEXT NOT NULL,
+    description TEXT,
+    crop_path TEXT,
+    final_path TEXT,
+    gen_status TEXT NOT NULL DEFAULT 'pending',
+    generation_id INTEGER,
+    task_id INTEGER,
+    prompt TEXT,
+    reference_mode TEXT,
+    error TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE (plan_id, panel_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_storyboard_panels_plan
+    ON storyboard_panels (plan_id, gen_status);
+  CREATE TABLE IF NOT EXISTS render_shots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER,
+    plan_id INTEGER NOT NULL,
+    shot_key TEXT NOT NULL,
+    source_kind TEXT,
+    source_beat_key TEXT,
+    description TEXT,
+    start_ms INTEGER,
+    end_ms INTEGER,
+    UNIQUE (plan_id, shot_key, source_beat_key)
+  );
+  CREATE TABLE IF NOT EXISTS sound_beats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id INTEGER NOT NULL,
+    sequence_id INTEGER,
+    event_id INTEGER,
+    sound_key TEXT NOT NULL,
+    type TEXT,
+    start_ms INTEGER,
+    end_ms INTEGER,
+    source_query TEXT,
+    volume REAL,
+    tags_json TEXT,
+    UNIQUE (plan_id, sound_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_sound_beats_plan
+    ON sound_beats (plan_id, sequence_id);
 `)
 
 function ensureColumn(table: string, column: string, definition: string) {
@@ -723,6 +834,8 @@ ensureColumn('episodes', 'narration_voice_id', 'TEXT')
 ensureColumn('episodes', 'narration_speed', 'REAL DEFAULT 1.0')
 ensureColumn('episodes', 'video_title', 'TEXT')
 ensureColumn('dramas', 'video_title', 'TEXT')
+ensureColumn('narrative_sequences', 'design_json', 'TEXT')
+ensureColumn('episodes', 'opening_storyboard_json', 'TEXT')
 ensureColumn('dramas', 'workflow_type', "TEXT DEFAULT 'story_rewrite'")
 ensureColumn('episodes', 'workflow_type', "TEXT DEFAULT 'story_rewrite'")
 ensureColumn('dramas', 'media_account_id', 'INTEGER')
@@ -789,6 +902,8 @@ ensureColumn('creation_tasks', 'priority', 'INTEGER DEFAULT 0')
 ensureColumn('creation_tasks', 'scheduled_at', 'TEXT')
 ensureColumn('creation_tasks', 'provider', 'TEXT')
 ensureColumn('creation_tasks', 'retry_reason', 'TEXT')
+ensureColumn('creation_tasks', 'commit_claimed_at', 'TEXT')
+ensureColumn('creation_tasks', 'lease_token', 'TEXT')
 ensureColumn('episode_publish_records', 'session_key', 'TEXT')
 ensureColumn('episode_publish_records', 'checkpoint_json', 'TEXT')
 
@@ -796,14 +911,147 @@ ensureColumn('dramas', 'intro_template_id', 'TEXT')
 ensureColumn('episodes', 'recap_script', 'TEXT')
 ensureColumn('episodes', 'recap_video_url', 'TEXT')
 ensureColumn('episodes', 'intro_video_url', 'TEXT')
+ensureColumn('episodes', 'source_video_url', 'TEXT')
 ensureColumn('episodes', 'series_hook', 'TEXT')
 ensureColumn('episodes', 'metadata', 'TEXT')
+ensureColumn('episodes', 'dharma_input_revision', 'INTEGER NOT NULL DEFAULT 0')
 
 ensureColumn('image_generations', 'attempts', 'INTEGER DEFAULT 0')
 ensureColumn('image_generations', 'last_error_code', 'TEXT')
 ensureColumn('image_generations', 'last_error_detail', 'TEXT')
 ensureColumn('ai_voices', 'voice_type', "TEXT DEFAULT 'system'")
 sqlite.exec(`UPDATE ai_voices SET voice_type = 'system' WHERE voice_type IS NULL OR voice_type = ''`)
+
+// A Dharma pilot/render is valid only for a specific set of episode inputs.
+// The render takes a durable commit claim immediately before publishing. From
+// that point until it reaches a terminal state, reject any input mutation at
+// the database boundary. This protects against a second backend process or a
+// direct SQL write racing the filesystem delivery step.
+const dharmaRenderGuardSql = `
+  DROP TRIGGER IF EXISTS prevent_dharma_commit_episode_input_update;
+  DROP TRIGGER IF EXISTS prevent_dharma_commit_storyboard_insert;
+  DROP TRIGGER IF EXISTS prevent_dharma_commit_storyboard_update;
+  DROP TRIGGER IF EXISTS prevent_dharma_commit_storyboard_delete;
+  DROP TRIGGER IF EXISTS bump_dharma_input_revision_from_episode;
+  DROP TRIGGER IF EXISTS bump_dharma_input_revision_from_storyboard_insert;
+  DROP TRIGGER IF EXISTS bump_dharma_input_revision_from_storyboard_update;
+  DROP TRIGGER IF EXISTS bump_dharma_input_revision_from_storyboard_delete;
+
+  CREATE TRIGGER prevent_dharma_commit_episode_input_update
+  BEFORE UPDATE OF title, pre_tts_audio_url, pre_tts_titles_json, bgm_audio_url ON episodes
+  WHEN EXISTS (
+    SELECT 1 FROM creation_tasks
+    WHERE type = 'dharma.episode_render'
+      AND episode_id = OLD.id
+      AND status = 'running'
+      AND commit_claimed_at IS NOT NULL
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'Dharma delivery commit in progress: episode render inputs are frozen');
+  END;
+
+  CREATE TRIGGER prevent_dharma_commit_storyboard_insert
+  BEFORE INSERT ON storyboards
+  WHEN EXISTS (
+    SELECT 1 FROM creation_tasks
+    WHERE type = 'dharma.episode_render'
+      AND episode_id = NEW.episode_id
+      AND status = 'running'
+      AND commit_claimed_at IS NOT NULL
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'Dharma delivery commit in progress: storyboard render inputs are frozen');
+  END;
+
+  CREATE TRIGGER prevent_dharma_commit_storyboard_update
+  BEFORE UPDATE OF episode_id, storyboard_number, narration, description, grid_cells ON storyboards
+  WHEN EXISTS (
+    SELECT 1 FROM creation_tasks
+    WHERE type = 'dharma.episode_render'
+      AND episode_id IN (OLD.episode_id, NEW.episode_id)
+      AND status = 'running'
+      AND commit_claimed_at IS NOT NULL
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'Dharma delivery commit in progress: storyboard render inputs are frozen');
+  END;
+
+  CREATE TRIGGER prevent_dharma_commit_storyboard_delete
+  BEFORE DELETE ON storyboards
+  WHEN EXISTS (
+    SELECT 1 FROM creation_tasks
+    WHERE type = 'dharma.episode_render'
+      AND episode_id = OLD.episode_id
+      AND status = 'running'
+      AND commit_claimed_at IS NOT NULL
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'Dharma delivery commit in progress: storyboard render inputs are frozen');
+  END;
+
+  CREATE TRIGGER bump_dharma_input_revision_from_episode
+  AFTER UPDATE OF title, pre_tts_audio_url, pre_tts_titles_json, bgm_audio_url ON episodes
+  WHEN NEW.dharma_input_revision = OLD.dharma_input_revision
+    AND (
+      NEW.title IS NOT OLD.title
+      OR NEW.pre_tts_audio_url IS NOT OLD.pre_tts_audio_url
+      OR NEW.pre_tts_titles_json IS NOT OLD.pre_tts_titles_json
+      OR NEW.bgm_audio_url IS NOT OLD.bgm_audio_url
+    )
+  BEGIN
+    UPDATE episodes
+    SET dharma_input_revision = OLD.dharma_input_revision + 1
+    WHERE id = NEW.id;
+  END;
+
+  CREATE TRIGGER bump_dharma_input_revision_from_storyboard_insert
+  AFTER INSERT ON storyboards
+  BEGIN
+    UPDATE episodes
+    SET dharma_input_revision = dharma_input_revision + 1
+    WHERE id = NEW.episode_id;
+  END;
+
+  CREATE TRIGGER bump_dharma_input_revision_from_storyboard_update
+  AFTER UPDATE OF episode_id, storyboard_number, narration, description, grid_cells ON storyboards
+  BEGIN
+    UPDATE episodes
+    SET dharma_input_revision = dharma_input_revision + 1
+    WHERE id = NEW.episode_id;
+    UPDATE episodes
+    SET dharma_input_revision = dharma_input_revision + 1
+    WHERE id = OLD.episode_id AND OLD.episode_id <> NEW.episode_id;
+  END;
+
+  CREATE TRIGGER bump_dharma_input_revision_from_storyboard_delete
+  AFTER DELETE ON storyboards
+  BEGIN
+    UPDATE episodes
+    SET dharma_input_revision = dharma_input_revision + 1
+    WHERE id = OLD.episode_id;
+  END;
+`
+
+// One Dharma render owns an episode while it is queued or running. Older
+// releases could leave duplicate rows behind, which must not prevent the API
+// process from starting. Reconcile them under an immediate transaction before
+// adding the partial index: expired commit claims are never retried, and all
+// non-authoritative active rows become auditable stale records.
+const reconcileDharmaRenderStartupState = sqlite.transaction(() => {
+  // The trigger replacement, reconciliation, and partial unique index form
+  // one database-level guard. Do not leave a rolling-restart gap where a
+  // claimed render's inputs can be changed before the guards return.
+  sqlite.exec(dharmaRenderGuardSql)
+  reconcileDharmaActiveRenderStartupState(sqlite)
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_dharma_episode_render
+      ON creation_tasks (episode_id)
+      WHERE type = 'dharma.episode_render'
+        AND status IN ('queued', 'running')
+        AND episode_id IS NOT NULL
+  `)
+})
+reconcileDharmaRenderStartupState.immediate()
 
 const migrateAiConfigSecrets = sqlite.transaction(() => {
   const rows = sqlite.prepare(`SELECT id, api_key FROM ai_service_configs WHERE api_key <> ''`).all() as Array<{

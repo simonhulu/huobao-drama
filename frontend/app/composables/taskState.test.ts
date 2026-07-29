@@ -2,8 +2,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  deriveBatchTaskGroups,
+  deriveDharmaRenderTelemetry,
   deriveEpisodeTaskGroups,
   groupTasks,
+  latestTaskEventId,
+  mergeTaskListUpdate,
+  mergeTaskEventHistory,
+  requiresDharmaFullRenderCancelConfirmation,
   isTaskRunningInList,
   taskErrorInList,
   taskProgressInfo,
@@ -70,6 +76,154 @@ test('formats progress with message and counts', () => {
     percent: 40,
     text: 'Splitting grid image · 2/5',
   })
+})
+
+test('derives phase, elapsed time, frame rate, and ETA for an active Dharma frame render', () => {
+  const task: CreationTask = {
+    ...baseTask,
+    id: 693,
+    type: 'dharma.episode_render',
+    status: 'running',
+    started_at: '1970-01-01T00:00:01.000Z',
+    progress_current: 360,
+    progress_total: 900,
+  }
+
+  const telemetry = deriveDharmaRenderTelemetry(task, [
+    {
+      event_type: 'dharma.episode.render.stage',
+      created_at: '1970-01-01T00:00:01.000Z',
+      data: { stage: 'preflight', status: 'started', at: '1970-01-01T00:00:01.000Z' },
+    },
+    {
+      event_type: 'dharma.episode.render.stage',
+      created_at: '1970-01-01T00:00:02.000Z',
+      data: { stage: 'preflight', status: 'completed', elapsed_ms: 1000 },
+    },
+    {
+      event_type: 'dharma.episode.render.stage',
+      created_at: '1970-01-01T00:00:05.000Z',
+      data: { stage: 'remotion_render', status: 'started', at: '1970-01-01T00:00:05.000Z' },
+    },
+    {
+      event_type: 'dharma.episode.render.remotion_stage',
+      created_at: '1970-01-01T00:00:10.000Z',
+      data: { stage: 'frames' },
+    },
+  ], 15_000)
+
+  assert.deepEqual(telemetry, {
+    phase: 'remotion_frames',
+    elapsedMs: 14_000,
+    phaseElapsedMs: 5_000,
+    fps: 72,
+    etaMs: 7_500,
+  })
+})
+
+test('does not derive Dharma telemetry for generic tasks', () => {
+  assert.equal(deriveDharmaRenderTelemetry({
+    ...baseTask,
+    type: 'image.generate',
+    status: 'running',
+    progress_current: 3,
+    progress_total: 10,
+  }, [], 15_000), null)
+})
+
+test('falls back to the persisted event timestamp when a Dharma stage timestamp is malformed', () => {
+  const telemetry = deriveDharmaRenderTelemetry({
+    ...baseTask,
+    id: 694,
+    type: 'dharma.episode_render',
+    status: 'running',
+    started_at: '1970-01-01T00:00:01.000Z',
+  }, [{
+    event_type: 'dharma.episode.render.stage',
+    created_at: '1970-01-01T00:00:02.000Z',
+    data: { stage: 'preflight', status: 'started', at: 'not-a-date' },
+  }], 5_000)
+
+  assert.deepEqual(telemetry, {
+    phase: 'preflight',
+    elapsedMs: 4_000,
+    phaseElapsedMs: 3_000,
+    fps: null,
+    etaMs: null,
+  })
+})
+
+test('requires cancellation confirmation for a queued or running formal Dharma full render', () => {
+  const fullRender = {
+    ...baseTask,
+    type: 'dharma.episode_render',
+    status: 'running',
+    payload: { episode_id: 9 },
+  }
+
+  assert.equal(requiresDharmaFullRenderCancelConfirmation(fullRender), true)
+  assert.equal(requiresDharmaFullRenderCancelConfirmation({
+    ...fullRender,
+    payload: { episode_id: 9, max_duration_sec: 60 },
+  }), false)
+  assert.equal(requiresDharmaFullRenderCancelConfirmation({
+    ...fullRender,
+    payload: { episodeId: 9, onlyStoryboardIds: [42] },
+  }), false)
+  assert.equal(requiresDharmaFullRenderCancelConfirmation({ ...fullRender, status: 'queued' }), true)
+})
+
+test('merges incremental task events by ID and advances the event cursor', () => {
+  const existing = [{ id: 10, event_type: 'created', data: {} }]
+  const merged = mergeTaskEventHistory(existing, [
+    { id: 10, event_type: 'created', data: {} },
+    { id: 12, event_type: 'progress', data: { progress_current: 1 } },
+  ])
+
+  assert.deepEqual(merged.map(event => event.id), [10, 12])
+  assert.equal(latestTaskEventId(merged), 12)
+})
+
+test('merges an SSE task update locally and drops settled rows in active-only mode', () => {
+  const tasks = [
+    { ...baseTask, id: 11, status: 'running' },
+    { ...baseTask, id: 8, status: 'queued' },
+  ]
+  const settled = { ...baseTask, id: 11, status: 'succeeded' }
+
+  assert.deepEqual(
+    mergeTaskListUpdate(tasks, settled, true).map(task => task.id),
+    [8],
+  )
+  assert.deepEqual(
+    mergeTaskListUpdate(tasks, settled, false).map(task => [task.id, task.status]),
+    [[11, 'succeeded'], [8, 'queued']],
+  )
+})
+
+test('keeps an active Dharma render visible before it has frame progress', () => {
+  const groups = deriveBatchTaskGroups([
+    {
+      ...baseTask,
+      id: 693,
+      type: 'dharma.episode_render',
+      status: 'running',
+      progress_current: 0,
+      progress_total: 0,
+    },
+    {
+      ...baseTask,
+      id: 694,
+      type: 'image.generate',
+      status: 'running',
+      progress_current: 0,
+      progress_total: 0,
+    },
+  ])
+
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].episodes[0].tasks.length, 1)
+  assert.equal(groups[0].episodes[0].tasks[0].task.id, 693)
 })
 
 test('groups parent tasks with children and status buckets', () => {

@@ -35,6 +35,18 @@
           </svg>
           <span>Remotion</span>
         </NuxtLink>
+        <NuxtLink to="/science-pop" class="nav-link" title="科普工厂" :class="{ active: route.path.startsWith('/science-pop') }">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 12 2.1 10.5"/><path d="M12 12V2"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+          <span>科普工厂</span>
+        </NuxtLink>
+        <NuxtLink to="/dharma" class="nav-link" title="佛学工厂" :class="{ active: route.path.startsWith('/dharma') }">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 5a3 3 0 1 1 3 3m-3-3a3 3 0 1 0-3 3m3-3v1M9 8a3 3 0 1 0 3 3M9 8h1m5 0a3 3 0 1 1-3 3m3-3h-1m-2 3v-1"/><circle cx="12" cy="8" r="2"/><path d="M12 10v12"/><path d="M12 22c4.2 0 7-1.667 7-5-4.2 0-7 1.667-7 5Z"/><path d="M12 22c-4.2 0-7-1.667-7-5 4.2 0 7 1.667 7 5Z"/>
+          </svg>
+          <span>佛学工厂</span>
+        </NuxtLink>
         <NuxtLink to="/settings" class="nav-link" title="设置" :class="{ active: route.path === '/settings' }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
@@ -144,7 +156,7 @@ const showBrandImage = ref(true)
 .nav-link.active {
   background: var(--accent-bg);
   color: var(--accent-text);
-  border-color: rgba(76,125,255,0.18);
+  border-color: var(--border-strong);
   font-weight: 600;
 }
 

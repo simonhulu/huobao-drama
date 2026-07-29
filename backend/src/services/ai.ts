@@ -16,6 +16,19 @@ export interface AIConfig {
   settings?: string | Record<string, any> | null
 }
 
+export function parseAIConfigModels(value: unknown): string[] {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 export function getTextProviderBaseUrl(config: AIConfig) {
   const provider = config.provider.toLowerCase()
 
@@ -47,7 +60,7 @@ export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
     return null
   }
 
-  const models = active.model ? JSON.parse(active.model) : []
+  const models = parseAIConfigModels(active.model)
   logTaskProgress('AIConfig', 'active-config-selected', {
     serviceType,
     configId: active.id,
@@ -107,7 +120,7 @@ export function getConfigById(id: number): AIConfig | null {
     logTaskWarn('AIConfig', 'config-by-id-missing', { configId: id })
     return null
   }
-  const models = row.model ? JSON.parse(row.model) : []
+  const models = parseAIConfigModels(row.model)
   logTaskProgress('AIConfig', 'config-by-id-selected', {
     configId: id,
     provider: row.provider,

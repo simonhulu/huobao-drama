@@ -72,6 +72,7 @@ export const episodes = sqliteTable('episodes', {
   duration: integer('duration').default(0),
   status: text('status').default('draft'),
   videoUrl: text('video_url'),
+  sourceVideoUrl: text('source_video_url'),
   thumbnail: text('thumbnail'),
   imageConfigId: integer('image_config_id'),
   videoConfigId: integer('video_config_id'),
@@ -104,10 +105,14 @@ export const episodes = sqliteTable('episodes', {
   recapScript: text('recap_script'),
   recapVideoUrl: text('recap_video_url'),
   introVideoUrl: text('intro_video_url'),
+  // 开场视频的独立 storyboard 设计（designOpeningStoryboard 产出）：蒙太奇/建立镜头规划，
+  // 与逐镜 designVideoShot 分开，作为开场 ~8s 视频的生产依据。
+  openingStoryboardJson: text('opening_storyboard_json'),
   seriesHook: text('series_hook'),
   retentionBeats: text('retention_beats'),
   energyCurve: text('energy_curve'),
   bgmAudioUrl: text('bgm_audio_url'),
+  dharmaInputRevision: integer('dharma_input_revision').notNull().default(0),
   secondaryBgmAudioUrl: text('secondary_bgm_audio_url'),
   bgmPlanJson: text('bgm_plan_json'),
   preTtsAudioUrl: text('pre_tts_audio_url'),
@@ -493,12 +498,14 @@ export const creationTasks = sqliteTable('creation_tasks', {
   progressTotal: integer('progress_total').default(0),
   progressMessage: text('progress_message'),
   leaseOwner: text('lease_owner'),
+  leaseToken: text('lease_token'),
   leaseExpiresAt: text('lease_expires_at'),
   attempts: integer('attempts').default(0),
   maxAttempts: integer('max_attempts').default(1),
   errorCode: text('error_code'),
   errorMessage: text('error_message'),
   cancelRequested: integer('cancel_requested', { mode: 'boolean' }).default(false),
+  commitClaimedAt: text('commit_claimed_at'),
   priority: integer('priority').default(0),
   scheduledAt: text('scheduled_at'),
   provider: text('provider'),
@@ -671,4 +678,124 @@ export const remotionRenders = sqliteTable('remotion_renders', {
   completedAt: text('completed_at'),
 }, (table) => ({
   idxProjectRender: unique().on(table.projectId, table.renderKind, table.shotId),
+}))
+
+/* ===== v8 叙事层级（Sequence → Event → Beat → Panel/Shot） ===== */
+
+export const narrativePlans = sqliteTable('narrative_plans', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  episodeId: integer('episode_id').notNull(),
+  remotionProjectId: integer('remotion_project_id'),
+  kind: text('kind').notNull().default('full'),
+  styleProfile: text('style_profile'),
+  durationMs: integer('duration_ms'),
+  timingSource: text('timing_source'),
+  sourcePath: text('source_path'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => ({
+  uniqEpisodeKind: unique().on(table.episodeId, table.kind),
+}))
+
+export const narrativeSequences = sqliteTable('narrative_sequences', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  planId: integer('plan_id').notNull(),
+  seqKey: text('seq_key').notNull(),
+  seqIndex: integer('seq_index').notNull(),
+  title: text('title'),
+  startMs: integer('start_ms'),
+  endMs: integer('end_ms'),
+  // 叙事画格连续性设计（designSequenceBeats 产出）：JSON，含本 Sequence 统一屏幕轴线
+  // 与逐 Panel 的相机角度/景别/屏幕方向/连续性锚点/单 Beat 目标。供生图阶段消费。
+  designJson: text('design_json'),
+}, (table) => ({
+  uniqPlanSeq: unique().on(table.planId, table.seqKey),
+}))
+
+export const narrationEvents = sqliteTable('narration_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  sequenceId: integer('sequence_id').notNull(),
+  eventKey: text('event_key').notNull(),
+  eventIndex: integer('event_index').notNull(),
+  startMs: integer('start_ms'),
+  endMs: integer('end_ms'),
+  text: text('text'),
+}, (table) => ({
+  uniqSeqEvent: unique().on(table.sequenceId, table.eventKey),
+}))
+
+export const visualBeats = sqliteTable('visual_beats', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  eventId: integer('event_id').notNull(),
+  beatKey: text('beat_key').notNull(),
+  kind: text('kind'),
+  startMs: integer('start_ms'),
+  endMs: integer('end_ms'),
+  anchorId: text('anchor_id'),
+  anchorVerified: integer('anchor_verified', { mode: 'boolean' }),
+  description: text('description'),
+}, (table) => ({
+  uniqEventBeat: unique().on(table.eventId, table.beatKey),
+}))
+
+export const storyboardSheets = sqliteTable('storyboard_sheets', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  planId: integer('plan_id').notNull(),
+  sequenceId: integer('sequence_id'),
+  sheetKey: text('sheet_key').notNull(),
+  title: text('title'),
+  imageUrl: text('image_url'),
+}, (table) => ({
+  uniqPlanSheet: unique().on(table.planId, table.sheetKey),
+}))
+
+export const storyboardPanels = sqliteTable('storyboard_panels', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  beatId: integer('beat_id'),
+  eventId: integer('event_id'),
+  sheetId: integer('sheet_id'),
+  planId: integer('plan_id').notNull(),
+  panelKey: text('panel_key').notNull(),
+  description: text('description'),
+  cropPath: text('crop_path'),
+  finalPath: text('final_path'),
+  genStatus: text('gen_status').notNull().default('pending'),
+  generationId: integer('generation_id'),
+  taskId: integer('task_id'),
+  prompt: text('prompt'),
+  referenceMode: text('reference_mode'),
+  error: text('error'),
+  updatedAt: text('updated_at').notNull(),
+}, (table) => ({
+  uniqPlanPanel: unique().on(table.planId, table.panelKey),
+}))
+
+export const renderShots = sqliteTable('render_shots', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  eventId: integer('event_id'),
+  planId: integer('plan_id').notNull(),
+  shotKey: text('shot_key').notNull(),
+  sourceKind: text('source_kind'),
+  sourceBeatKey: text('source_beat_key'),
+  description: text('description'),
+  startMs: integer('start_ms'),
+  endMs: integer('end_ms'),
+}, (table) => ({
+  uniqPlanShotBeat: unique().on(table.planId, table.shotKey, table.sourceBeatKey),
+}))
+
+export const soundBeats = sqliteTable('sound_beats', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  planId: integer('plan_id').notNull(),
+  sequenceId: integer('sequence_id'),
+  eventId: integer('event_id'),
+  soundKey: text('sound_key').notNull(),
+  type: text('type'),
+  startMs: integer('start_ms'),
+  endMs: integer('end_ms'),
+  sourceQuery: text('source_query'),
+  volume: real('volume'),
+  tagsJson: text('tags_json'),
+}, (table) => ({
+  uniqPlanSound: unique().on(table.planId, table.soundKey),
 }))

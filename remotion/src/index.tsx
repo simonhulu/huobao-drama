@@ -17,7 +17,12 @@ import { Opening30Demo, OPENING_30_DURATION } from "./Opening30Demo";
 import { Opening30GridDemo, OPENING_30_GRID_DURATION } from "./Opening30GridDemo";
 import { TemporalGridEpisode } from "./TemporalGridEpisode";
 import { NarrativeEpisode } from "./NarrativeEpisode";
+import {
+  NarrativeStoryboardPilot,
+  calculateNarrativeStoryboardPilotMetadata,
+} from "./NarrativeStoryboardPilot";
 import { GridStoryPreview } from "./GridStoryPreview";
+import { DharmaEpisode } from "./DharmaEpisode";
 import {
   MagnatesEditorial,
   MagnatesEditorialPreview,
@@ -287,6 +292,23 @@ const RemotionRoot: React.FC = () => {
       />
 
       <Composition
+        id="NarrativeStoryboardPilot"
+        component={NarrativeStoryboardPilot}
+        durationInFrames={30}
+        fps={30}
+        width={1280}
+        height={720}
+        defaultProps={{
+          durationMs: 1000,
+          audioSrc: null,
+          captions: [],
+          sequences: [],
+          shots: [],
+        }}
+        calculateMetadata={calculateNarrativeStoryboardPilotMetadata}
+      />
+
+      <Composition
         id="GridStoryPreview"
         component={GridStoryPreview}
         durationInFrames={1917}
@@ -296,6 +318,23 @@ const RemotionRoot: React.FC = () => {
         defaultProps={{
           durationInFrames: 1917,
           shots: [],
+        }}
+        calculateMetadata={calculateMetadata}
+      />
+
+      <Composition
+        id="DharmaEpisode"
+        component={DharmaEpisode}
+        durationInFrames={300}
+        fps={30}
+        width={1280}
+        height={720}
+        defaultProps={{
+          durationInFrames: 300,
+          audio: "",
+          segments: [],
+          quotes: [],
+          subtitles: [],
         }}
         calculateMetadata={calculateMetadata}
       />

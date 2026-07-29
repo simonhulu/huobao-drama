@@ -11,6 +11,9 @@ export const PROVIDER_PROMPT_LIMITS: Record<string, number> = {
   ali: 4000,
   volcengine: 4000,
   rightcode: 4000,
+  'gpt-image2': 4000,
+  'gpt-image-2': 4000,
+  pcore: 4000,
   configurable: 4000,
 }
 

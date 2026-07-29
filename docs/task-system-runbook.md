@@ -36,15 +36,17 @@ curl -fsS "http://localhost:5679/api/v1/task-audit/stuck"
 - `succeeded`: task completed.
 - `failed`: terminal failure; the UI should show the error and allow retry where payload is present.
 - `canceled`: user requested cancellation and the worker did not continue it.
-- `stale`: worker restart or expired lease left a non-resumable task unsafe to resume.
+- `stale`: worker restart or expired lease left a task unsafe to resume. A `task_commit_claimed_reconciliation_required` error means it may have crossed an irreversible delivery boundary and must not be retried automatically.
 
 ## Safe Operations
 
-Cancel a queued or running task:
+Cancel a normal queued or running task:
 
 ```bash
 curl -fsS -X POST "http://localhost:5679/api/v1/tasks/<TASK_ID>/cancel"
 ```
+
+For a running formal Dharma full render, use Task Center rather than an unaudited shell request. It requires a task-bound confirmation, an actionable reason, and an operator label. A 60-second pilot or scoped preview remains a normal cancel path.
 
 Retry a failed task by reusing its fields:
 
@@ -101,7 +103,8 @@ Do not directly update task rows unless the backend is stopped and the row has b
 
 - For `queued` tasks that should not run, use the cancel API.
 - For `running` tasks with expired leases, restart the backend worker. Startup recovery will requeue resumable tasks or mark non-resumable tasks `stale`.
-- For `failed` or `stale` tasks, retry from the UI Task Center or recreate via `POST /tasks` with the same payload.
+- If `error_code='task_commit_claimed_reconciliation_required'`, inspect task events, `episodes.video_url`, `episodes.metadata`, and the task-specific artifact before any replacement render. Do not retry that task or attach its file to the episode automatically. Resolve it through `POST /api/v1/dharma/episode/<EPISODE_ID>/render/<TASK_ID>/reconcile` with the same `X-Task-Control-Token` control credential, an exact `RECONCILE <TASK_ID>` confirmation, reason, and actor. Use `retain_published` only when the current pointer matches that task-specific artifact; use `discard_unpublished` only when it does not. The endpoint records the result and never deletes an uncertain artifact or rewrites the pointer.
+- For other `failed` or `stale` tasks, retry from the UI Task Center or recreate via `POST /tasks` with the same payload.
 - For old `image_generations` / `video_generations` rows stuck in `processing`, first inspect `/task-audit/stuck`. Rows with provider `task_id` are candidates for provider reconciliation; rows without provider ids should be marked failed or retried from the original prompt after review.
 - For `storyboards.status='compose_processing'`, rerun compose if source media exists. If no source media exists, clear only after manual review.
 - For `video_merges.status in ('pending','processing')`, rerun merge if the source scene list is present.

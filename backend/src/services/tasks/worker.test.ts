@@ -3,13 +3,22 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { eq, sql } from 'drizzle-orm'
 
 const dbDir = mkdtempSync(join(tmpdir(), 'huobao-task-worker-'))
 process.env.DB_PATH = join(dbDir, 'test.db')
 
-const { createTask, getTask, listTaskEvents, requestCancel } = await import('./store.js')
+const {
+  claimQueuedTask,
+  createTask,
+  getTask,
+  listTaskEvents,
+  requestCancel,
+  transitionTask,
+} = await import('./store.js')
 const { clearTaskHandlers, registerTaskHandler } = await import('./registry.js')
 const { runWorkerOnce, startTaskWorkerLoop } = await import('./worker.js')
+const { db, schema } = await import('../../db/index.js')
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -127,6 +136,336 @@ test('runWorkerOnce aborts a running handler when cancel is requested', async ()
   assert.equal(observedAbort, true)
   assert.equal(getTask(task.id)?.status, 'canceled')
   assert.match(getTask(task.id)?.progressMessage || '', /canceled/i)
+})
+
+test('runWorkerOnce succeeds after an irreversible publish even when cancellation races afterward', async () => {
+  clearTaskHandlers()
+  registerTaskHandler('test.publish.commit', {
+    resumable: false,
+    maxAttempts: 1,
+    run: async (ctx) => {
+      ctx.markCommitPoint?.()
+      requestCancel(ctx.taskId)
+      return { published: true }
+    },
+  })
+  const task = createTask({ type: 'test.publish.commit', idempotencyKey: 'worker-publish-commit' })
+
+  assert.equal(await runWorkerOnce({ workerId: 'worker-a' }), true)
+  const loaded = getTask(task.id)
+  assert.equal(loaded?.status, 'succeeded')
+  assert.equal(loaded?.cancelRequested, false)
+  assert.deepEqual(loaded?.result, { published: true })
+})
+
+test('runWorkerOnce abandons a tokenless claim instead of unconditionally failing it', async () => {
+  clearTaskHandlers()
+  let executed = false
+  registerTaskHandler('test.lease.token.missing', {
+    resumable: true,
+    maxAttempts: 1,
+    run: async () => {
+      executed = true
+    },
+  })
+  db.run(sql.raw(`
+    CREATE TRIGGER clear_test_lease_token
+    AFTER UPDATE OF lease_token ON creation_tasks
+    WHEN NEW.status = 'running' AND NEW.lease_token IS NOT NULL
+    BEGIN
+      UPDATE creation_tasks SET lease_token = NULL WHERE id = NEW.id;
+    END;
+  `))
+
+  try {
+    const task = createTask({
+      type: 'test.lease.token.missing',
+      idempotencyKey: 'worker-lease-token-missing',
+    })
+
+    assert.equal(await runWorkerOnce({ workerId: 'worker-a' }), true)
+    assert.equal(executed, false)
+    const loaded = getTask(task.id)
+    assert.equal(loaded?.status, 'running')
+    assert.equal(loaded?.leaseOwner, 'worker-a')
+    assert.equal(loaded?.leaseToken, null)
+    assert.equal(loaded?.attempts, 0)
+  } finally {
+    db.run(sql.raw('DROP TRIGGER IF EXISTS clear_test_lease_token'))
+  }
+})
+
+test('a worker that lost its lease cannot overwrite the new owner terminal state', async () => {
+  clearTaskHandlers()
+  let releaseHandler: () => void = () => {
+    throw new Error('Handler release callback was not initialized')
+  }
+  let markStarted: (() => void) | null = null
+  const handlerStarted = new Promise<void>((resolve) => { markStarted = resolve })
+  const handlerRelease = new Promise<void>((resolve) => { releaseHandler = resolve })
+  registerTaskHandler('test.lease.loss', {
+    resumable: true,
+    maxAttempts: 1,
+    run: async (ctx) => {
+      markStarted?.()
+      await handlerRelease
+      ctx.event('old.worker.event', { source: 'worker-a' })
+      return { from: 'worker-a' }
+    },
+  })
+  const task = createTask({ type: 'test.lease.loss', idempotencyKey: 'worker-lease-loss' })
+  const workerRun = runWorkerOnce({
+    workerId: 'worker-a',
+    leaseMs: 60_000,
+    heartbeatMs: 60_000,
+  })
+  await handlerStarted
+
+  transitionTask(task.id, 'queued', { progressMessage: 'Lease recovered by another worker' })
+  const replacement = claimQueuedTask(task.id, { workerId: 'worker-b', leaseMs: 60_000 })
+  assert.equal(replacement?.leaseOwner, 'worker-b')
+  releaseHandler()
+  await workerRun
+
+  const loaded = getTask(task.id)
+  assert.equal(loaded?.status, 'running')
+  assert.equal(loaded?.leaseOwner, 'worker-b')
+  assert.equal(loaded?.result, null)
+  assert.equal(listTaskEvents(task.id).some((event) => event.eventType === 'old.worker.event'), false)
+})
+
+test('lease loss from an asynchronous telemetry callback is diagnosed and marks a non-resumable task stale', async () => {
+  clearTaskHandlers()
+  let telemetryCallbackReturned = false
+  registerTaskHandler('test.lease.loss.async-telemetry', {
+    resumable: false,
+    maxAttempts: 1,
+    run: async (ctx) => new Promise((resolve) => {
+      setTimeout(() => {
+        ctx.event('late.async.telemetry')
+        telemetryCallbackReturned = true
+        resolve({ late: true })
+      }, 20)
+    }),
+  })
+  const task = createTask({
+    type: 'test.lease.loss.async-telemetry',
+    idempotencyKey: 'worker-lease-loss-async-telemetry',
+  })
+  const workerRun = runWorkerOnce({
+    workerId: 'worker-a',
+    leaseMs: 60_000,
+    heartbeatMs: 60_000,
+  })
+  await waitFor(() => getTask(task.id)?.status === 'running')
+  db.update(schema.creationTasks)
+    .set({ leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() })
+    .where(eq(schema.creationTasks.id, task.id))
+    .run()
+
+  await workerRun
+
+  assert.equal(telemetryCallbackReturned, true)
+  const loaded = getTask(task.id)
+  assert.equal(loaded?.status, 'stale')
+  assert.equal(loaded?.errorCode, 'task_lease_lost')
+  assert.match(loaded?.errorMessage || '', /lease/i)
+  assert.equal(listTaskEvents(task.id).some(event => event.eventType === 'late.async.telemetry'), false)
+  const leaseLoss = listTaskEvents(task.id).find(event => event.eventType === 'task.lease_lost')
+  assert.equal(leaseLoss?.data.source, 'event')
+  assert.equal(leaseLoss?.data.worker_id, 'worker-a')
+  assert.deepEqual(leaseLoss?.data.observed, {
+    status: 'running',
+    owner_matches: true,
+    token_matches: true,
+    lease_expires_at: leaseLoss?.data.observed.lease_expires_at,
+    lease_expired: true,
+    commit_claimed: false,
+  })
+  assert.equal(typeof leaseLoss?.data.observed.lease_expires_at, 'string')
+  assert.equal(leaseLoss?.data.resolution, 'marked_stale')
+})
+
+test('an asynchronous task event persistence failure does not escape the handler callback', async () => {
+  clearTaskHandlers()
+  let callbackThrew = false
+  registerTaskHandler('test.async.telemetry.persistence.failure', {
+    resumable: true,
+    maxAttempts: 1,
+    run: async (ctx) => new Promise((resolve, reject) => {
+      setTimeout(() => {
+        try {
+          ctx.event('test.async.telemetry.persistence.failure')
+          resolve({ completed: true })
+        } catch (error) {
+          callbackThrew = true
+          reject(error)
+        }
+      }, 20)
+    }),
+  })
+  db.run(sql.raw(`
+    CREATE TRIGGER reject_async_task_event
+    BEFORE INSERT ON creation_task_events
+    WHEN NEW.event_type = 'test.async.telemetry.persistence.failure'
+    BEGIN
+      SELECT RAISE(ABORT, 'simulated task event persistence failure');
+    END;
+  `))
+
+  try {
+    const task = createTask({
+      type: 'test.async.telemetry.persistence.failure',
+      idempotencyKey: 'worker-async-telemetry-persistence-failure',
+    })
+
+    assert.equal(await runWorkerOnce({ workerId: 'worker-a' }), true)
+    assert.equal(callbackThrew, false)
+    assert.equal(getTask(task.id)?.status, 'succeeded')
+  } finally {
+    db.run(sql.raw('DROP TRIGGER IF EXISTS reject_async_task_event'))
+  }
+})
+
+test('a heartbeat persistence failure aborts the handler without escaping its timer callback', async () => {
+  clearTaskHandlers()
+  let observedAbort = false
+  let uncaughtError: Error | null = null
+  const externalAbort = new AbortController()
+  registerTaskHandler('test.heartbeat.persistence.failure', {
+    resumable: true,
+    maxAttempts: 1,
+    run: async (ctx) => new Promise((resolve) => {
+      ctx.signal.addEventListener('abort', () => {
+        observedAbort = true
+        resolve({ aborted: true })
+      }, { once: true })
+    }),
+  })
+  const task = createTask({
+    type: 'test.heartbeat.persistence.failure',
+    idempotencyKey: 'worker-heartbeat-persistence-failure',
+  })
+  const workerRun = runWorkerOnce({
+    workerId: 'worker-a',
+    leaseMs: 60_000,
+    heartbeatMs: 10,
+    cancelPollMs: 60_000,
+    signal: externalAbort.signal,
+  })
+  await waitFor(() => getTask(task.id)?.status === 'running')
+
+  const originalTransaction = db.transaction
+  const failure = new Error('simulated heartbeat persistence failure')
+  Object.defineProperty(db, 'transaction', {
+    configurable: true,
+    writable: true,
+    value: () => { throw failure },
+  })
+  const onUncaughtException = (error: Error) => {
+    uncaughtError = error
+    Object.defineProperty(db, 'transaction', {
+      configurable: true,
+      writable: true,
+      value: originalTransaction,
+    })
+    externalAbort.abort()
+  }
+  process.once('uncaughtException', onUncaughtException)
+
+  try {
+    const outcome = await Promise.race([
+      workerRun,
+      sleep(500).then(() => 'timeout'),
+    ])
+
+    assert.notEqual(outcome, 'timeout')
+    assert.equal(uncaughtError, null)
+    assert.equal(observedAbort, true)
+    assert.equal(getTask(task.id)?.status, 'running')
+  } finally {
+    process.off('uncaughtException', onUncaughtException)
+    Object.defineProperty(db, 'transaction', {
+      configurable: true,
+      writable: true,
+      value: originalTransaction,
+    })
+    externalAbort.abort()
+    await workerRun
+  }
+})
+
+test('a cancel-poll read failure aborts the handler without escaping its timer callback', async () => {
+  clearTaskHandlers()
+  let observedAbort = false
+  let uncaughtError: Error | null = null
+  const externalAbort = new AbortController()
+  registerTaskHandler('test.cancel-poll.read.failure', {
+    resumable: true,
+    maxAttempts: 1,
+    run: async (ctx) => new Promise((resolve) => {
+      ctx.signal.addEventListener('abort', () => {
+        observedAbort = true
+        resolve({ aborted: true })
+      }, { once: true })
+    }),
+  })
+  const task = createTask({
+    type: 'test.cancel-poll.read.failure',
+    idempotencyKey: 'worker-cancel-poll-read-failure',
+  })
+  const workerRun = runWorkerOnce({
+    workerId: 'worker-a',
+    leaseMs: 60_000,
+    heartbeatMs: 60_000,
+    cancelPollMs: 10,
+    signal: externalAbort.signal,
+  })
+  await waitFor(() => getTask(task.id)?.status === 'running')
+
+  const originalSelect = db.select
+  const failure = new Error('simulated cancel-poll read failure')
+  Object.defineProperty(db, 'select', {
+    configurable: true,
+    writable: true,
+    value: () => { throw failure },
+  })
+  const onUncaughtException = (error: Error) => {
+    uncaughtError = error
+    Object.defineProperty(db, 'select', {
+      configurable: true,
+      writable: true,
+      value: originalSelect,
+    })
+    externalAbort.abort()
+  }
+  process.once('uncaughtException', onUncaughtException)
+
+  try {
+    const outcome = await Promise.race([
+      workerRun,
+      sleep(500).then(() => 'timeout'),
+    ])
+
+    Object.defineProperty(db, 'select', {
+      configurable: true,
+      writable: true,
+      value: originalSelect,
+    })
+    assert.notEqual(outcome, 'timeout')
+    assert.equal(uncaughtError, null)
+    assert.equal(observedAbort, true)
+    assert.equal(getTask(task.id)?.status, 'running')
+  } finally {
+    process.off('uncaughtException', onUncaughtException)
+    Object.defineProperty(db, 'select', {
+      configurable: true,
+      writable: true,
+      value: originalSelect,
+    })
+    externalAbort.abort()
+    await workerRun
+  }
 })
 
 test('runWorkerOnce retries retryable failures until success', async () => {

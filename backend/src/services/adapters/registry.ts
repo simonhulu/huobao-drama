@@ -17,6 +17,7 @@ import { AliVideoAdapter } from './ali-video.js'
 import { ConfigurableImageAdapter } from './configurable-image.js'
 import { APIMartImageAdapter } from './apimart-image.js'
 import { RightCodeImageAdapter } from './rightcode-image.js'
+import { GptImage2Adapter } from './gpt-image2.js'
 import type { ImageProviderAdapter, VideoProviderAdapter, TTSProviderAdapter, MusicProviderAdapter, AIConfig } from './types.js'
 
 // 图片 Adapter 注册表
@@ -30,6 +31,9 @@ export const imageAdapters: Record<string, ImageProviderAdapter> = {
   rightcode: new RightCodeImageAdapter(),
   rightcodes: new RightCodeImageAdapter(),
   right: new RightCodeImageAdapter(),
+  'gpt-image2': new GptImage2Adapter(),
+  'gpt-image-2': new GptImage2Adapter(),
+  pcore: new GptImage2Adapter(),
   // Chatfire - 待确认 API 格式，暂用 OpenAI
   chatfire: new OpenAIImageAdapter(),
 }

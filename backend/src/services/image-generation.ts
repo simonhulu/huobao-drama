@@ -23,7 +23,7 @@ function resolveImageConfig(configId?: number | null): ResolvedImageConfig | nul
 import { now } from '../utils/response.js'
 import { AiProviderError, classifyImageError } from '../utils/error-taxonomy.js'
 import { syncRelatedImageTables } from './image-generation-sync.js'
-import { aiFetch } from './ai-client.js'
+import { aiFetch, imageRequestTransport } from './ai-client.js'
 import { downloadFile, saveBase64Image } from '../utils/storage.js'
 import { getImageAdapter } from './adapters/registry.js'
 import { normalizeReferenceImages } from './adapters/reference-images.js'
@@ -109,9 +109,11 @@ const IMAGE_GENERATION_CONCURRENCY = Math.max(1, Number(process.env.IMAGE_GENERA
 const IMAGE_GENERATION_INTERVAL_MS = Math.max(1, Number(process.env.IMAGE_GENERATION_INTERVAL_MS || 1000))
 const IMAGE_GENERATION_INTERVAL_CAP = Math.max(1, Number(process.env.IMAGE_GENERATION_INTERVAL_CAP || 8))
 const IMAGE_POLL_TIMEOUT_MS = Math.max(60_000, Number(process.env.IMAGE_POLL_TIMEOUT_MS || 1_200_000))
+const IMAGE_POLL_RESPONSE_TIMEOUT_MS = Math.max(5_000, Number(process.env.IMAGE_POLL_RESPONSE_TIMEOUT_MS || 60_000))
 const EGAKI_IMAGE_CONCURRENCY = Math.max(1, Number(process.env.EGAKI_IMAGE_CONCURRENCY || 2))
 const EGAKI_IMAGE_INTERVAL_MS = Math.max(1, Number(process.env.EGAKI_IMAGE_INTERVAL_MS || 60_000))
 const EGAKI_IMAGE_INTERVAL_CAP = Math.max(1, Number(process.env.EGAKI_IMAGE_INTERVAL_CAP || 4))
+const PCORE_IMAGE_CONCURRENCY = Math.max(1, Number(process.env.PCORE_IMAGE_CONCURRENCY || 4))
 
 const imageGenerationLimiter = new ImageGenerationLimiter(
   IMAGE_GENERATION_CONCURRENCY,
@@ -123,6 +125,20 @@ const egakiImageGenerationLimiter = new ImageGenerationLimiter(
   EGAKI_IMAGE_INTERVAL_MS,
   EGAKI_IMAGE_INTERVAL_CAP,
 )
+// pcore accepts asynchronous jobs, but each job remains active while it is
+// polled and downloaded. Limiting only submission bursts still lets a large
+// episode create dozens of live jobs, so bound the complete lifecycle.
+const pcoreImageGenerationLimiter = new ImageGenerationLimiter(
+  PCORE_IMAGE_CONCURRENCY,
+  1,
+  PCORE_IMAGE_CONCURRENCY,
+)
+
+function runWithProviderLifecycleLimit<T>(provider: string, fn: () => Promise<T>): Promise<T> {
+  return provider.toLowerCase() === 'pcore'
+    ? pcoreImageGenerationLimiter.run(fn)
+    : fn()
+}
 
 class TerminalImagePollError extends Error {
   constructor(message: string) {
@@ -225,7 +241,7 @@ export async function executeImageGeneration(
   }
 
   options.taskContext?.progress('Starting image generation', 0, 2)
-  await runImageGeneration(generationId, config, options.taskContext)
+  await runWithProviderLifecycleLimit(config.provider, () => runImageGeneration(generationId, config, options.taskContext))
   options.taskContext?.progress('Image generation finished', 2, 2)
 
   const [updated] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, generationId)).all()
@@ -278,7 +294,7 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
         taskId: record.taskId,
         provider: config.provider,
       })
-      await pollImageTask(id, config, record.taskId)
+      await pollImageTask(id, config, record.taskId, taskContext?.signal)
       return
     }
 
@@ -324,6 +340,19 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
 
     const adapter = getImageAdapter(config)
 
+    // A parent workflow can retry while an async provider job is still queued.
+    // Resume the provider task instead of submitting a duplicate billable job.
+    if (record.taskId && record.status === 'processing') {
+      taskContext?.progress('Resuming image generation', 0, 2)
+      logTaskProgress('ImageTask', 'poll-resume', {
+        id,
+        provider: config.provider,
+        taskId: record.taskId,
+      })
+      await pollImageTask(id, config, record.taskId, taskContext?.signal)
+      return
+    }
+
     taskContext?.progress('Building image generation request', 0, 2)
     logTaskProgress('ImageTask', 'build-request', {
       id,
@@ -365,6 +394,7 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
       method,
       url: redactUrl(url),
       model: record.model,
+      transport: imageRequestTransport(config.provider, url),
     })
     logTaskPayload('ImageTask', 'request payload', {
       id,
@@ -430,7 +460,7 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
       .where(eq(schema.imageGenerations.id, id))
       .run()
     logTaskProgress('ImageTask', 'poll-start', { id, taskId, provider: config.provider })
-    await pollImageTask(id, config, taskId!)
+    await pollImageTask(id, config, taskId!, taskContext?.signal)
   } catch (err: any) {
     const error = err instanceof Error ? err : new Error(String(err))
     const classification = classifyImageError(error)
@@ -456,18 +486,99 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
 }
 
 function processImageGeneration(id: number, config: AIConfig): void {
-  runImageGeneration(id, config).catch(err => {
+  runWithProviderLifecycleLimit(config.provider, () => runImageGeneration(id, config)).catch(err => {
     logTaskError('ImageTask', 'process', { id, error: err.message })
     console.error(`Image generation ${id} failed:`, err)
   })
 }
 
-async function pollImageTask(id: number, config: AIConfig, taskId: string) {
-  const adapter = getImageAdapter(config)
-  const startedAt = Date.now()
-  const maxDurationMs = IMAGE_POLL_TIMEOUT_MS
+function abortReason(signal: AbortSignal | undefined, fallback: string): Error {
+  const reason = signal?.reason
+  return reason instanceof Error ? reason : new Error(fallback)
+}
 
-  for (let i = 0; i < 120; i++) {
+function throwIfAborted(signal: AbortSignal | undefined, fallback: string): void {
+  if (signal?.aborted) throw abortReason(signal, fallback)
+}
+
+function waitForPollInterval(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal, 'Image generation polling was canceled')
+  return new Promise((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    const onAbort = () => done(abortReason(signal, 'Image generation polling was canceled'))
+
+    function done(error?: Error) {
+      if (timeout != null) clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve()
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true })
+    timeout = setTimeout(done, ms)
+  })
+}
+
+/**
+ * Fetch timeouts only cover connection and headers in some fetch implementations.
+ * Race JSON decoding as well so a provider that never closes a response body cannot
+ * keep an image worker alive indefinitely.
+ */
+export function readProviderJsonWithinDeadline(
+  response: Response,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<any> {
+  throwIfAborted(signal, 'Image generation polling was canceled')
+  const boundedTimeoutMs = Math.max(1, Math.floor(timeoutMs))
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    const onAbort = () => finish(abortReason(signal, 'Image generation polling was canceled'))
+
+    function finish(error?: Error, value?: any) {
+      if (settled) return
+      settled = true
+      if (timeout != null) clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve(value)
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true })
+    timeout = setTimeout(() => finish(new Error(`Provider poll response timed out after ${boundedTimeoutMs}ms`)), boundedTimeoutMs)
+    response.json().then(
+      (value) => finish(undefined, value),
+      (error) => finish(error instanceof Error ? error : new Error(String(error))),
+    )
+  })
+}
+
+/**
+ * The provider deadline belongs to the persisted job, rather than one worker
+ * attempt. Recovering a lease must resume a task, never restart its timeout.
+ */
+export function resolveImagePollDeadlineMs(
+  createdAt: string | null | undefined,
+  maxDurationMs: number,
+  nowMs = Date.now(),
+): number {
+  const submittedAt = Date.parse(String(createdAt || ''))
+  return Number.isFinite(submittedAt) && submittedAt <= nowMs
+    ? submittedAt + maxDurationMs
+    : nowMs + maxDurationMs
+}
+
+async function pollImageTask(id: number, config: AIConfig, taskId: string, signal?: AbortSignal) {
+  const adapter = getImageAdapter(config)
+  const maxDurationMs = IMAGE_POLL_TIMEOUT_MS
+  const [record] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
+  const deadlineAt = resolveImagePollDeadlineMs(record?.createdAt, maxDurationMs)
+
+  let attempt = 0
+  while (Date.now() < deadlineAt) {
+    attempt++
+    throwIfAborted(signal, 'Image generation polling was canceled')
     const settled = getSettledImageGeneration(id)
     if (settled === 'completed') return
     if (settled === 'failed') {
@@ -476,19 +587,19 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
       throw new TerminalImagePollError(`Image generation ${id} failed during provider wait: ${detail}`)
     }
 
-    if (Date.now() - startedAt >= maxDurationMs) {
-      logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: 'Polling exceeded 10 minutes' })
+    if (Date.now() >= deadlineAt) {
+      logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: 'Polling exceeded provider deadline' })
       db.update(schema.imageGenerations)
-        .set({ status: 'failed', errorMsg: 'Timeout: Polling exceeded 10 minutes', updatedAt: now() })
+        .set({ status: 'failed', errorMsg: 'Timeout: Polling exceeded provider deadline', updatedAt: now() })
         .where(eq(schema.imageGenerations.id, id))
         .run()
       return
     }
-    await new Promise(r => setTimeout(r, 5000))
-    if (Date.now() - startedAt >= maxDurationMs) {
-      logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: 'Polling exceeded 10 minutes' })
+    await waitForPollInterval(5000, signal)
+    if (Date.now() >= deadlineAt) {
+      logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: 'Polling exceeded provider deadline' })
       db.update(schema.imageGenerations)
-        .set({ status: 'failed', errorMsg: 'Timeout: Polling exceeded 10 minutes', updatedAt: now() })
+        .set({ status: 'failed', errorMsg: 'Timeout: Polling exceeded provider deadline', updatedAt: now() })
         .where(eq(schema.imageGenerations.id, id))
         .run()
       return
@@ -501,15 +612,18 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
         provider: config.provider,
         method,
         url: redactUrl(url),
-        attempt: i + 1,
+        attempt,
+        transport: imageRequestTransport(config.provider, url),
       })
-      const remainingMs = Math.max(1_000, maxDurationMs - (Date.now() - startedAt))
+      const remainingMs = Math.max(1_000, deadlineAt - Date.now())
+      const responseTimeoutMs = Math.min(remainingMs, IMAGE_POLL_RESPONSE_TIMEOUT_MS)
       const resp = await aiFetch(config.provider, url, {
         method,
         headers,
-      }, { timeoutMs: remainingMs, maxAttempts: 1 })
+        signal,
+      }, { timeoutMs: responseTimeoutMs, maxAttempts: 1 })
       if (!resp.ok) continue
-      const result = await resp.json() as any
+      const result = await readProviderJsonWithinDeadline(resp, responseTimeoutMs, signal)
 
       const pollResp = adapter.parsePollResponse(result)
 
@@ -553,7 +667,7 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
         })
         throw error
       }
-      if (i === 119 || Date.now() - startedAt >= maxDurationMs) {
+      if (Date.now() >= deadlineAt) {
         logTaskError('ImageTask', 'poll-timeout', { id, taskId, error: error.message })
         db.update(schema.imageGenerations)
           .set({ status: 'failed', errorMsg: `Timeout: ${error.message}`, updatedAt: now() })
@@ -561,9 +675,14 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string) {
           .run()
         return
       }
-      logTaskWarn('ImageTask', 'poll-retry', { id, taskId, attempt: i + 1, error: error.message })
+      logTaskWarn('ImageTask', 'poll-retry', { id, taskId, attempt, error: error.message })
     }
   }
+
+  db.update(schema.imageGenerations)
+    .set({ status: 'failed', errorMsg: 'Timeout: Polling exceeded provider deadline', updatedAt: now() })
+    .where(eq(schema.imageGenerations.id, id))
+    .run()
 }
 
 function getSettledImageGeneration(id: number): 'completed' | 'failed' | null {

@@ -10,7 +10,7 @@ const dbDir = mkdtempSync(join(tmpdir(), 'huobao-image-limiter-'))
 process.env.DB_PATH = join(dbDir, 'test.db')
 process.env.STORAGE_PATH = join(dbDir, 'static')
 
-const { ImageGenerationLimiter, executeImageGeneration } = await import('./image-generation.js')
+const { ImageGenerationLimiter, executeImageGeneration, readProviderJsonWithinDeadline, resolveImagePollDeadlineMs } = await import('./image-generation.js')
 const { db, schema } = await import('../db/index.js')
 
 const png1x1 = Buffer.from(
@@ -55,6 +55,42 @@ test('ImageGenerationLimiter caps executions per interval', async () => {
   assert.ok(starts[1] < 10, `second job started at ${starts[1]}ms`)
   assert.ok(starts[2] >= 90, `third job started at ${starts[2]}ms`)
   assert.ok(starts[3] >= 90, `fourth job started at ${starts[3]}ms`)
+})
+
+test('provider JSON decoding respects cancellation and never leaves a worker hung on an open body', async () => {
+  const controller = new AbortController()
+  const hangingResponse = new Response(new ReadableStream({
+    start() {
+      // Deliberately send neither bytes nor close: this reproduces a provider
+      // that accepts the poll but never completes the response body.
+    },
+  }))
+
+  const pending = readProviderJsonWithinDeadline(hangingResponse, 60_000, controller.signal)
+  controller.abort(new Error('Task cancel requested'))
+
+  await assert.rejects(pending, /Task cancel requested/)
+})
+
+test('provider JSON decoding has a body deadline after headers arrive', async () => {
+  const hangingResponse = new Response(new ReadableStream({ start() {} }))
+  await assert.rejects(
+    () => readProviderJsonWithinDeadline(hangingResponse, 10),
+    /Provider poll response timed out after 10ms/,
+  )
+})
+
+test('provider poll deadline is anchored to the persisted submission time', () => {
+  const submittedAt = Date.parse('2026-07-29T03:00:00.000Z')
+  const timeoutMs = 20 * 60 * 1000
+  assert.equal(
+    resolveImagePollDeadlineMs('2026-07-29T03:00:00.000Z', timeoutMs, submittedAt + 25 * 60 * 1000),
+    submittedAt + timeoutMs,
+  )
+  assert.equal(
+    resolveImagePollDeadlineMs(null, timeoutMs, submittedAt),
+    submittedAt + timeoutMs,
+  )
 })
 
 test('classifyImageError treats 524 as retryable provider timeout', () => {
@@ -189,9 +225,14 @@ test('executeImageGeneration fails immediately when async poll returns terminal 
     }), { status: 200 })
   }) as typeof fetch
 
-  global.setTimeout = ((handler: TimerHandler, _timeout?: number, ...args: any[]) => {
-    if (typeof handler === 'function') handler(...args)
-    return 0 as any
+  global.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
+    // Skip the normal five-second polling delay, but preserve provider-body
+    // deadlines so this test still exercises the actual response parser.
+    if (Number(timeout) <= 5_000 && typeof handler === 'function') {
+      handler(...args)
+      return 0 as any
+    }
+    return originalSetTimeout(handler, timeout, ...args)
   }) as typeof setTimeout
 
   try {

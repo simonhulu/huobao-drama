@@ -1,12 +1,13 @@
 import {
   acquireNextQueuedTask,
-  appendTaskEvent,
+  appendTaskEventWithLease,
   extendTaskLease,
   getTask,
-  markTaskAttemptStarted,
-  scheduleTaskRetry,
-  transitionTask,
-  updateTaskProgress,
+  markTaskAttemptStartedWithLease,
+  recordTaskLeaseLoss,
+  scheduleTaskRetryWithLease,
+  transitionTaskWithLease,
+  updateTaskProgressWithLease,
 } from './store.js'
 import { getTaskHandler, listRegisteredTaskTypes } from './registry.js'
 import { recoverExpiredRunningTasks } from './recovery.js'
@@ -35,24 +36,69 @@ export interface RunWorkerOnceOptions {
   types?: string[]
 }
 
-function createTaskContext(task: CreationTask, signal: AbortSignal): TaskContext {
+/**
+ * Progress and event reporters are often invoked from child-process/timer
+ * callbacks. Telemetry persistence must not throw out of those callbacks and
+ * take down the worker process; a definite lease loss remains a hard stop.
+ */
+function persistTaskTelemetry(
+  task: CreationTask,
+  kind: 'progress' | 'event',
+  persist: () => unknown | null,
+  onLeaseLost: (source: 'progress' | 'event') => void,
+): void {
+  try {
+    if (!persist()) onLeaseLost(kind)
+  } catch (error) {
+    try {
+      logTaskError('Worker', 'task-telemetry-persistence-failed', {
+        taskId: task.id,
+        type: task.type,
+        telemetry: kind,
+        errorMessage: error instanceof Error ? error.message : 'Unknown telemetry persistence error',
+      })
+    } catch {
+      // Logging is best effort too; this boundary must never throw to a callback.
+    }
+  }
+}
+
+function createTaskContext(
+  task: CreationTask,
+  signal: AbortSignal,
+  commitState: { passed: boolean },
+  workerId: string,
+  leaseToken: string,
+  onLeaseLost: (source: 'progress' | 'event') => void,
+): TaskContext {
   return {
     taskId: task.id,
+    workerId,
+    leaseToken,
+    episodeId: task.episodeId,
     payload: task.payload,
     signal,
     attempts: task.attempts,
     progress(message, current, total) {
-      updateTaskProgress(task.id, {
+      persistTaskTelemetry(task, 'progress', () => updateTaskProgressWithLease(task.id, workerId, leaseToken, {
         progressMessage: message,
         progressCurrent: current,
         progressTotal: total,
-      })
+      }), onLeaseLost)
     },
     event(type, data) {
-      appendTaskEvent(task.id, type, data)
+      persistTaskTelemetry(task, 'event', () => (
+        appendTaskEventWithLease(task.id, workerId, leaseToken, type, data)
+      ), onLeaseLost)
     },
     isCancelRequested() {
       return Boolean(getTask(task.id)?.cancelRequested)
+    },
+    markCommitPoint() {
+      commitState.passed = true
+    },
+    hasPassedCommitPoint() {
+      return commitState.passed
     },
   }
 }
@@ -79,6 +125,17 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
     types: handlers,
   })
   if (!task) return false
+  const leaseToken = task.leaseToken
+  if (!leaseToken) {
+    // A tokenless claim cannot prove it still owns the row. Do not perform an
+    // unconditional terminal write here: recovery will handle it after expiry.
+    logTaskError('Worker', 'lease-token-missing', {
+      taskId: task.id,
+      type: task.type,
+      workerId: options.workerId,
+    })
+    return true
+  }
 
   // acquireNextQueuedTask changes the task row to running directly. Mirror
   // that transition immediately so Remotion asset polling does not remain at
@@ -87,7 +144,7 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
 
   const handler = getTaskHandler(task.type)
   if (!handler) {
-    transitionTask(task.id, 'queued', withImageSync(task, {
+    transitionTaskWithLease(task.id, options.workerId, leaseToken, 'queued', withImageSync(task, {
       progressMessage: `No task handler registered for ${task.type}`,
     }))
     return false
@@ -96,7 +153,7 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
   const maxAttempts = Math.max(task.maxAttempts, handler.maxAttempts ?? 1)
 
   if (task.cancelRequested) {
-    transitionTask(task.id, 'canceled', withImageSync(task, {
+    transitionTaskWithLease(task.id, options.workerId, leaseToken, 'canceled', withImageSync(task, {
       progressMessage: 'Canceled before execution.',
     }))
     return true
@@ -109,26 +166,95 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
   const abortForCancel = () => {
     if (!controller.signal.aborted) controller.abort(new Error('Task cancel requested'))
   }
+  const leaseState = { lost: false }
+  const abortForLeaseLoss = (source: string) => {
+    if (!leaseState.lost) {
+      leaseState.lost = true
+      try {
+        recordTaskLeaseLoss({
+          taskId: task.id,
+          workerId: options.workerId,
+          leaseToken,
+          source,
+          nonResumable: !handler.resumable,
+        })
+      } catch (error) {
+        try {
+          logTaskError('Worker', 'task-lease-loss-diagnostic-failed', {
+            taskId: task.id,
+            type: task.type,
+            source,
+            errorMessage: error instanceof Error ? error.message : 'Unknown task lease-loss diagnostic error',
+          })
+        } catch {
+          // This can be reached from child-process callbacks; diagnostics cannot throw there.
+        }
+      }
+    }
+    if (!controller.signal.aborted) controller.abort(new Error('Task lease lost'))
+  }
+  const abortForLeaseMonitorFailure = (monitor: 'heartbeat' | 'cancel_poll', error: unknown) => {
+    try {
+      logTaskError('Worker', 'task-lease-monitor-failed', {
+        taskId: task.id,
+        type: task.type,
+        monitor,
+        errorMessage: error instanceof Error ? error.message : 'Unknown task lease monitor error',
+      })
+    } catch {
+      // Diagnostics must not become another timer-callback exception.
+    }
+    abortForLeaseLoss(`${monitor}_persistence_failure`)
+  }
 
   const heartbeat = setInterval(() => {
-    extendTaskLease(task.id, options.workerId, leaseMs)
+    try {
+      if (!extendTaskLease(task.id, options.workerId, leaseToken, leaseMs)) abortForLeaseLoss('heartbeat')
+    } catch (error) {
+      abortForLeaseMonitorFailure('heartbeat', error)
+    }
   }, heartbeatMs)
   const cancelPoll = setInterval(() => {
-    if (getTask(task.id)?.cancelRequested) abortForCancel()
+    try {
+      if (getTask(task.id)?.cancelRequested) abortForCancel()
+    } catch (error) {
+      abortForLeaseMonitorFailure('cancel_poll', error)
+    }
   }, cancelPollMs)
 
+  const commitState = { passed: false }
   try {
-    const taskAfterMark = markTaskAttemptStarted(task.id)
-    const ctx = createTaskContext(taskAfterMark, controller.signal)
+    const taskAfterMark = markTaskAttemptStartedWithLease(task.id, options.workerId, leaseToken)
+    if (!taskAfterMark) {
+      abortForLeaseLoss('attempt_start')
+      return true
+    }
+    const ctx = createTaskContext(
+      taskAfterMark,
+      controller.signal,
+      commitState,
+      options.workerId,
+      leaseToken,
+      abortForLeaseLoss,
+    )
     const result = await handler.run(ctx)
-    if (getTask(task.id)?.cancelRequested) {
-      transitionTask(task.id, 'canceled', withImageSync(task, {
+    if (leaseState.lost) return true
+    const latest = getTask(task.id)
+    if (
+      !latest
+      || latest.status !== 'running'
+      || latest.leaseOwner !== options.workerId
+      || latest.leaseToken !== leaseToken
+    ) return true
+    if (latest.cancelRequested && !commitState.passed) {
+      transitionTaskWithLease(task.id, options.workerId, leaseToken, 'canceled', withImageSync(task, {
         progressMessage: 'Canceled during execution.',
       }))
     } else {
-      transitionTask(task.id, 'succeeded', withImageSync(task, { result }))
+      transitionTaskWithLease(task.id, options.workerId, leaseToken, 'succeeded', withImageSync(task, { result }))
     }
   } catch (err: any) {
+    if (leaseState.lost) return true
     const latest = getTask(task.id)
     const error = err instanceof Error ? err : new Error(String(err))
     const classification = classifyImageError(error)
@@ -142,23 +268,29 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
       errorMessage: error.message,
     })
 
-    if (latest?.cancelRequested) {
-      transitionTask(task.id, 'canceled', withImageSync(task, {
+    if (
+      !latest
+      || latest.status !== 'running'
+      || latest.leaseOwner !== options.workerId
+      || latest.leaseToken !== leaseToken
+    ) return true
+    if (latest.cancelRequested && !commitState.passed) {
+      transitionTaskWithLease(task.id, options.workerId, leaseToken, 'canceled', withImageSync(task, {
         progressMessage: 'Canceled during execution.',
       }))
     } else if (latest && latest.attempts < maxAttempts) {
       if (classification.retryable) {
         const delayMs = computeRetryDelay(classification.code, latest.attempts)
         const scheduledAt = new Date(Date.now() + delayMs).toISOString()
-        scheduleTaskRetry(task.id, error, classification.code, scheduledAt, createImageSyncCallback(task))
+        scheduleTaskRetryWithLease(task.id, options.workerId, leaseToken, error, classification.code, scheduledAt, createImageSyncCallback(task))
       } else {
-        transitionTask(task.id, 'failed', withImageSync(task, {
+        transitionTaskWithLease(task.id, options.workerId, leaseToken, 'failed', withImageSync(task, {
           errorCode: classification.code,
           errorMessage: error.message,
         }))
       }
     } else {
-      transitionTask(task.id, 'failed', withImageSync(task, {
+      transitionTaskWithLease(task.id, options.workerId, leaseToken, 'failed', withImageSync(task, {
         errorCode: classification.code,
         errorMessage: error.message,
       }))
