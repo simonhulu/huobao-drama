@@ -68,7 +68,7 @@
           <div class="intro-template-row">
             <span class="intro-template-label">图片风格</span>
             <BaseSelect
-              :model-value="drama.style || ''"
+              :model-value="drama.style || 'cold_ink_spatial'"
               :options="styleOptions"
               placeholder="选择图片风格"
               @update:model-value="onStyleChange"
@@ -199,10 +199,16 @@
           <div class="ep-status">
             <span :class="['status-dot', episodeStatus(ep).dot]"></span>
             <span class="status-text">{{ episodeStatus(ep).label }}</span>
+            <span class="ep-id mono">#{{ ep.id }}</span>
             <span v-if="ep.duration" class="ep-duration">{{ ep.duration }}s</span>
             <span v-if="ep.workflow_type || ep.workflowType" class="workflow-chip">{{ workflowLabel(ep.workflow_type || ep.workflowType) }}</span>
           </div>
         </div>
+        <button
+          class="btn btn-sm ep-prod"
+          title="进入 v8 生产中心"
+          @click.stop="navigateTo(`/remotion/episode/${ep.id}`)"
+        >生产中心</button>
         <button
           class="btn btn-icon ep-delete"
           :disabled="deletingEpisodeIds.includes(ep.id)"
@@ -812,6 +818,8 @@ const styleLabels = {
   wong_kar_wai: '王家卫',
   documentary: '纪录片',
   vintage_film: '复古胶片',
+  cold_eastern_epic: '冷调东方史诗',
+  cold_ink_spatial: '冷墨史诗·三维空间二维绘',
   historical_systems: '现实系统史诗',
   period_crime_35mm: '复古犯罪凝视',
   institutional_tableau: '制度剧场',
@@ -887,7 +895,7 @@ const genreLabels = {
   wasteland: '末日废土',
 }
 const curatedStyleKeys = [
-  'historical_systems', 'period_crime_35mm', 'institutional_tableau',
+  'cold_eastern_epic', 'cold_ink_spatial', 'historical_systems', 'period_crime_35mm', 'institutional_tableau',
   'republican_shanghai', 'showa_nostalgia', 'northwest_epic', 'korean_crime',
   'studio_wuxia', 'location_kungfu', 'ink_wuxia', 'old_color_wuxia',
   'guofeng_editorial', 'night_flash_snapshot', 'commercial_teal_orange',
@@ -895,7 +903,7 @@ const curatedStyleKeys = [
   'anime', 'watercolor', 'cyberpunk',
 ]
 const styleOptions = computed(() => [
-  { label: '默认（无特殊风格）', value: '' },
+  { label: '默认（冷墨史诗·三维空间二维绘）', value: 'cold_ink_spatial' },
   ...curatedStyleKeys.map(value => ({ label: styleLabels[value], value })),
   ...(drama.value?.style && !curatedStyleKeys.includes(drama.value.style)
     ? [{ label: `${styleLabels[drama.value.style] || drama.value.style}（当前项目）`, value: drama.value.style }]
@@ -1386,6 +1394,8 @@ onMounted(() => { load(); loadConfigs(); loadIntroTemplates() })
 .ep-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .ep-title { font-size: 14px; font-weight: 600; color: var(--text-0); }
 .ep-status { display: flex; align-items: center; gap: 6px; }
+.ep-id { font-size: 10px; color: var(--text-3); }
+.ep-prod { flex-shrink: 0; align-self: center; }
 .status-dot {
   width: 6px; height: 6px; border-radius: 50%;
 }

@@ -54,25 +54,25 @@ export function cameraTransform(
       y = interpolate(progress, [0, 1], [(0.5 - focus.y) * 8 * intensity, 0]);
       break;
     case "pan_left":
-      x = interpolate(progress, [0, 1], [8 * intensity, -8 * intensity]);
+      x = interpolate(progress, [0, 1], [2.2 * intensity, -2.2 * intensity]);
       scale = Math.min(1.06, Math.max(scale, 1.055));
       break;
     case "pan_right":
-      x = interpolate(progress, [0, 1], [-8 * intensity, 8 * intensity]);
+      x = interpolate(progress, [0, 1], [-2.2 * intensity, 2.2 * intensity]);
       scale = Math.min(1.06, Math.max(scale, 1.055));
       break;
     case "tilt_up":
-      y = interpolate(progress, [0, 1], [6 * intensity, -6 * intensity]);
+      y = interpolate(progress, [0, 1], [1.8 * intensity, -1.8 * intensity]);
       scale = Math.min(1.06, Math.max(scale, 1.055));
       break;
     case "tilt_down":
-      y = interpolate(progress, [0, 1], [-6 * intensity, 6 * intensity]);
+      y = interpolate(progress, [0, 1], [-1.8 * intensity, 1.8 * intensity]);
       scale = Math.min(1.06, Math.max(scale, 1.055));
       break;
     case "whip":
-      x = interpolate(progress, [0, 0.25, 1], [-14 * intensity, 12 * intensity, 2 * intensity]);
-      rotate = interpolate(progress, [0, 0.4, 1], [-1.1 * intensity, 0.6 * intensity, 0]);
-      scale = Math.max(scale, 1.08);
+      x = interpolate(progress, [0, 0.22, 0.58, 1], [-4.8 * intensity, 4.2 * intensity, -1.2 * intensity, 0]);
+      rotate = interpolate(progress, [0, 0.3, 1], [-1.8 * intensity, 0.75 * intensity, 0]);
+      scale = Math.max(scale, 1.16);
       break;
     case "hold":
     default:

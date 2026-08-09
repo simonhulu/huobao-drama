@@ -11,7 +11,9 @@
  * 退出码：0 成功；1 失败（stderr 说明卡在哪步）。
  */
 import fs from 'node:fs'
+import path from 'node:path'
 import {
+  PROJECT_ROOT,
   connectBrowser,
   getPublishPage,
   isLoggedIn,
@@ -38,6 +40,11 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv)
   if (!args.manifest) fail('需要 --manifest <path>（先跑 prepare 阶段生成）', 2)
+  // 相对路径按 CWD → PROJECT_ROOT/data 顺序解析，兼容从项目根或 backend/ 调用
+  if (!path.isAbsolute(args.manifest) && !fs.existsSync(args.manifest)) {
+    const alt = path.join(PROJECT_ROOT, args.manifest)
+    if (fs.existsSync(alt)) args.manifest = alt
+  }
   if (!fs.existsSync(args.manifest)) fail(`manifest 不存在: ${args.manifest}`, 2)
   const m = JSON.parse(fs.readFileSync(args.manifest, 'utf8'))
 

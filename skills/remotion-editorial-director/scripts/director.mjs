@@ -13,6 +13,7 @@ import {
   buildDeterministicAuthoringResult,
   validateAuthoringTrace,
 } from './lib/authoring/deterministic-planner.mjs';
+import {selectEditorialTreatment} from './lib/authoring/effect-budget.mjs';
 import {
   acceptAgentResponse,
   prepareAgentAttempt,
@@ -187,6 +188,17 @@ const implementationIdentity = async () => {
   return hashPayload({directorVersion: producer.version, schemaDigests: digests});
 };
 
+function classifyNarrativeRole(text, index, total) {
+  const normalized = String(text ?? '').replace(/\s+/gu, '');
+  if (index === 0) return 'hook';
+  if (/打伤|动了手|袭击|射死|杀(?:人|死)?|要了?[^，。！？]{0,8}命|死亡|死了|坠马|受辱|拒绝|赖账|压在仓库|卖不出去|风险|难看|断裂|亏损/iu.test(normalized)) return 'crisis';
+  if (/另一种说法|说法很简单|没有声张|压了下来|遮了过去|隐瞒|趁没人|保险柜|支票|秘密|突然|为什么|却|但是|反而|可/iu.test(normalized)) return 'reversal';
+  if (/终于找到|第一份工作|小商行|办公室|公元前|甘泉宫|猎场|朝廷|小时候|童年|父亲家|边疆|侯府|女奴|私生子/iu.test(normalized)) return 'establishing';
+  if (/年薪|美元|价格|比例|增长|收入/iu.test(normalized) && !/借钱|进货|卖出去|收回|客户|账|货|票据/iu.test(normalized)) return 'comparison';
+  if (index === total - 1 && !/未完|继续/iu.test(normalized)) return 'resolution';
+  return 'mechanism';
+}
+
 const buildSemanticOutline = ({timing, inventory, fps}) => {
   let cursor = 0;
   const units = timing.spans.map((span, index) => {
@@ -194,7 +206,7 @@ const buildSemanticOutline = ({timing, inventory, fps}) => {
       throw codedError('TIMED_TRANSCRIPT_NOT_CONTIGUOUS', 'Timed transcript spans must be positive and contiguous');
     }
     cursor = span.endSeconds;
-    const narrativeRole = index === 0 ? 'hook' : index === timing.spans.length - 1 ? 'resolution' : 'mechanism';
+    const narrativeRole = span.editorialHint?.role ?? classifyNarrativeRole(span.text, index, timing.spans.length);
     const assetId = inventory.assets[index % inventory.assets.length]?.assetId;
     if (!assetId) throw codedError('ASSET_INVENTORY_EMPTY', 'Planning requires at least one staged visual asset');
     return {
@@ -207,6 +219,7 @@ const buildSemanticOutline = ({timing, inventory, fps}) => {
       semanticUnitId: `unit-${span.spanId}`,
       startSeconds: span.startSeconds,
       text: span.text,
+      ...(span.editorialHint ? {editorialHint: span.editorialHint} : {}),
       uncertainty: 0,
     };
   });
@@ -368,27 +381,75 @@ const buildReferenceSemanticOutline = async ({manifest, manifestDirectory, input
   };
 };
 
-const plannerInputs = ({outline, inventory, fps}) => {
+const semanticScaleFor = (role, emphasis) => {
+  if (role === 'hook') return 1.18;
+  if (role === 'establishing' || role === 'resolution') return 1.04;
+  if (role === 'comparison') return 1.1;
+  if (role === 'reversal') return 1.2;
+  if (role === 'crisis') return 1.24;
+  return 1.08 + Math.min(0.04, Math.max(0, emphasis - 0.5) * 0.08);
+};
+
+export const buildPlannerInputs = ({outline, inventory, fps}) => {
   const durationInFrames = Math.round(outline.units.at(-1).endSeconds * fps);
-  const semanticUnits = outline.units.map((unit) => ({
+  const semanticUnits = outline.units.map((unit, index) => ({
     assetId: unit.assetRequirements[0],
     endFrame: Math.round(unit.endSeconds * fps),
     evidenceClaimIds: outline.claims
       .filter(({claimId}) => unit.claimIds.includes(claimId))
       .flatMap(({evidenceClaimIds}) => evidenceClaimIds),
-    grammarRuleIds: [`default-${unit.narrativeRole}`],
+    claimIds: unit.claimIds ?? [],
+    emphasis: unit.emphasis,
+    grammarRuleIds: [index === 0 ? `default-${unit.narrativeRole}` : `default-${unit.narrativeRole}-${index}`],
     narrativeRole: unit.narrativeRole,
     semanticUnitId: unit.semanticUnitId,
     startFrame: Math.round(unit.startSeconds * fps),
+    subjectId: unit.entityIds?.[0] ?? unit.assetRequirements[0],
+    text: unit.text,
+    ...(unit.editorialHint ? {editorialHint: unit.editorialHint} : {}),
   }));
-  const roles = [...new Set(semanticUnits.map(({narrativeRole}) => narrativeRole))];
+  const rules = [];
+  const recentCameras = [];
+  const recentTransitions = [];
+  for (const [index, unit] of semanticUnits.entries()) {
+    const hint = unit.editorialHint ?? {};
+    const emphasis = hint.emphasis ?? unit.emphasis ?? (unit.narrativeRole === 'hook' ? 0.85 : 0.6);
+    const nextUnit = semanticUnits[index + 1];
+    const nextHint = nextUnit?.editorialHint ?? {};
+    const nextEmphasis = nextHint.emphasis ?? nextUnit?.emphasis ?? (nextUnit?.narrativeRole === 'hook' ? 0.85 : 0.6);
+    const scaleDelta = nextUnit
+      ? semanticScaleFor(nextUnit.narrativeRole, nextEmphasis) - semanticScaleFor(unit.narrativeRole, emphasis)
+      : 0;
+    const treatment = selectEditorialTreatment({
+      role: unit.narrativeRole,
+      emphasis,
+      currentFocus: hint.focus,
+      nextFocus: nextHint.focus,
+      scaleDelta,
+      recent: {cameras: recentCameras, transitions: recentTransitions},
+      transitionEnergy: hint.transitionEnergy,
+    });
+    const camera = {
+      ...treatment.camera,
+      intensity: Math.min(1, (treatment.camera.intensity ?? 0.6) * (0.78 + emphasis * 0.32)),
+      ...(hint.focus ? {focus: hint.focus} : {}),
+    };
+    const transition = treatment.transition;
+    recentCameras.push(camera.preset);
+    recentTransitions.push(transition.class);
+    rules.push({
+      camera,
+      transition,
+      grammarRuleId: index === 0 ? `default-${unit.narrativeRole}` : `default-${unit.narrativeRole}-${index}`,
+    });
+  }
   return {
     assetInventory: {assets: inventory.assets.map(({assetId}) => ({assetId}))},
-    grammar: {rules: roles.map((role) => ({
-      allowedCameras: ['hold'],
-      allowedTransitions: ['hard_cut'],
-      defaults: {camera: 'hold', transition: 'hard_cut'},
-      grammarRuleId: `default-${role}`,
+    grammar: {rules: rules.map(({camera, transition, grammarRuleId}) => ({
+      allowedCameras: [camera.preset],
+      allowedTransitions: [transition.class],
+      defaults: {camera, transition},
+      grammarRuleId,
     }))},
     semanticOutline: {durationInFrames, fps, semanticUnits},
   };
@@ -948,7 +1009,7 @@ const buildExecutors = (runtime) => {
     },
     RECIPE_DRAFTED: async () => {
       const {inventory, outline} = await readInputs();
-      const planning = plannerInputs({fps: runtime.manifest.target.profile.fps, inventory, outline});
+      const planning = buildPlannerInputs({fps: runtime.manifest.target.profile.fps, inventory, outline});
       let authoringResult;
       if (runtime.authoringMode === 'deterministic') {
         authoringResult = buildDeterministicAuthoringResult(planning);
@@ -1418,6 +1479,7 @@ const buildExecutors = (runtime) => {
       const renderTelemetryReference = await artifactReference('render-telemetry');
       const inspectReportPath = path.join(runtime.runDirectory, 'inspect', 'inspect-report.json');
       const layoutTelemetryPath = path.join(runtime.runDirectory, 'inspect', 'layout-telemetry.json');
+      await mkdir(path.dirname(inspectReportPath), {recursive: true});
       const {request, response} = await runAdapter({
         expectedHashes: {
           media: mediaReference.sha256,
@@ -1933,4 +1995,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await main();
 }
 
-export {OPERATION_STEPS, STAGE_DEFINITIONS};
+export {OPERATION_STEPS, STAGE_DEFINITIONS, classifyNarrativeRole};

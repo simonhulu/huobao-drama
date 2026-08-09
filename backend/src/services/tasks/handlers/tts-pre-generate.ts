@@ -2,6 +2,7 @@ import fs from 'fs'
 import { db, schema } from '../../../db/index.js'
 import { eq } from 'drizzle-orm'
 import { generateEpisodePreTTS } from '../../episode-tts.js'
+import { ensureRemotionProjectForEpisode } from '../../remotion.js'
 import { registerTaskHandler } from '../registry.js'
 import { logTaskProgress, logTaskSuccess, logTaskError } from '../../../utils/task-logger.js'
 import { getAbsolutePath } from '../../../utils/storage.js'
@@ -52,6 +53,19 @@ export function createTTSPreGenerateHandler(): TaskHandler<TTSPreGeneratePayload
         audio_url: result.audioUrl,
         title_count: result.titles.length,
       })
+
+      // TTS 完成后立即创建 Remotion 项目（幂等），让 UI 在 grid 生成前就能看到项目卡片。
+      try {
+        const projectResult = ensureRemotionProjectForEpisode(episodeId)
+        if (projectResult.created) {
+          ctx.event('remotion.project.created', {
+            episode_id: episodeId,
+            project_id: projectResult.projectId,
+          })
+        }
+      } catch (projectErr: any) {
+        console.error(`[TTSPreGenerate] ensureRemotionProjectForEpisode failed for episode ${episodeId}:`, projectErr.message)
+      }
 
       return {
         type: 'done',

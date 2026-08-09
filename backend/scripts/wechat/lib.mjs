@@ -136,7 +136,9 @@ export async function getPublishPage(browser, { goto = true } = {}) {
   if (!page) page = await browser.newPage()
   attachDialogHandler(page)
   if (goto && !page.url().includes('/platform/post/create')) {
-    await page.goto(CREATE_URL, { waitUntil: 'networkidle2', timeout: 60_000 })
+    // domcontentloaded 比 networkidle2 快得多——视频号是 SPA，关键 DOM 在
+    // 首屏 JS 执行后就绪，不需要等所有第三方资源（分析/广告）停止请求。
+    await page.goto(CREATE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   }
   await page.setViewport({ width: 1400, height: 860 })
   await page.setJavaScriptEnabled(true)
@@ -271,8 +273,10 @@ export async function fillShortTitle(page, title) {
 export async function fillDescription(page, description) {
   const text = (description || '').slice(0, 200)
   await injectCollector(page)
-  // 1) 定位描述编辑器并聚焦、清空。用真实键盘输入而非 innerText 赋值——
+  // 1) 定位描述编辑器并聚焦、清空，把光标显式放到末尾。用真实键盘输入而非 innerText 赋值——
   //    直接赋值会绕过 Vue 数据绑定，视觉有字但框架 state 为空，保存后描述丢失。
+  //    注意：不能用 mouse.click 落点代替——编辑器中心坐标经常点到外层/错位导致失焦，
+  //    后续键盘输入进不去编辑器（descLen 一直是 0）。显式设置 selection range 才可靠。
   const found = await page.evaluate(() => {
     const els = window.__collectAll()
     const editor = els.find(
@@ -284,12 +288,17 @@ export async function fillDescription(page, description) {
     // 清空已有内容
     editor.innerHTML = ''
     editor.dispatchEvent(new Event('input', { bubbles: true }))
-    const r = editor.getBoundingClientRect()
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+    // 光标放到编辑器末尾
+    const range = document.createRange()
+    range.selectNodeContents(editor)
+    range.collapse(false)
+    const sel = window.getSelection()
+    sel.removeAllRanges()
+    sel.addRange(range)
+    return true
   })
   if (!found) return false
-  // 2) 点击editor确保光标在里面，再真实键入
-  await page.mouse.click(found.x, found.y)
+  // 2) 光标已在编辑器内，直接真实键入
   await sleep(300)
   await page.keyboard.type(text, { delay: 8 })
   await sleep(500)

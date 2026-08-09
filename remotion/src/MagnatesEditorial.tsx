@@ -12,7 +12,6 @@ import { cameraLayerStyle } from "./editorial/camera";
 import { buildTimeline, clamp, isFrameVisible, totalDurationInFrames, validateTimeline } from "./editorial/timing";
 import {
   incomingTransitionStyle,
-  isBridgeTransition,
   outgoingTransitionStyle,
   transitionFrames,
 } from "./editorial/transitions";
@@ -123,10 +122,9 @@ function EditorialText({ cue, frame, coordinateMode }: { cue: EditorialTextCue; 
           style={{
             marginBottom: 8,
             color: cue.accent ?? AMBER,
-            fontSize: Math.max(12, (cue.fontSize ?? 54) * 0.23),
+            fontSize: Math.max(14, (cue.fontSize ?? 54) * 0.3),
             fontWeight: 700,
-            letterSpacing: 2.5,
-            textTransform: "uppercase",
+            letterSpacing: 0,
           }}
         >
           {cue.label}
@@ -231,7 +229,13 @@ function GraphicCue({ cue, frame, coordinateMode }: { cue: EditorialGraphicCue; 
           boxShadow: `0 12px 34px rgba(0,0,0,0.3), inset 0 0 30px ${color}22`,
         }}
       >
-        <div style={{ position: "absolute", inset: 12, border: `1px solid ${color}88`, opacity: 0.8 }} />
+        <div style={{ position: "absolute", left: 14, right: 14, top: 12, display: "flex", alignItems: "center", gap: 8, color: PAPER, fontFamily: FONT, fontSize: 16, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden" }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: color, boxShadow: `0 0 12px ${color}` }} />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{cue.label ?? cue.subject}</span>
+        </div>
+        <div style={{ position: "absolute", left: 14, right: 14, top: 48, height: 1, backgroundColor: `${secondaryColor}88` }} />
+        {[0, 1, 2].map((index) => <div key={index} style={{ position: "absolute", left: 16, right: 38 + index * 22, top: 72 + index * 25, height: index === 1 ? 7 : 4, backgroundColor: index === 1 ? color : `${secondaryColor}99`, transformOrigin: "left center", transform: `scaleX(${Math.min(1, p * (0.72 + index * 0.12))})` }} />)}
+        <div style={{ position: "absolute", left: 14, right: 14, bottom: 14, height: 3, backgroundColor: `${secondaryColor}55` }}><div style={{ width: `${p * 62}%`, height: "100%", backgroundColor: color }} /></div>
         <div style={{ position: "absolute", left: "50%", bottom: -34, width: 2, height: 32, background: secondaryColor }} />
       </div>
     );
@@ -248,16 +252,19 @@ function GraphicCue({ cue, frame, coordinateMode }: { cue: EditorialGraphicCue; 
           boxSizing: "border-box",
           color: PAPER,
           border: `1px solid ${color}`,
-          background: "rgba(9, 9, 10, 0.56)",
+          background: `linear-gradient(90deg, ${color}33, rgba(9, 9, 10, 0.82))`,
           fontFamily: FONT,
-          fontSize: 12,
+          fontSize: 16,
           fontWeight: 700,
-          letterSpacing: 1.6,
-          textTransform: "uppercase",
+          letterSpacing: 0,
+          display: "flex",
+          alignItems: "center",
+          gap: 9,
           transform: `translateX(${(1 - p) * -12}px)`,
         }}
       >
-        {cue.label ?? cue.subject}
+        <span style={{ width: 8, height: 8, backgroundColor: color, boxShadow: `0 0 12px ${color}`, flex: "0 0 auto" }} />
+        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cue.label ?? cue.subject}</span>
       </div>
     );
   }
@@ -293,17 +300,6 @@ function DistortionEcho({ asset, progress }: { asset: EditorialAsset; progress: 
       <EchoPlate asset={asset} style={{ ...style, opacity: progress * 0.42, transform: `translateX(${progress * -10}px)`, filter: `${style.filter ?? ""} saturate(1.8) hue-rotate(-18deg)`, mixBlendMode: "screen", clipPath: "polygon(0 0, 100% 0, 100% 33%, 0 38%)" }} />
       <EchoPlate asset={asset} style={{ ...style, opacity: progress * 0.3, transform: `translateX(${progress * 11}px)`, filter: `${style.filter ?? ""} saturate(1.7) hue-rotate(155deg)`, mixBlendMode: "screen", clipPath: "polygon(0 64%, 100% 58%, 100% 100%, 0 100%)" }} />
     </>
-  );
-}
-
-function BridgeGraphic({ kind, progress, accent, direction = "in" }: { kind: string; progress: number; accent: string; direction?: "in" | "out" }) {
-  if (!isBridgeTransition(kind as Parameters<typeof isBridgeTransition>[0]) || progress <= 0) return null;
-  if (kind === "distortion") return <div style={{ position: "absolute", inset: 0, zIndex: 52, opacity: Math.sin(progress * Math.PI) * 0.5, background: `repeating-linear-gradient(0deg, transparent 0 8px, ${accent}44 9px 10px)`, mixBlendMode: "screen" }} />;
-  return (
-    <div style={{ position: "absolute", inset: 0, zIndex: 52, opacity: (direction === "out" ? progress : 1 - progress) * 0.72, pointerEvents: "none" }}>
-      <div style={{ position: "absolute", left: `${(1 - progress) * -20}%`, top: "46%", width: "140%", height: 4, backgroundColor: accent, transform: "rotate(-2deg)", boxShadow: `0 0 30px ${accent}` }} />
-      <div style={{ position: "absolute", left: `${progress * 14}%`, top: "51%", width: "100%", height: 1, backgroundColor: "rgba(244,240,231,0.65)" }} />
-    </div>
   );
 }
 
@@ -359,8 +355,6 @@ function EditorialShot({ shot, incomingOffsetFrames, frameOffset, coordinateMode
         </div>
         {incomingDistortionProgress > 0 ? <DistortionEcho asset={shot.background} progress={incomingDistortionProgress} /> : null}
         {outgoingDistortionProgress > 0 ? <DistortionEcho asset={shot.background} progress={outgoingDistortionProgress} /> : null}
-        <BridgeGraphic kind={incomingClass} progress={bridgeProgress} accent={shot.transitionIn?.accent ?? PURPLE} />
-        <BridgeGraphic kind={outgoingClass} progress={outgoingProgress} accent={shot.transitionOut?.accent ?? shot.transitionIn?.accent ?? PURPLE} direction="out" />
         {(shot.graphics ?? []).map((cue, cueIndex) => {
           const cueId = cue.id ?? `${shot.id}:graphic:${cueIndex}`;
           return (
@@ -370,6 +364,12 @@ function EditorialShot({ shot, incomingOffsetFrames, frameOffset, coordinateMode
               startFrame={incomingOffsetFrames + cue.startFrame}
               endFrame={incomingOffsetFrames + cue.endFrame}
               frameOffset={frameOffset}
+              geometry={{
+                x: typeof cue.x === "number" ? cue.x : 0.08,
+                y: typeof cue.y === "number" ? cue.y : 0.68,
+                width: typeof cue.width === "number" ? cue.width : cue.kind === "monitor" ? 0.32 : 0.2,
+                height: typeof cue.height === "number" ? cue.height : cue.kind === "monitor" ? 0.24 : 0.08,
+              }}
               style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
             >
               <GraphicCue cue={cue} frame={localFrame} coordinateMode={coordinateMode} />
@@ -385,6 +385,12 @@ function EditorialShot({ shot, incomingOffsetFrames, frameOffset, coordinateMode
               startFrame={incomingOffsetFrames + cue.startFrame}
               endFrame={incomingOffsetFrames + cue.endFrame}
               frameOffset={frameOffset}
+              geometry={{
+                x: typeof cue.x === "number" ? cue.x : 0.08,
+                y: typeof cue.y === "number" ? cue.y : 0.72,
+                width: typeof cue.width === "number" ? cue.width : 0.8,
+                height: 0.14,
+              }}
               style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
             >
               <EditorialText cue={cue} frame={localFrame} coordinateMode={coordinateMode} />

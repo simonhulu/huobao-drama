@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import test from 'node:test'
 
 const root = path.resolve(import.meta.dirname, '../..')
@@ -14,6 +14,9 @@ fs.mkdirSync(fixtureRoot, { recursive: true })
 const fixtureDir = fs.mkdtempSync(path.join(fixtureRoot, 'videoeditor-props-fixture-'))
 const imagePath = path.relative(root, path.join(fixtureDir, 'fixture.png'))
 const audioPath = path.relative(root, path.join(fixtureDir, 'fixture.m4a'))
+const sharedAudioPath = path.relative(root, path.join(fixtureDir, 'shared.m4a'))
+const duplicateAudioPath = path.relative(root, path.join(fixtureDir, 'duplicate.m4a'))
+const malformedAudioPath = path.relative(root, path.join(fixtureDir, 'malformed.m4a'))
 
 // Keep the contract tests independent of generated project media. The props
 // builder only needs deterministic local files at this layer; media decode is
@@ -24,11 +27,41 @@ fs.writeFileSync(
 )
 fs.writeFileSync(path.join(fixtureDir, 'fixture.m4a'), Buffer.from('portable-audio-fixture'))
 
+for (const target of [sharedAudioPath, duplicateAudioPath, malformedAudioPath]) {
+  const generated = spawnSync('ffmpeg', [
+    '-v', 'error',
+    '-f', 'lavfi',
+    '-i', 'anullsrc=r=48000:cl=mono',
+    '-t', '0.4',
+    '-c:a', 'aac',
+    '-y', path.resolve(root, target),
+  ])
+  assert.equal(generated.status, 0, generated.stderr?.toString())
+}
+
+fs.writeFileSync(`${path.resolve(root, sharedAudioPath)}.titles.json`, JSON.stringify({
+  text: '甲句。乙句。',
+  titles: [{ text: '甲句。乙句。', text_begin: 0, text_end: 6, time_begin: 0, time_end: 300 }],
+  extra: { audio_length: 400 },
+}))
+fs.writeFileSync(`${path.resolve(root, duplicateAudioPath)}.titles.json`, JSON.stringify({
+  text: '乙句。',
+  titles: [{ text: '乙句。', text_begin: 0, text_end: 3, time_begin: 0, time_end: 300 }],
+  extra: { audio_length: 400 },
+}))
+fs.writeFileSync(`${path.resolve(root, malformedAudioPath)}.titles.json`, JSON.stringify({
+  text: '丢失句。',
+  titles: [{ text: '丢失句。', text_begin: 0, text_end: 4, time_begin: 0, time_end: 20 }],
+  extra: { audio_length: 400 },
+}))
+
 test.after(() => {
   fs.rmSync(fixtureDir, { recursive: true, force: true })
+  fs.rmSync(path.join(root, 'data/static/audio/remotion-project-99-narration-conformed.m4a'), { force: true })
+  fs.rmSync(path.join(root, 'data/temp/remotion-project-99-narration-concat.txt'), { force: true })
 })
 
-function snapshotFor(shots, metadata = null) {
+function snapshotFor(shots, metadata = null, content = '', episodeOverrides = {}) {
   return {
     project: {
       id: 99,
@@ -37,7 +70,7 @@ function snapshotFor(shots, metadata = null) {
       updatedAt: '2026-07-21T00:00:00.000Z',
       metadata,
       sourceSnapshot: {
-        episode: { id: 7, episodeNumber: 1, title: '测试集', content: '' },
+        episode: { id: 7, episodeNumber: 1, title: '测试集', content, ...episodeOverrides },
         storyboards: [],
       },
     },
@@ -244,6 +277,136 @@ test('legacy snapshot remains EpisodeShowcase without an explicit recipe', async
   assert.equal(result.code, 0, result.stderr)
   assert.equal(result.props.compositionId, 'EpisodeShowcase')
   assert.equal(result.props.shots[0].visualMode, 'ai-plate')
+})
+
+test('legacy narration is conformed once and redundant source chunks are removed', async () => {
+  const audioAsset = (localPath) => ({
+    assetKey: `audio-${path.basename(localPath)}`,
+    assetType: 'audio',
+    status: 'completed',
+    localPath,
+    durationMs: 400,
+  })
+  const shot = (shotNumber, narration, localPath) => ({
+    ...legacyShot(),
+    id: shotNumber,
+    sourceStoryboardId: shotNumber,
+    shotNumber,
+    narration,
+    assets: [audioAsset(localPath)],
+  })
+  const result = await runBuilder({
+    snapshot: snapshotFor([
+      shot(1, '甲句。', sharedAudioPath),
+      shot(2, '乙句。', sharedAudioPath),
+      shot(3, '乙句。', duplicateAudioPath),
+    ], null, '甲句。乙句。'),
+  })
+
+  assert.equal(result.code, 0, result.stderr)
+  assert.match(result.props.audioUrl, /remotion-project-99-narration-conformed\.m4a$/)
+  assert.equal(result.props.shots.length, 2)
+  assert.deepEqual(result.props.shots.map((item) => item.narration), ['甲句。', '乙句。'])
+  assert.ok(result.props.shots.every((item) => item.audioUrl == null))
+  assert.ok(result.props.shots.every((item) => !('audioStartFrame' in item)))
+  assert.ok(result.props.shots.every((item) => !('captionSegments' in item)))
+  assert.deepEqual(result.props.captions, [{ startFrame: 0, endFrame: 9, text: '甲句。乙句。' }])
+  assert.equal(result.props.captionTrack.timingSource, 'tts-time-begin-end')
+  assert.equal(result.props.captionTrack.cueCount, 1)
+  assert.equal(result.props.captions.filter((cue) => cue.text === '乙句。').length, 0)
+  assert.equal(result.props.durationInFrames, result.props.shots.reduce((sum, item) => sum + item.durationInFrames, 0))
+})
+
+test('legacy narration rejects MiniMax titles that cover only a fraction of the audio', async () => {
+  const result = await runBuilder({
+    snapshot: snapshotFor([{
+      ...legacyShot(),
+      narration: '丢失句。',
+      assets: [{
+        assetKey: 'malformed-audio',
+        assetType: 'audio',
+        status: 'completed',
+        localPath: malformedAudioPath,
+        durationMs: 400,
+      }],
+    }], null, '丢失句。'),
+  })
+
+  assert.notEqual(result.code, 0)
+  assert.match(result.stderr, /MiniMax titles cover 5\.0% of the audio/)
+  assert.equal(result.props, null)
+})
+
+test('frozen MiniMax narration timeline is the primary audio, shot, and caption clock', async () => {
+  const shot = (shotNumber, narration) => ({
+    ...legacyShot(),
+    id: shotNumber,
+    sourceStoryboardId: shotNumber,
+    shotNumber,
+    narration,
+  })
+  const titles = [{ text: '甲句。乙句。', text_begin: 0, text_end: 6, time_begin: 0, time_end: 300 }]
+  const result = await runBuilder({
+    snapshot: snapshotFor(
+      [shot(1, '甲句。'), shot(2, '乙句。')],
+      null,
+      '甲句。乙句。',
+      { narrationTimeline: { audioUrl: sharedAudioPath, titles, timingSource: 'minimax-titles' } },
+    ),
+  })
+
+  assert.equal(result.code, 0, result.stderr)
+  assert.match(result.props.audioUrl, /shared\.m4a$/)
+  assert.equal(result.props.narrationConformance.sourceAudioCount, 1)
+  assert.equal(result.props.narrationConformance.conformedAudioCount, 1)
+  assert.deepEqual(result.props.captions, [{ startFrame: 0, endFrame: 9, text: '甲句。乙句。' }])
+  assert.ok(result.props.shots.every((item) => !('captionSegments' in item)))
+})
+
+test('frozen timeline rejects shot narration with a missing source span', async () => {
+  const titles = [{ text: '甲句。乙句。', text_begin: 0, text_end: 6, time_begin: 0, time_end: 300 }]
+  const result = await runBuilder({
+    snapshot: snapshotFor(
+      [{ ...legacyShot(), narration: '甲句。' }],
+      null,
+      '甲句。乙句。',
+      { narrationTimeline: { audioUrl: sharedAudioPath, titles, timingSource: 'minimax-titles' } },
+    ),
+  })
+
+  assert.notEqual(result.code, 0)
+  assert.match(result.stderr, /shot narrations do not exactly partition the MiniMax title timeline/)
+  assert.equal(result.props, null)
+})
+
+test('frozen timeline ignores drifting MiniMax text offsets and follows title text order', async () => {
+  const shot = (shotNumber, narration) => ({
+    ...legacyShot(),
+    id: shotNumber,
+    sourceStoryboardId: shotNumber,
+    shotNumber,
+    narration,
+  })
+  const titles = [
+    { text: '甲句。', text_begin: 0, text_end: 3, time_begin: 0, time_end: 150 },
+    { text: '乙句。', text_begin: 41, text_end: 44, time_begin: 150, time_end: 300 },
+  ]
+  const result = await runBuilder({
+    snapshot: snapshotFor(
+      [shot(1, '甲句。'), shot(2, '乙句。')],
+      null,
+      '甲句。乙句。',
+      { narrationTimeline: { audioUrl: sharedAudioPath, titles, timingSource: 'minimax-titles' } },
+    ),
+  })
+
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(result.props.shots.length, 2)
+  assert.ok(result.props.shots.every((item) => item.durationInFrames > 0))
+  assert.deepEqual(result.props.captions, [
+    { startFrame: 0, endFrame: 5, text: '甲句。' },
+    { startFrame: 4, endFrame: 9, text: '乙句。' },
+  ])
 })
 
 test('temporal snapshot remains TemporalGridEpisode without an explicit recipe', async () => {

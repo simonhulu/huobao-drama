@@ -46,6 +46,8 @@ const voices = [
   { voice_id: "Attractive_Girl", voice_name: "Attractive Girl", language: "英语" },
   { voice_id: "Serene_Woman", voice_name: "Serene Woman", language: "英语" },
   { voice_id: "Chinese (Mandarin)_Reliable_Executive", voice_name: "沉稳高管", language: "中文" },
+  { voice_id: "Chinese_deep_voiced_male_nv1", voice_name: "深沉男声（Deep-voiced Male）", language: "中文" },
+  { voice_id: "Chinese_gravelly_storyteller_nv1", voice_name: "沙哑故事讲述者（Gravelly Storyteller）", language: "中文" },
   { voice_id: "Chinese (Mandarin)_News_Anchor", voice_name: "新闻女声", language: "中文" },
   { voice_id: "Chinese (Mandarin)_Mature_Woman", voice_name: "傲娇御姐", language: "中文" },
   { voice_id: "Chinese (Mandarin)_Unrestrained_Young_Man", voice_name: "不羁青年", language: "中文" },

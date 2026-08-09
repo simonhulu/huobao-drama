@@ -12,7 +12,7 @@ import sharp from 'sharp'
 import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { aiFetch } from './ai-client.js'
-import { generateEpisodeGridSheets } from './grid-narrative-pipeline.js'
+import { generateEpisodeNarrativePanelSheets } from './grid-narrative-pipeline.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '../../..')
@@ -299,7 +299,7 @@ async function reviewStoryboard(
       })
       verdict = v.verdict
         ? { ...v.verdict, structural: true }
-        : { pass: true, issues: [`vlm 不可用: ${v.error}（仅结构检查通过）`], structural: true, vlm: false }
+        : { pass: false, issues: [`vlm 不可用: ${v.error}（结构检查通过但 VLM 未运行）`], structural: true, vlm: false }
     }
     if (!verdict.pass) passAll = false
     results.push({ ...cell, review: verdict })
@@ -346,8 +346,8 @@ export async function reviewEpisodeGridCells(
     reviewed++
 
     if (!passAll && maxRetries > 0) {
-      // 换种子重生一次并复审
-      const gen = await generateEpisodeGridSheets(
+      // 用叙事画格生产路径重生成失败的分镜，保持连续性，然后复审
+      const gen = await generateEpisodeNarrativePanelSheets(
         episodeId,
         {
           force: true,

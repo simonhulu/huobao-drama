@@ -17,15 +17,33 @@ after(() => {
   global.fetch = originalFetch
 })
 
-function seedDrama() {
+function seedDrama(genre = 'history') {
   const ts = now()
   return Number(db.insert(schema.dramas).values({
     title: '历史科普项目',
+    genre,
     status: 'draft',
     createdAt: ts,
     updatedAt: ts,
   }).run().lastInsertRowid)
 }
+
+test('Dharma import defaults narration speed to 0.85 and stores it on the episode', async () => {
+  const dramaId = seedDrama('dharma')
+  const response = await dramasRoute.request(`/${dramaId}/import-script`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: '慢一点理解',
+      script_content: '每一句话都需要留出理解时间。',
+    }),
+  })
+  assert.equal(response.status, 201)
+  const [episode] = db.select().from(schema.episodes)
+    .where(eq(schema.episodes.dramaId, dramaId))
+    .all()
+  assert.equal(episode?.narrationSpeed, 0.85)
+})
 
 function seedConfig(serviceType: 'text' | 'image' | 'video' | 'audio', idLabel: string) {
   const ts = now()
@@ -112,6 +130,42 @@ test('POST /:id/import-script creates a direct-script episode and schedules extr
     return payload?.agent_type === 'extractor'
   })
   assert.ok(extractorTask, 'should schedule an extractor task')
+})
+
+test('history factory imports record the factory contract and skip automatic covers', async () => {
+  const dramaId = seedDrama()
+  const imageConfigId = seedConfig('image', 'history-image')
+  const videoConfigId = seedConfig('video', 'history-video')
+  const audioConfigId = seedConfig('audio', 'history-audio')
+
+  const response = await dramasRoute.request(`/${dramaId}/import-script`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: '用户确认的历史标题',
+      script_content: '这是一段由历史工厂导入的口播正文。',
+      image_config_id: imageConfigId,
+      video_config_id: videoConfigId,
+      audio_config_id: audioConfigId,
+      skip_cover_generation: true,
+      history_factory: 'remotion-history-factory',
+    }),
+  })
+  const json = await response.json()
+
+  assert.equal(response.status, 201)
+  assert.deepEqual(json.data.cover_task_ids, [])
+
+  const [episode] = db.select().from(schema.episodes)
+    .where(eq(schema.episodes.dramaId, dramaId))
+    .all()
+  assert.ok(episode)
+  assert.equal(JSON.parse(episode.metadata || '{}').historyFactory, 'remotion-history-factory')
+
+  const tasks = db.select().from(schema.creationTasks)
+    .where(eq(schema.creationTasks.episodeId, episode.id))
+    .all()
+  assert.equal(tasks.filter(task => task.type === 'cover.generate').length, 0)
 })
 
 test('POST /:id/import-script splits by segment markers and creates multiple direct-script episodes', async () => {

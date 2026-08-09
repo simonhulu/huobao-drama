@@ -127,7 +127,7 @@ export async function generateAndSaveNarrations(episodeId: number, dramaId: numb
       max_tokens: MAX_TOKENS,
       response_format: { type: 'json_object' },
     }),
-  }, { timeoutMs: 180_000, maxAttempts: 2 })
+  }, { timeoutMs: 180_000, maxAttempts: 2, lane: 'text-agent' })
 
   const data = await resp.json()
   const resultText = data?.choices?.[0]?.message?.content
@@ -211,6 +211,61 @@ export function findOriginalFragmentRange(source: string, fragment: string): { s
   }
 
   return { start: originalStart, end: sliceEnd }
+}
+
+export interface OrderedNarrationFragmentRange {
+  index: number
+  start: number
+  end: number
+}
+
+/**
+ * Maps narration fragments to one non-overlapping, gap-free pass over the source.
+ * Punctuation and whitespace are ignored for matching but preserved in ranges.
+ */
+export function mapOrderedNarrationFragments(
+  source: string,
+  fragments: string[],
+): OrderedNarrationFragmentRange[] {
+  const indexedSource = normalizeWithOriginalIndex(source)
+  if (!indexedSource.normalized) throw new Error('narration source is empty')
+  if (!fragments.length) throw new Error('narration has no storyboard fragments')
+
+  const ranges: OrderedNarrationFragmentRange[] = []
+  let normalizedCursor = 0
+
+  for (let index = 0; index < fragments.length; index++) {
+    const normalizedFragment = normalizeForFragmentMatch(fragments[index] || '')
+    if (!normalizedFragment) {
+      throw new Error(`storyboard ${index + 1} has no narration text`)
+    }
+
+    const normalizedStart = indexedSource.normalized.indexOf(normalizedFragment, normalizedCursor)
+    if (normalizedStart < 0) {
+      throw new Error(`storyboard ${index + 1} narration is missing, repeated, or out of order`)
+    }
+    if (normalizedStart !== normalizedCursor) {
+      throw new Error(`storyboard ${index + 1} skips source narration before its text`)
+    }
+
+    const normalizedEnd = normalizedStart + normalizedFragment.length
+    const originalStart = indexedSource.indexes[normalizedStart]
+    const originalLast = indexedSource.indexes[normalizedEnd - 1]
+    if (originalStart == null || originalLast == null) {
+      throw new Error(`storyboard ${index + 1} narration range is invalid`)
+    }
+
+    let originalEnd = originalLast + 1
+    while (originalEnd < source.length && isMatchIgnoredChar(source[originalEnd])) originalEnd++
+    ranges.push({ index, start: originalStart, end: originalEnd })
+    normalizedCursor = normalizedEnd
+  }
+
+  if (normalizedCursor !== indexedSource.normalized.length) {
+    throw new Error('storyboards do not cover the complete narration source')
+  }
+
+  return ranges
 }
 
 export function resolveStoryboardNarrationTextForTTS(sb: StoryboardRow, ep?: EpisodeRow | null): string {

@@ -108,7 +108,7 @@ app.put('/:id', async (c) => {
   logTaskPayload('StoryboardAPI', 'update body', body)
 
   const fieldMap: Record<string, string> = {
-    title: 'title', description: 'description', shot_type: 'shotType',
+    title: 'title', description: 'description', shot_type: 'shotType', storyboard_number: 'storyboardNumber',
     angle: 'angle', movement: 'movement', action: 'action',
     dialogue: 'dialogue', narration: 'narration', duration: 'duration', video_prompt: 'videoPrompt',
     image_prompt: 'imagePrompt', scene_id: 'sceneId', location: 'location',

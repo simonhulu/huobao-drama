@@ -4,6 +4,11 @@ import {
   REMOTION_SHOT_RHYTHM,
   splitNarrationToSegments,
 } from './remotion-segmentation.js'
+import {
+  buildHistoryVisualStyleDirective,
+  DEFAULT_HISTORY_VISUAL_STYLE,
+  resolveHistoryVisualStyle,
+} from './history-visual-style.js'
 import { validateStoryContract } from './story-contract.js'
 
 export type PlannedShotType = 'ai_plate' | 'character' | 'map' | 'stock' | 'graphic' | 'hybrid'
@@ -45,6 +50,10 @@ export interface PlannerStoryboard {
 export interface PlannerExistingShot {
   shotNumber: number
   visualPlan?: unknown
+}
+
+export interface RemotionPlannerOptions {
+  visualStyle?: string | null
 }
 
 export interface PlannerStockAsset {
@@ -550,23 +559,40 @@ function visualSetupIdFor(storyboard: PlannerStoryboard, declaredPlan: Record<st
   return `setup-${slug(cleanText(storyboard.title) || `shot-${storyboard.storyboardNumber}`)}`
 }
 
-function characterPrompt(person: string, storyboard: PlannerStoryboard): string {
-  return [
+type PromptContext = {
+  visualStyleId: string
+  visualStyleDirective: string
+}
+
+function promptWithStyle(prompt: string, context: PromptContext): string {
+  return `${context.visualStyleDirective}\n${prompt}`
+}
+
+function promptContext(style: string | null | undefined): PromptContext {
+  const profile = resolveHistoryVisualStyle(style || DEFAULT_HISTORY_VISUAL_STYLE)
+  return {
+    visualStyleId: profile.id,
+    visualStyleDirective: buildHistoryVisualStyleDirective(profile.id),
+  }
+}
+
+function characterPrompt(person: string, storyboard: PlannerStoryboard, context: PromptContext): string {
+  return promptWithStyle([
     '用途：Remotion 人物透明层，不是完整场景图。',
     `人物：${person}，${cleanText(storyboard.action || storyboard.narration)}`,
     '只生成一个人物主体，完整或半身均可，透明背景 PNG，边缘干净，手指和衣物完整，人物不要携带任何文字、旗帜、标识或其他人。',
     `服饰、年龄、体态必须符合镜头指定的时代和地点：${cleanText(storyboard.time) || '以当前历史稿件为准'}；${cleanText(storyboard.location) || '以当前镜头地点为准'}。后续由 Remotion 将人物层叠加到 AI 场景板上。`,
-  ].join('\n')
+  ].join('\n'), context)
 }
 
-function platePrompt(storyboard: PlannerStoryboard, purpose: string): string {
-  return [
+function platePrompt(storyboard: PlannerStoryboard, purpose: string, context: PromptContext): string {
+  return promptWithStyle([
     '用途：Remotion clean plate，画面内禁止出现文字。',
     `镜头：${cleanText(storyboard.title)}；${cleanText(storyboard.location)}；${cleanText(storyboard.action || storyboard.result)}`,
     `层职责：${purpose}`,
     `电影纪录片写实质感，符合镜头指定的时代和地点：${cleanText(storyboard.time) || '以当前历史稿件为准'}；${cleanText(storyboard.location) || '以当前镜头地点为准'}。保留给人物层和 Remotion 文本动画足够的留白。`,
     '严格禁止中文、英文、数字、字幕、招牌、旗帜文字、Logo、水印、界面、拼贴和分屏。',
-  ].join('\n')
+  ].join('\n'), context)
 }
 
 function buildSourceEvidence(storyboard: PlannerStoryboard): Record<string, unknown> {
@@ -696,11 +722,12 @@ function temporalGridFor(
 function temporalSheetPrompt(
   storyboard: PlannerStoryboard,
   grid: Record<string, unknown>,
+  context: PromptContext,
 ): string {
   const panels = Array.isArray(grid.panels) ? grid.panels.map((panel) => record(panel)) : []
   const first = cleanText(panels[0]?.semantic)
   const second = cleanText(panels[1]?.semantic)
-  return [
+  return promptWithStyle([
     '用途：历史叙事镜头的 2x1 时间关键帧图；不是海报、不是信息卡片、不是分层素材。',
     `左半幅（动作开始）：${first}`,
     `右半幅（动作结果）：${second}`,
@@ -708,7 +735,7 @@ function temporalSheetPrompt(
     `地点与时代：${cleanText(storyboard.location) || '按历史稿件确定'}；${cleanText(storyboard.time) || '按历史稿件确定'}`,
     '两半幅必须是同一场景和人物的连续事件，人物、目标、道具和结果都要可见；左右状态必须明显不同。',
     '电影纪录片写实构图，禁止字幕、标题、Logo、水印、界面、抽象概念、棋盘隐喻、空场景和同姿势重复。',
-  ].join('\n')
+  ].join('\n'), context)
 }
 
 function buildTemporalSheetAsset(
@@ -716,6 +743,7 @@ function buildTemporalSheetAsset(
   shotNumber: number,
   visualPlan: Record<string, unknown>,
   visualSetupId: string,
+  context: PromptContext,
 ): PlannedAsset {
   const grid = record(visualPlan.temporalGrid)
   const sheetAssetKey = cleanText(grid.sheetAssetKey) || `shot-${shotNumber}-temporal-2grid`
@@ -732,7 +760,7 @@ function buildTemporalSheetAsset(
     assetType: 'ai_image',
     provider: declaredPath ? 'local-reuse' : 'gpt-image-2',
     status: declaredPath ? 'completed' : 'planned',
-    prompt: declaredPath ? null : { text: temporalSheetPrompt(storyboard, grid) },
+    prompt: declaredPath ? null : { text: temporalSheetPrompt(storyboard, grid, context) },
     localPath: declaredPath || null,
     mimeType: declaredPath ? 'image/png' : null,
     metadata: {
@@ -743,6 +771,7 @@ function buildTemporalSheetAsset(
       sheetAssetKey,
       layout: '2x1',
       noText: true,
+      visualStyleId: context.visualStyleId,
       temporalGrid: {
         schemaVersion: 1,
         sheetAssetKey,
@@ -946,7 +975,9 @@ export function planRemotionShots(
   storyboards: PlannerStoryboard[],
   existingShots: PlannerExistingShot[] = [],
   stockCatalog: PlannerStockAsset[] = [],
+  options: RemotionPlannerOptions = {},
 ): RemotionPlan {
+  const promptStyle = promptContext(options.visualStyle)
   const segmentedStoryboards = storyboards.flatMap(segmentStoryboardForRemotion)
   const hasDuplicateNumbers = new Set(segmentedStoryboards.map((storyboard) => storyboard.storyboardNumber)).size
     !== segmentedStoryboards.length
@@ -1033,7 +1064,7 @@ export function planRemotionShots(
     })
 
     if (temporal) {
-      assets.push(buildTemporalSheetAsset(storyboard, number, visualPlan, visualSetupId))
+      assets.push(buildTemporalSheetAsset(storyboard, number, visualPlan, visualSetupId, promptStyle))
     } else if (shotType === 'map') {
       assets.push({
         shotNumber: number,
@@ -1055,8 +1086,8 @@ export function planRemotionShots(
           assetKey: `shot-${number}-scene-plate`,
           assetType: 'ai_image',
           provider: 'gpt-image-2',
-          prompt: { text: platePrompt(storyboard, '背景场景层；人物位置留空') },
-          metadata: { role: 'background-plate', required: true, noText: true, visualSetupId, reuseKey: `${visualSetupId}-scene-plate` },
+          prompt: { text: platePrompt(storyboard, '背景场景层；人物位置留空', promptStyle) },
+          metadata: { role: 'background-plate', required: true, noText: true, visualStyleId: promptStyle.visualStyleId, visualSetupId, reuseKey: `${visualSetupId}-scene-plate` },
         })
         for (const layer of characterLayers) {
           const person = canonicalPerson(cleanText(layer.name) || '人物')
@@ -1068,7 +1099,7 @@ export function planRemotionShots(
             assetType: 'character',
             provider: localPath ? 'local-library' : 'gpt-image-2',
             status: localPath ? 'completed' : 'planned',
-            prompt: localPath ? null : { text: characterPrompt(person, storyboard) },
+            prompt: localPath ? null : { text: characterPrompt(person, storyboard, promptStyle) },
             localPath: localPath || null,
             mimeType: localPath ? 'image/png' : null,
             metadata: {
@@ -1077,6 +1108,7 @@ export function planRemotionShots(
               requiresAlpha: layer.requiresAlpha !== false,
               segmentationModel: 'birefnet-general-lite',
               alphaReady: Boolean(localPath),
+              visualStyleId: promptStyle.visualStyleId,
               sourceProjectId: localPath ? 2 : null,
               visualSetupId,
               reuseKey: `${visualSetupId}-character-${slug(person)}`,
@@ -1089,8 +1121,8 @@ export function planRemotionShots(
           assetKey: `shot-${number}-ai-plate`,
           assetType: 'ai_image',
           provider: 'gpt-image-2',
-          prompt: { text: platePrompt(storyboard, '完整背景 clean plate') },
-          metadata: { role: 'background-plate', required: true, noText: true, visualSetupId, reuseKey: `${visualSetupId}-scene-plate` },
+          prompt: { text: platePrompt(storyboard, '完整背景 clean plate', promptStyle) },
+          metadata: { role: 'background-plate', required: true, noText: true, visualStyleId: promptStyle.visualStyleId, visualSetupId, reuseKey: `${visualSetupId}-scene-plate` },
         })
       }
       if (stock) assets.push(buildAssetForStock(number, stock.item, stock.kind, visualSetupId))

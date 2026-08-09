@@ -1,25 +1,27 @@
 #!/usr/bin/env node
 /**
  * 抖音 · 阶段 1 · 数据准备
- *   node scripts/douyin/prepare.mjs --provider db --episode 436
+ *   node scripts/douyin/prepare.mjs 436
+ *   node scripts/douyin/prepare.mjs "http://localhost:3013/drama/93/episode/3"
  *
- * 产出已校验的 manifest，供 operate 消费。数据源可插拔（--provider）。
+ * 产出已校验的 manifest，供 operate 消费。数据源可插拔（--provider，默认 db）。
  * 描述 = opening_hook + cliffhanger（绝不 AI 创作）。
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import sharp from 'sharp'
-import Database from 'better-sqlite3'
 import { PROJECT_ROOT, COVER_TARGETS, emit, fail } from './lib.mjs'
+import { loadEpisodeFromDb } from '../publish-episode-reference.mjs'
 
 function parseArgs(argv) {
   const args = { provider: 'db' }
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--provider') args.provider = argv[++i]
-    else if (a === '--episode') args.episode = Number(argv[++i])
+    else if (a === '--episode') args.episodeReference = argv[++i]
     else if (a === '--title') args.title = argv[++i]
     else if (a === '--out') args.out = argv[++i]
+    else if (!a.startsWith('--') && !args.reference) args.reference = a
   }
   return args
 }
@@ -49,25 +51,13 @@ async function ensureAspectRatio(sourcePath, ratio) {
 
 const providers = {
   async db(args) {
-    if (!args.episode) fail('db provider 需要 --episode <id>', 2)
-    const dbPath = process.env.DB_PATH || path.join(PROJECT_ROOT, 'data/huobao_drama.db')
-    const db = new Database(dbPath, { readonly: true, timeout: 30000 })
-    try {
-      const ep = db.prepare('SELECT * FROM episodes WHERE id = ?').get(args.episode)
-      if (!ep) fail(`episode ${args.episode} 不存在`, 2)
-      const title = args.title || ep.video_title || ep.title || `第${ep.episode_number}集`
-      const description = [ep.opening_hook, ep.cliffhanger].map((s) => (s || '').trim()).filter(Boolean).join('\n\n')
-      return {
-        episode_id: ep.id,
-        title,
-        description,
-        video_path: ep.video_url,
-        cover_3x4_src: ep.cover_image_3x4_url,
-        cover_4x3_src: ep.cover_image_4x3_url,
-      }
-    } finally {
-      db.close()
-    }
+    const reference = args.episodeReference || args.reference
+    if (!reference) fail('db provider 需要 episode id/URL（例如 833 或 /dharma/episode/833）', 2)
+    return loadEpisodeFromDb(reference, {
+      dbPath: process.env.DB_PATH || path.join(PROJECT_ROOT, 'data/huobao_drama.db'),
+      projectRoot: PROJECT_ROOT,
+      title: args.title,
+    })
   },
 }
 
@@ -78,9 +68,10 @@ async function main() {
 
   const raw = await provider(args)
   if (!raw.video_path) fail('缺少视频', 2)
-  if (!raw.cover_3x4_src) fail('缺少 3:4 封面', 2)
-  if (!raw.cover_4x3_src) fail('缺少 4:3 封面', 2)
-  if (!raw.description) fail('缺少作品描述（opening_hook+cliffhanger 都为空）', 2)
+  if (!raw.cover_3x4_src) fail(`缺少 3:4 封面。请先生成封面：curl -X POST http://localhost:3013/api/v1/episodes/${raw.episode_id}/generate-covers -H "Content-Type: application/json" -d '{}'`, 2)
+  if (!raw.cover_4x3_src) fail(`缺少 4:3 封面。请先生成封面：curl -X POST http://localhost:3013/api/v1/episodes/${raw.episode_id}/generate-covers -H "Content-Type: application/json" -d '{"frame_type":"4:3"}'`, 2)
+  if (!raw.opening_hook) fail('数据库缺少 opening_hook，无法生成社交平台描述', 2)
+  if (!raw.cliffhanger) fail('数据库缺少 cliffhanger，无法生成社交平台描述', 2)
 
   const videoPath = toAbsPath(raw.video_path)
   if (!fs.existsSync(videoPath)) fail(`视频文件不存在: ${videoPath}`, 2)
@@ -98,6 +89,8 @@ async function main() {
     episode_id: raw.episode_id,
     session: `douyin-${raw.episode_id}`,
     title: raw.title,
+    opening_hook: raw.opening_hook,
+    cliffhanger: raw.cliffhanger,
     description: raw.description,
     video_path: videoPath,
     cover_3x4_path: cover3x4Path,
@@ -111,4 +104,4 @@ async function main() {
   emit({ ok: true, manifest_path: outPath, session: manifest.session, title: manifest.title, description_len: manifest.description.length })
 }
 
-main().catch((err) => fail(err.message, 1))
+main().catch((err) => fail(err.message, err.exitCode || 1))

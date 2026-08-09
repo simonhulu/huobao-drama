@@ -86,6 +86,20 @@ test('Remotion producer writes and query endpoints expose the same render state'
   assert.equal(queryBody.data.shots[0].status, 'rendered')
   assert.equal(queryBody.data.renders[0].outputUrl, '/static/remotion/route-test-shot.mp4')
 
+  const storyboardProgressResponse = await remotionRoute.request(`/projects/${projectId}/narrative-storyboard-progress`)
+  assert.equal(storyboardProgressResponse.status, 200)
+  const storyboardProgressBody = await storyboardProgressResponse.json() as any
+  assert.deepEqual(storyboardProgressBody.data, {
+    available: false,
+    projectId,
+    reason: 'not_configured',
+  })
+
+  const monitorWithoutPlan = await remotionRoute.request(`/projects/${projectId}/narrative-storyboard-progress/monitor`, {
+    method: 'POST',
+  })
+  assert.equal(monitorWithoutPlan.status, 400)
+
   const rendersResponse = await remotionRoute.request(`/projects/${projectId}/renders`)
   assert.equal(rendersResponse.status, 200)
   const rendersBody = await rendersResponse.json() as any

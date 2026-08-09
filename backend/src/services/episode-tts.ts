@@ -14,12 +14,26 @@ import { now } from '../utils/response.js'
 import { callTextModel, getAudioConfigById, getNarrationAudioConfig } from './ai.js'
 import { isIgnorableTTS } from './ffmpeg-compose.js'
 import { MiniMaxTTSAdapter, retrieveAsyncResult, type TTSParams } from './adapters/minimax-tts.js'
-import { resolveStoryboardNarrationTextForTTS, getVerbatimSource, findOriginalFragmentRange } from './narration-generation.js'
+import {
+  Qwen3TTSAdapter,
+  ensureQwen3TTSServer,
+  fetchQwen3TTS,
+  isQwen3TTSProvider,
+  resolveQwen3TTSRequestTimeoutMs,
+} from './adapters/qwen3-tts.js'
+import type { AIConfig } from './adapters/types.js'
+import { resolveQwen3Instruct, resolveDefaultNarrationVoiceId } from './qwen3-voice.js'
+import {
+  resolveStoryboardNarrationTextForTTS,
+  getVerbatimSource,
+  findOriginalFragmentRange,
+  mapOrderedNarrationFragments,
+} from './narration-generation.js'
 import { usesOriginalTextForNarration } from './episode-mode.js'
 import { logTaskStart, logTaskProgress, logTaskSuccess, logTaskError } from '../utils/task-logger.js'
-import { normalizeTtsText } from '../utils/tts-text.js'
-import { DEFAULT_NARRATION_VOICE_ID } from './narration-defaults.js'
+import { sanitizeTtsInput } from '../utils/tts-text.js'
 import { sanitizeCharacterVisualIdentity } from './character-visual-identity.js'
+import { DEFAULT_NARRATION_SPEED } from './narration-defaults.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -50,6 +64,59 @@ export interface EpisodePreTTSResult {
 }
 
 /**
+ * 整集长文本 TTS 的 provider 无关入口。
+ * - qwen3-tts（本地 MLX）：确保本地 server 已启动，单次同步请求返回 wav + 逐句时间码
+ * - 其他（MiniMax）：异步任务创建 + 轮询取回 mp3
+ */
+async function requestEpisodeLongTTS(
+  config: AIConfig,
+  params: TTSParams,
+): Promise<{ audioBuffer: Buffer; titles: any[]; extra: Record<string, any> }> {
+  if (isQwen3TTSProvider(config.provider)) {
+    await ensureQwen3TTSServer(config)
+    const adapter = new Qwen3TTSAdapter()
+    const qwen3Params = { ...params, voice: resolveQwen3Instruct(params.voice, config) }
+    const { url, method, headers, body } = adapter.buildGenerateRequest(config, qwen3Params)
+    // 全局 fetch 的 Undici headers timeout 约 5 分钟；长文本在首个响应头前
+    // 仍会持续生成，因此必须使用与普通 Qwen 请求相同的显式长任务 dispatcher。
+    const resp = await fetchQwen3TTS(url, {
+      method,
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(resolveQwen3TTSRequestTimeoutMs()),
+    })
+    if (!resp.ok) {
+      const errText = await resp.text()
+      throw new Error(`Qwen3-TTS episode error ${resp.status}: ${errText}`)
+    }
+    const parsed = await adapter.parseResponse(await resp.json(), config)
+    return {
+      audioBuffer: Buffer.from(parsed.audioHex, 'hex'),
+      titles: parsed.titles ?? [],
+      extra: parsed.extra ?? {},
+    }
+  }
+
+  const adapter = new MiniMaxTTSAdapter()
+  const { url, method, headers, body } = adapter.buildGenerateRequest(config, params)
+  const createResp = await fetch(url, { method, headers, body: JSON.stringify(body) })
+  if (!createResp.ok) {
+    const errText = await createResp.text()
+    throw new Error(`Episode TTS create error ${createResp.status}: ${errText}`)
+  }
+
+  const createResult = await createResp.json()
+  if (createResult.base_resp?.status_code !== 0) {
+    throw new Error(createResult.base_resp?.status_msg || 'Episode TTS create failed')
+  }
+
+  const taskId = createResult.task_id
+  const fileId = createResult.file_id
+  logTaskProgress('EpisodeTTS', 'episode-tts-created', { taskId, fileId })
+  return retrieveAsyncResult(config, taskId, fileId)
+}
+
+/**
  * 在拆镜前预生成整集 TTS，并保存句级字幕时间轴。
  * direct_script 下用这些真实时间戳来设定每个分镜的 duration。
  */
@@ -59,16 +126,16 @@ export async function generateEpisodePreTTS(episodeId: number): Promise<EpisodeP
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) throw new Error(`Episode ${episodeId} not found`)
 
-  const sourceText = getVerbatimSource(ep)
-  if (!sourceText) throw new Error(`Episode ${episodeId} has no source text for pre-TTS`)
+  const rawText = getVerbatimSource(ep)
+  if (!rawText) throw new Error(`Episode ${episodeId} has no source text for pre-TTS`)
+  const sourceText = sanitizeTtsInput(rawText)
 
   const config = getNarrationAudioConfig() ?? getAudioConfigById(ep.audioConfigId ?? undefined)
   if (!config) throw new Error(`Episode ${episodeId} has no active audio config`)
 
-  const voiceId = ep.narrationVoiceId || DEFAULT_NARRATION_VOICE_ID
-  const speed = ep.narrationSpeed ?? 1.0
+  const voiceId = ep.narrationVoiceId || resolveDefaultNarrationVoiceId(config.provider)
+  const speed = ep.narrationSpeed ?? DEFAULT_NARRATION_SPEED
 
-  const adapter = new MiniMaxTTSAdapter()
   const params: TTSParams = {
     text: sourceText,
     voice: voiceId,
@@ -77,23 +144,7 @@ export async function generateEpisodePreTTS(episodeId: number): Promise<EpisodeP
     subtitleType: 'sentence',
   }
 
-  const { url, method, headers, body } = adapter.buildGenerateRequest(config, params)
-  const createResp = await fetch(url, { method, headers, body: JSON.stringify(body) })
-  if (!createResp.ok) {
-    const errText = await createResp.text()
-    throw new Error(`Pre-TTS create error ${createResp.status}: ${errText}`)
-  }
-
-  const createResult = await createResp.json()
-  if (createResult.base_resp?.status_code !== 0) {
-    throw new Error(createResult.base_resp?.status_msg || 'Pre-TTS create failed')
-  }
-
-  const taskId = createResult.task_id
-  const fileId = createResult.file_id
-  logTaskProgress('EpisodeTTS', 'pre-tts-created', { episodeId, taskId, fileId })
-
-  const { audioBuffer, titles, extra } = await retrieveAsyncResult(config, taskId, fileId)
+  const { audioBuffer, titles, extra } = await requestEpisodeLongTTS(config, params)
   logTaskProgress('EpisodeTTS', 'pre-tts-retrieved', {
     episodeId,
     audioBytes: audioBuffer.length,
@@ -163,7 +214,7 @@ export function applyPreTTSTimingsToStoryboards(episodeId: number): { updated: n
   let fallback = 0
 
   for (const sb of storyboards) {
-    const fragment = resolveStoryboardNarrationTextForTTS(sb, ep)
+    const fragment = sanitizeTtsInput(resolveStoryboardNarrationTextForTTS(sb, ep))
     if (!fragment) {
       fallback++
       continue
@@ -199,13 +250,15 @@ function findTimeAtChar(
   charIndex: number,
   edge: 'begin' | 'end',
 ): number | null {
+  let textCursor = 0
   for (const t of titles) {
-    const textBegin = Number(t.text_begin)
-    const textEnd = Number(t.text_end)
+    const titleText = String(t.text || '')
+    const textBegin = textCursor
+    const textEnd = textBegin + titleText.length
     const timeBegin = Number(t.time_begin)
     const timeEnd = Number(t.time_end)
-    if (!Number.isFinite(textBegin) || !Number.isFinite(textEnd) ||
-        !Number.isFinite(timeBegin) || !Number.isFinite(timeEnd)) continue
+    textCursor = textEnd
+    if (!titleText || !Number.isFinite(timeBegin) || !Number.isFinite(timeEnd)) continue
 
     // 用比例插值，避免 description 从句子中间开始时把整个句子的开头音频算进来
     const inside = edge === 'begin'
@@ -767,6 +820,8 @@ async function reusePreTTSForEpisode(
   }
 
   const source = buildTitleTimelineText(titles)
+  const fragments = rawStoryboards.map((storyboard) => resolveStoryboardNarrationTextForTTS(storyboard, ep))
+  const orderedRanges = mapOrderedNarrationFragments(source, fragments)
   const audioDir = path.join(STORAGE_ROOT, 'audio')
   const fullAudioPathAbs = path.join(audioDir, path.basename(ep.preTtsAudioUrl))
   if (!fs.existsSync(fullAudioPathAbs)) {
@@ -777,26 +832,10 @@ async function reusePreTTSForEpisode(
 
   let splitCount = 0
   let fallback = false
-  for (const sb of rawStoryboards) {
-    const fragment = resolveStoryboardNarrationTextForTTS(sb, ep)
-    if (!fragment) {
-      fallback = true
-      db.update(schema.storyboards)
-        .set({ narrationAudioUrl: null, updatedAt: now() })
-        .where(eq(schema.storyboards.id, sb.id))
-        .run()
-      continue
-    }
-
-    const range = findOriginalFragmentRange(source, fragment)
-    if (!range) {
-      fallback = true
-      db.update(schema.storyboards)
-        .set({ narrationAudioUrl: null, updatedAt: now() })
-        .where(eq(schema.storyboards.id, sb.id))
-        .run()
-      continue
-    }
+  for (let storyboardIndex = 0; storyboardIndex < rawStoryboards.length; storyboardIndex++) {
+    const sb = rawStoryboards[storyboardIndex]
+    const fragment = fragments[storyboardIndex]
+    const range = orderedRanges[storyboardIndex]
 
     const startMs = findTimeAtChar(titles, range.start, 'begin')
     const endMs = findTimeAtChar(titles, range.end, 'end')
@@ -860,8 +899,8 @@ export async function generateEpisodeUnifiedTTS(
   const config = getNarrationAudioConfig() ?? getAudioConfigById(ep.audioConfigId ?? undefined)
   if (!config) throw new Error(`Episode ${episodeId} has no active audio config`)
 
-  const voiceId = ep.narrationVoiceId || DEFAULT_NARRATION_VOICE_ID
-  const speed = ep.narrationSpeed ?? 1.0
+  const voiceId = ep.narrationVoiceId || resolveDefaultNarrationVoiceId(config.provider)
+  const speed = ep.narrationSpeed ?? DEFAULT_NARRATION_SPEED
 
   const rawStoryboards = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
@@ -877,7 +916,7 @@ export async function generateEpisodeUnifiedTTS(
   const segments: Segment[] = []
   let fullText = ''
   for (const sb of rawStoryboards) {
-    const clean = normalizeTtsText(resolveStoryboardNarrationTextForTTS(sb, ep))
+    const clean = sanitizeTtsInput(resolveStoryboardNarrationTextForTTS(sb, ep))
     if (!clean || isIgnorableTTS(clean)) continue
     const startChar = fullText.length
     fullText += clean
@@ -894,8 +933,7 @@ export async function generateEpisodeUnifiedTTS(
     totalChars: fullText.length,
   })
 
-  const adapter = new MiniMaxTTSAdapter()
-  const params: TTSParams = {
+  const adapterParams: TTSParams = {
     text: fullText,
     voice: voiceId,
     speed,
@@ -905,23 +943,7 @@ export async function generateEpisodeUnifiedTTS(
     subtitleType: 'word',
   }
 
-  const { url, method, headers, body } = adapter.buildGenerateRequest(config, params)
-  const createResp = await fetch(url, { method, headers, body: JSON.stringify(body) })
-  if (!createResp.ok) {
-    const errText = await createResp.text()
-    throw new Error(`Unified TTS create error ${createResp.status}: ${errText}`)
-  }
-
-  const createResult = await createResp.json()
-  if (createResult.base_resp?.status_code !== 0) {
-    throw new Error(createResult.base_resp?.status_msg || 'Unified TTS create failed')
-  }
-
-  const taskId = createResult.task_id
-  const fileId = createResult.file_id
-  logTaskProgress('EpisodeTTS', 'unified-tts-created', { episodeId, taskId, fileId })
-
-  const { audioBuffer, titles, extra } = await retrieveAsyncResult(config, taskId, fileId)
+  const { audioBuffer, titles, extra } = await requestEpisodeLongTTS(config, adapterParams)
   logTaskProgress('EpisodeTTS', 'unified-tts-retrieved', {
     episodeId,
     audioBytes: audioBuffer.length,
@@ -936,6 +958,21 @@ export async function generateEpisodeUnifiedTTS(
   const fullAudioPathAbs = path.join(audioDir, fullAudioFilename)
   fs.writeFileSync(fullAudioPathAbs, audioBuffer)
   const fullAudioPath = `static/audio/${fullAudioFilename}`
+
+  fs.writeFileSync(`${fullAudioPathAbs}.titles.json`, JSON.stringify({
+    text: fullText,
+    titles,
+    extra,
+    createdAt: new Date().toISOString(),
+  }, null, 2), 'utf-8')
+  db.update(schema.episodes)
+    .set({
+      preTtsAudioUrl: fullAudioPath,
+      preTtsTitlesJson: JSON.stringify(titles),
+      updatedAt: now(),
+    })
+    .where(eq(schema.episodes.id, episodeId))
+    .run()
 
   // 计算每个分镜的时间范围
   const totalAudioMs = Number(extra?.audio_length) || (titles.length ? titles[titles.length - 1].time_end : 0)
@@ -1104,7 +1141,7 @@ function splitAndNormalizeAudio(
       .setDuration(durationSec)
       .audioFilters('loudnorm=I=-16:TP=-1.5:LRA=11')
       .audioCodec('aac')
-      .audioBitrate('192k')
+      .audioBitrate('128k')
       .output(outputPath)
       .on('end', () => resolve())
       .on('error', (err) => reject(err))

@@ -250,6 +250,16 @@ async function attemptFetch(provider: string, url: string, init: FetchInit, time
 export interface AiFetchOptions extends AiClientOptions {
   timeoutMs?: number
   skipCircuitBreaker?: boolean
+  /**
+   * 熔断器泳道：同一 provider 下不同业务线（text-design / text-agent / image-generate）
+   * 使用独立的熔断器键 `provider:lane`，单 lane 的故障风暴不再连坐其他 lane。
+   * 缺省不传时保持 provider 级单键（与历史行为一致）。
+   */
+  lane?: string
+}
+
+function circuitBreakerKey(provider: string, lane?: string): string {
+  return lane ? `${provider}:${lane}` : provider
 }
 
 export async function aiFetch(
@@ -259,7 +269,7 @@ export async function aiFetch(
   options: AiFetchOptions = {},
 ): Promise<Response> {
   const merged = mergeOptions(options)
-  const breaker = getCircuitBreaker(provider, merged)
+  const breaker = getCircuitBreaker(circuitBreakerKey(provider, options.lane), merged)
 
   if (!options.skipCircuitBreaker) {
     breaker.check()

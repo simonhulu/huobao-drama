@@ -7,6 +7,7 @@ import { MiniMaxVideoAdapter } from './minimax-video.js'
 import { MiniMaxTTSAdapter } from './minimax-tts.js'
 import { MiniMaxMusicAdapter } from './minimax-music.js'
 import { SiliconFlowTTSAdapter } from './siliconflow-tts.js'
+import { Qwen3TTSAdapter } from './qwen3-tts.js'
 import { OpenAIImageAdapter } from './openai-image.js'
 import { GeminiImageAdapter } from './gemini-image.js'
 import { VolcEngineImageAdapter } from './volcengine-image.js'
@@ -51,6 +52,7 @@ export const videoAdapters: Record<string, VideoProviderAdapter> = {
 export const ttsAdapters: Record<string, TTSProviderAdapter> = {
   minimax: new MiniMaxTTSAdapter(),
   siliconflow: new SiliconFlowTTSAdapter(),
+  'qwen3-tts': new Qwen3TTSAdapter(),
 }
 
 // 音乐/BGM Adapter 注册表

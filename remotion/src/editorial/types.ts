@@ -7,6 +7,11 @@ export type EditorialTransitionClass =
   | "matte_transition"
   | "graphic_transition"
   | "distortion"
+  | "iris_reveal"
+  | "film_burn"
+  | "directional_blur"
+  | "zoom_blur"
+  | "ink_bleed"
   | "ambiguous"
   | "no_local_delta"
   | "within_setup_change";
@@ -28,6 +33,7 @@ export type TextEntry =
   | "slide_left"
   | "wipe"
   | "type_on"
+  | "kinetic"
   | "counter";
 
 export type EditorialCoordinateMode = "normalized" | "legacy";
@@ -65,6 +71,7 @@ export type EditorialTextCue = {
   startFrame: number;
   endFrame: number;
   entry?: TextEntry;
+  variant?: "impact" | "stamp" | "whisper";
   exit?: "none" | "fade" | "slide_down";
   x?: number;
   y?: number;

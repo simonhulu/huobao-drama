@@ -83,6 +83,8 @@ function readPayload(payload: AgentRunPayload) {
 function advanceAfterStoryboardBreaker(dramaId: number, episodeId: number) {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep || !ep.autoMode) return
+  // direct_script 走 v8 Grid Pipeline，禁止旧 auto-pipeline（per-storyboard image+TTS+compose）
+  if (ep.workflowType === 'direct_script') return
 
   // direct_script/verbatim 下 narration 字段是 TTS 原文切片，不是 AI 旁白文案。
   if (usesOriginalTextForNarration(ep)) {
@@ -163,8 +165,10 @@ export function createAgentRunHandler(deps: CreateAgentRunHandlerDeps = {}): Tas
   const createAgent = deps.createAgent ?? defaultCreateAgent
 
   return {
+    // resumable=false：agent 工具副作用（save_storyboards 等）非幂等，租约过期仍标 stale 不自动重领；
+    // maxAttempts=2：LLM 非确定性失败（超时/5xx/熔断冷却）允许一次自动重试，避免整集卡死。
     resumable: false,
-    maxAttempts: 1,
+    maxAttempts: 2,
     async run(ctx: TaskContext<AgentRunPayload>) {
       const { agentType, message, dramaId, episodeId } = readPayload(ctx.payload)
 

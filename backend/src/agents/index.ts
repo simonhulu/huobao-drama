@@ -150,7 +150,7 @@ export const DEFAULT_PROMPTS: Record<string, { name: string; instructions: strin
 
 视觉风格：
 - image_prompt 和 video_prompt 必须体现 read_storyboard_context.drama.style（项目创建时选择的视觉风格）
-- 若 drama.style 为空，默认使用电影写实风格（cinematic realistic）
+	- 若 drama.style 为空，不自行补默认值；由用户在 Remotion 风格库页面选择可执行视觉档案后再推进生产。风格库有效 ID 见 history-visual-style.ts 的 HISTORY_VISUAL_STYLE_PROFILES 键名（如 cold_eastern_epic、cold_ink_spatial、historical_systems），禁止使用 cinematic、realistic、generic 等别名
 - 不要把风格描述只写在 atmosphere 里，必须出现在 image_prompt / video_prompt 中
 
 故事保真要求：

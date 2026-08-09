@@ -65,6 +65,10 @@ export const STYLE_DESCRIPTIONS: Record<string, string> = {
   // 中式 / 东方历史
   chinese_ink: 'Chinese ink wash painting, misty mountains, flowing brushwork, elegant negative space',
   chinese_gongbi: 'Chinese gongbi painting, fine detailed brushwork, rich mineral pigments, traditional court art',
+  // Dharma emotional arc presets (the dedicated Dharma catalog also carries treatment/move metadata).
+  dharma_emotional_ink_v1: 'new Chinese ink-wash cinematic tableau, layered mineral ink, xuan paper texture, restrained charcoal and jade-gray palette, deep negative space, quiet sacred presence',
+  dharma_surreal_dream_v1: 'poetic surreal dreamscape grounded in Eastern contemplative imagery, impossible scale and spatial metaphor, suspended mist, cinematic chiaroscuro, mysterious but serene',
+  dharma_minimal_light_v1: 'minimal cinematic light-and-shadow study in a silent temple room, one precise beam of natural light, near-black negative space, spacious centered composition',
   wuxia: 'wuxia cinematic, ancient Chinese martial arts, flowing robes, sword qi, moonlit bamboo forest',
   chinese_palace: 'Chinese imperial palace style, ornate golden dragon details, red pillars, court drama atmosphere',
   eastern_fantasy: 'Eastern fantasy, immortal cultivation aesthetic, celestial mountains, ethereal clouds, glowing runes',
@@ -89,6 +93,10 @@ export const STYLE_DESCRIPTIONS: Record<string, string> = {
   ancient: 'ancient civilization, monumental architecture, golden hour cinematic, archaeological grandeur',
   wasteland: 'post-apocalyptic wasteland, dusty atmospheric, cinematic desolation, muted earth tones',
 
+  // 史诗奇幻角色 / 封面构图 preset
+  dragon_rider_cover: 'A knight in golden plate armor with a full-face helmet, riding a massive red-brown scaled dragon; the knight holds a longsword in his right hand and grips the hilt with his left, leaning slightly forward with legs straddling the dragon\'s back, a red cape billowing behind him from the shoulders; the dragon has rough, granular scales, spiky protrusions along its head and neck, mouth slightly open showing teeth, front claws planted on ground in a low-crawling stance; background features medieval stone buildings lining a dusty street, softly blurred to suggest depth and atmosphere; warm golden sunlight from upper-left creates strong rim lighting and deep shadows, enhancing form and texture; low-angle eye-level shot with dragon\'s head dominating foreground lower third, knight centered in midground, creating dynamic visual hierarchy; photorealistic fantasy illustration style, high-detail rendering, cinematic lighting, emphasis on muscle definition and scale texture; primary colors: red-brown, gold, ochre; secondary: dark gray, bright orange; materials: polished worn metal armor, wrinkled fabric cape, rocky textured scales with cracks and ridges; aspect ratio 449:600 vertical; ultra-high resolution, sharp edges, no noise or artifacts; likely generation intent: emphasize epic scale and symbiotic power between rider and beast for cover art or game concept.',
+  volcanic_forge_blacksmith: 'A middle-aged male blacksmith with a long dark brown beard and facial scars, wearing a soot-stained dark brown leather apron and shoulder armor, raising a heavy iron hammer high in his right hand while his left hand steadies a glowing hot steel bar on a large stone anvil; the anvil features intricate Norse-style geometric carvings and visible wear marks; background depicts a subterranean forge cavern with multi-level metal scaffolding and walkways suspended from rock walls, molten lava waterfalls and fires illuminating the distance, all shrouded in orange-hued smoke; primary lighting comes from the radiant glow of the hot steel and surrounding lava, creating strong contrast, deep shadows, and atmospheric haze; low-angle medium close-up composition, subject centered slightly left, anvil occupying foreground lower half, slight upward camera tilt to emphasize physical power; photorealistic cinematic rendering style, emphasizing metallic textures, worn leather, skin grime, and environmental weathering; dominant colors: dark brown, burnt gold, fiery orange, and charcoal gray; materials: rough cast iron, aged leather, incandescent metal, stone, and dust; 4:5 vertical aspect ratio; ultra-high detail, film-grade sharpness and dynamic range; intended to capture a dramatic moment of forging in an epic fantasy setting, highlighting strength, craftsmanship, and environmental intensity.',
+
   // 历史叙事可执行风格档案（不使用创作者姓名捷径）
   ...HISTORY_STYLE_DESCRIPTIONS,
 }
@@ -100,8 +108,9 @@ export const STYLE_DESCRIPTIONS: Record<string, string> = {
  * 题材只用于内容分类和推荐默认风格；真正注入图片 prompt 的是 style。
  */
 export const GENRE_STYLE_RECOMMENDATIONS: Record<string, string> = {
-  generic: 'cinematic',
-  history: 'historical_systems',
+  generic: 'cold_ink_spatial',
+  history: 'cold_ink_spatial',
+  dharma: 'dharma-emotional-ink-v1',
   scifi: 'cyberpunk',
   mythology: 'eastern_fantasy',
   space: 'cinematic',
@@ -111,8 +120,8 @@ export const GENRE_STYLE_RECOMMENDATIONS: Record<string, string> = {
 }
 
 export function recommendedStyleForGenre(genre: string | null | undefined): string {
-  if (!genre) return 'cinematic'
-  return GENRE_STYLE_RECOMMENDATIONS[genre.trim().toLowerCase()] || 'cinematic'
+  if (!genre) return 'cold_ink_spatial'
+  return GENRE_STYLE_RECOMMENDATIONS[genre.trim().toLowerCase()] || 'cold_ink_spatial'
 }
 
 /**
@@ -121,7 +130,7 @@ export function recommendedStyleForGenre(genre: string | null | undefined): stri
  */
 export function styleToPromptPhrase(style: string | null | undefined): string {
   if (!style) return ''
-  const normalized = style.trim().toLowerCase()
+  const normalized = style.trim().toLowerCase().replace(/-/g, '_')
   if (!normalized) return ''
   return STYLE_DESCRIPTIONS[normalized] || `${normalized} style`
 }

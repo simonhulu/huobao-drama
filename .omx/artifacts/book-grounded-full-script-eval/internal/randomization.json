@@ -1,0 +1,26 @@
+{
+  "algorithm": "independent parity of the first three bytes from crypto.randomBytes(16)",
+  "random_hex": "8f35ebef7c469c9acc5384aa3f7d6f96",
+  "frozen_candidates": {
+    "case-01-ligan": "65ca0b917f56c9c1a48a3d93737c86cf1915d6bbe5ef0bde2b73f84b1e2b5a48",
+    "case-02-three-places": "e9df457cc32d0027b765baaa1cde6111751137d8a3e0cc8a3715ce02c906a18f",
+    "case-03-zhouxiande": "6a45bb6e8ba7d1277cc5ee054e24d955cd6d91ef2a1cdf49c372f153abcb2448"
+  },
+  "pairs": {
+    "pair-01": {
+      "case": "case-01-ligan",
+      "甲": "candidate-b",
+      "乙": "baseline-a"
+    },
+    "pair-02": {
+      "case": "case-02-three-places",
+      "甲": "candidate-b",
+      "乙": "baseline-a"
+    },
+    "pair-03": {
+      "case": "case-03-zhouxiande",
+      "甲": "candidate-b",
+      "乙": "baseline-a"
+    }
+  }
+}

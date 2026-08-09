@@ -42,7 +42,7 @@ When `authoringMode` or `reviewMode` is `agent`:
 
 Never overwrite an attempt response. A schema-invalid response may create the one allowed retry attempt; semantic disagreement returns `needs_review`.
 
-Use `replay` for a hash-locked prior raw response. Use `deterministic` for the conservative offline planner, which may select only declared grammar defaults with `hold` camera and `hard_cut` transitions.
+Use `replay` for a hash-locked prior raw response. Use `deterministic` for the offline semantic planner. It may only select declared grammar defaults, but those defaults must be chosen from the narration role and text. The planner emits traceable camera, transition, text, counter, and graphic cues when the narration provides a bindable subject or metric; it must not rotate effects by shot index.
 
 ## Hard Gates
 
@@ -57,6 +57,23 @@ Use `replay` for a hash-locked prior raw response. Use `deterministic` for the c
 - Production never clamps, drops, substitutes, downgrades, or silently repairs invalid values.
 - Every staged asset is authenticated before an external consumer and after render.
 - Global QA must pass decode, target, duration, audio, black-frame, motion/hold, safe-area, and telemetry checks.
+- Editorial QA must also prove that semantic cues are renderable: every metric in a cue is bound to a narration unit and evidence, crisis/reversal beats have an explicit visual cue, and camera/transition parameters produce a measurable frame-to-frame delta in the rendered output.
+
+## Semantic edit contract
+
+For each narration unit, authoring follows this chain:
+
+`narration text -> narrative role -> visual intent -> bound asset/subject -> camera/transition/cue -> rendered QA`
+
+Minimum visual intent rules:
+
+- `comparison` with a number emits an evidence-bound counter and comparison divider.
+- `mechanism` emits a subject-bound process caption so the still is treated as a process, not a passive hold.
+- `crisis` emits a kinetic phrase cue; a number also emits a counter.
+- `reversal` emits a kinetic punch phrase and uses a distortion or hard visual boundary.
+- A number without metric/evidence binding is not animated; it fails authoring rather than becoming decorative text.
+
+Editorial typography and subtitles are separate layers. Typography may show only a short, evidence-bound keyword, number, or conclusion; it must never repeat the full narration sentence. Subtitle/caption rendering belongs to a dedicated caption track and is not authored as a kinetic text cue. The visible phrase is derived from the locked narration unit and must not introduce unsupported facts. Cue IDs, subject IDs, semantic unit IDs, claims, and evidence remain in the decision trace.
 
 ## Evidence Rules
 

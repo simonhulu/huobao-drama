@@ -109,6 +109,8 @@ export type DharmaEpisodeProps = {
   narrationWindows?: DharmaNarrationWindow[];
   /** 全局分句字幕（绝对秒，相对渲染 0 帧） */
   subtitles?: DharmaSubtitleClause[];
+  /** Comic layouts can provide their own edge treatment. */
+  showSanctumFrame?: boolean;
   durationInFrames?: number;
 };
 
@@ -636,6 +638,7 @@ export const DharmaEpisode: React.FC<DharmaEpisodeProps> = ({
   opening,
   narrationWindows,
   subtitles,
+  showSanctumFrame = true,
 }) => {
   if (!audio) {
     throw new Error("DharmaEpisode requires a master narration audio URL");
@@ -690,7 +693,7 @@ export const DharmaEpisode: React.FC<DharmaEpisodeProps> = ({
         );
       })}
       <TextureOverlay />
-      <SanctumFrame />
+      {showSanctumFrame ? <SanctumFrame /> : null}
       {resolvedOpening ? (
         <Sequence from={Math.max(0, resolvedOpening.startFrame)} durationInFrames={resolvedOpening.durationInFrames}>
           <OpeningInvocation opening={resolvedOpening} />

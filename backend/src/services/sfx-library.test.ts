@@ -8,7 +8,7 @@ import { tmpdir } from 'os'
 const libDir = mkdtempSync(path.join(tmpdir(), 'huobao-sfx-'))
 process.env.SFX_LIBRARY_PATH = libDir
 
-const { buildMapping, findSfxFile, findAmbientFile, getSfxLibraryStats } = await import('./sfx-library.js')
+const { buildMapping, findSfxFile, findAmbientFile, getSfxLibraryStats, recordSfxMetadata } = await import('./sfx-library.js')
 
 function createFakeAudio(relativePath: string) {
   const fullPath = path.join(libDir, 'library', relativePath)
@@ -75,4 +75,23 @@ test('findAmbientFile returns null for unrecognized scene', () => {
   buildMapping()
   assert.equal(findAmbientFile(''), null)
   assert.equal(findAmbientFile('random unrelated text'), null)
+})
+
+test('buildMapping preserves reusable source, license, attribution, and semantic tags', () => {
+  createFakeAudio('historical-reusable/horse_gallop_outdoor_loop.mp3')
+  recordSfxMetadata('library/historical-reusable/horse_gallop_outdoor_loop.mp3', {
+    title: 'Six horses galloping by',
+    source: 'wikimedia-commons',
+    sourceUrl: 'https://commons.wikimedia.org/wiki/File:Six_Horses_Galloping_By.ogg',
+    license: 'CC0',
+    attribution: 'Freesound Community / Bruno Auzet',
+    tags: ['horse', 'hoof', 'gallop', 'historical', 'outdoor', 'loopable'],
+  })
+
+  const entry = buildMapping().entries.find((candidate) => candidate.relativePath.endsWith('horse_gallop_outdoor_loop.mp3'))
+  assert.ok(entry)
+  assert.equal(entry!.license, 'CC0')
+  assert.equal(entry!.source, 'wikimedia-commons')
+  assert.ok(entry!.keywords.includes('horse'))
+  assert.ok(entry!.keywords.includes('loopable'))
 })

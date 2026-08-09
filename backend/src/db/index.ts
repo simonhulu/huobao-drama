@@ -83,7 +83,7 @@ sqlite.exec(`
     enable_ai_rewrite INTEGER DEFAULT 1,
     workflow_type TEXT DEFAULT 'story_rewrite',
     narration_voice_id TEXT,
-    narration_speed REAL DEFAULT 1.0,
+    narration_speed REAL DEFAULT 0.85,
     subtitle_enabled INTEGER DEFAULT 1,
     subtitle_font TEXT DEFAULT 'PingFang SC',
     subtitle_color TEXT DEFAULT '#FFFFFF',
@@ -118,6 +118,15 @@ sqlite.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS dharma_factory_intakes (
+    run_token TEXT PRIMARY KEY,
+    request_sha256 TEXT NOT NULL,
+    drama_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS characters (
@@ -831,7 +840,7 @@ ensureColumn('episodes', 'render_mode', "TEXT DEFAULT 'image_story'")
 ensureColumn('episodes', 'auto_mode', "INTEGER DEFAULT 0")
 ensureColumn('episodes', 'enable_ai_rewrite', "INTEGER DEFAULT 1")
 ensureColumn('episodes', 'narration_voice_id', 'TEXT')
-ensureColumn('episodes', 'narration_speed', 'REAL DEFAULT 1.0')
+ensureColumn('episodes', 'narration_speed', 'REAL DEFAULT 0.85')
 ensureColumn('episodes', 'video_title', 'TEXT')
 ensureColumn('dramas', 'video_title', 'TEXT')
 ensureColumn('narrative_sequences', 'design_json', 'TEXT')
@@ -839,6 +848,7 @@ ensureColumn('episodes', 'opening_storyboard_json', 'TEXT')
 ensureColumn('dramas', 'workflow_type', "TEXT DEFAULT 'story_rewrite'")
 ensureColumn('episodes', 'workflow_type', "TEXT DEFAULT 'story_rewrite'")
 ensureColumn('dramas', 'media_account_id', 'INTEGER')
+ensureColumn('dramas', 'publish_sync_json', 'TEXT')
 ensureColumn('dramas', 'project_positioning_json', 'TEXT')
 ensureColumn('episodes', 'creative_brief_json', 'TEXT')
 ensureColumn('episodes', 'director_plan_json', 'TEXT')
@@ -921,6 +931,66 @@ ensureColumn('image_generations', 'last_error_code', 'TEXT')
 ensureColumn('image_generations', 'last_error_detail', 'TEXT')
 ensureColumn('ai_voices', 'voice_type', "TEXT DEFAULT 'system'")
 sqlite.exec(`UPDATE ai_voices SET voice_type = 'system' WHERE voice_type IS NULL OR voice_type = ''`)
+
+// New Dharma episodes write 0.85 explicitly. This fills only legacy Dharma
+// rows that never had a stored speed, preserving any user-selected value.
+sqlite.exec(`
+  UPDATE episodes
+  SET narration_speed = 0.85
+  WHERE narration_speed IS NULL
+    AND drama_id IN (
+      SELECT id FROM dramas WHERE genre = 'dharma' AND deleted_at IS NULL
+    )
+`)
+
+// Keep MiniMax system voices available even before the first remote sync.
+const additionalMinimaxVoices = [
+  {
+    voiceId: 'Chinese_deep_voiced_male_nv1',
+    voiceName: '深沉男声（Deep-voiced Male）',
+    description: JSON.stringify(['低沉、厚重、成熟', '适合历史旁白、纪实讲述和稳重男性角色']),
+  },
+  {
+    voiceId: 'Chinese_gravelly_storyteller_nv1',
+    voiceName: '沙哑故事讲述者（Gravelly Storyteller）',
+    description: JSON.stringify(['沙哑、沧桑、讲述感强', '适合历史故事、悬疑叙事和粗粝男性角色']),
+  },
+]
+const upsertAdditionalMinimaxVoice = sqlite.prepare(`
+  INSERT INTO ai_voices (voice_id, voice_name, description, language, provider, voice_type, created_at)
+  VALUES (@voiceId, @voiceName, @description, '中文', 'minimax', 'system', @createdAt)
+  ON CONFLICT(voice_id) DO UPDATE SET
+    voice_name = excluded.voice_name,
+    description = excluded.description,
+    language = excluded.language,
+    provider = excluded.provider,
+    voice_type = excluded.voice_type
+`)
+const upsertAdditionalMinimaxVoices = sqlite.transaction(() => {
+  const createdAt = new Date().toISOString()
+  for (const voice of additionalMinimaxVoices) {
+    upsertAdditionalMinimaxVoice.run({ ...voice, createdAt })
+  }
+})
+upsertAdditionalMinimaxVoices()
+
+// Migrate records that still carry a previous built-in narration default.
+const previousNarrationVoiceIds = [
+  'Chinese_gravelly_storyteller_nv1',
+  'ttv-voice-2026072016212326-TinwAgRr',
+  'voice-clone-aug7-1786037907442',
+]
+sqlite.prepare(`
+  UPDATE episodes
+  SET narration_voice_id = 'voice-clone-aug7-1786117023178',
+      narration_speed = CASE
+        WHEN narration_speed IS NULL OR narration_speed = 1.0 THEN 1.2
+        ELSE narration_speed
+      END
+  WHERE narration_voice_id IS NULL
+     OR TRIM(narration_voice_id) = ''
+     OR narration_voice_id IN (${previousNarrationVoiceIds.map(() => '?').join(', ')})
+`).run(...previousNarrationVoiceIds)
 
 // A Dharma pilot/render is valid only for a specific set of episode inputs.
 // The render takes a durable commit claim immediately before publishing. From
@@ -1053,6 +1123,40 @@ const reconcileDharmaRenderStartupState = sqlite.transaction(() => {
 })
 reconcileDharmaRenderStartupState.immediate()
 
+// Idempotency must be enforced by SQLite, not only by a read-before-insert in
+// one process. Older databases may already contain duplicate active rows; mark
+// later duplicates stale before installing the partial unique index.
+const reconcileActiveTaskIdempotencyState = sqlite.transaction(() => {
+  sqlite.exec(`
+    UPDATE creation_tasks
+    SET status = 'stale',
+        error_code = 'duplicate_active_idempotency_reconciled',
+        error_message = 'Duplicate active idempotency task reconciled at startup',
+        completed_at = COALESCE(completed_at, datetime('now')),
+        updated_at = datetime('now')
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY type, idempotency_key
+            ORDER BY id
+          ) AS row_number
+        FROM creation_tasks
+        WHERE idempotency_key IS NOT NULL
+          AND status IN ('queued', 'running')
+      )
+      WHERE row_number > 1
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_creation_tasks_idempotency
+      ON creation_tasks (type, idempotency_key)
+      WHERE idempotency_key IS NOT NULL
+        AND status IN ('queued', 'running');
+  `)
+})
+reconcileActiveTaskIdempotencyState.immediate()
+
 const migrateAiConfigSecrets = sqlite.transaction(() => {
   const rows = sqlite.prepare(`SELECT id, api_key FROM ai_service_configs WHERE api_key <> ''`).all() as Array<{
     id: number
@@ -1068,3 +1172,7 @@ migrateAiConfigSecrets()
 export const db = drizzle(sqlite, { schema })
 export { schema }
 export type DB = typeof db
+
+export function runImmediateTransaction<T>(fn: () => T): T {
+  return sqlite.transaction(fn).immediate()
+}

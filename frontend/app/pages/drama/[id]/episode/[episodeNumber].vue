@@ -11,7 +11,7 @@
         <div class="studio-identity">
           <h1 class="studio-title">{{ drama.title }}</h1>
           <div v-if="episode?.video_title" class="studio-episode-title">{{ episode.video_title }}</div>
-          <span class="studio-episode-chip">第 {{ episodeNumber }} 集</span>
+          <span class="studio-episode-chip">第 {{ episodeNumber }} 集 · #{{ epId }}</span>
           <div class="studio-meta-row">
             <span class="studio-meta-pill">{{ currentSubStageLabel }}</span>
             <span class="studio-meta-pill is-progress">{{ pipelineProgress }}/13</span>
@@ -22,6 +22,10 @@
 
       <div class="studio-topbar-side">
         <div class="studio-actions">
+          <button class="btn" title="进入 v8 生产中心" @click="navigateTo(`/remotion/episode/${epId}`)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            生产中心
+          </button>
           <button class="btn" @click="refresh">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             刷新
@@ -107,6 +111,40 @@
             <div class="settings-control-row">
               <span class="render-mode-label">解说音色</span>
               <BaseSelect :model-value="narrationVoiceId || ''" :options="narrationVoiceOptions" placeholder="默认" class="drawer-select wide" @update:model-value="updateNarrationVoice" />
+            </div>
+            <div v-if="getVoiceProfile(narrationVoiceId)" class="settings-control-row voice-id-control-row">
+              <span class="render-mode-label">Voice ID</span>
+              <div class="voice-id-copy">
+                <code>{{ getVoiceProfile(narrationVoiceId)?.id }}</code>
+                <button class="icon-btn" type="button" title="复制 Voice ID" aria-label="复制 Voice ID" @click="copyVoiceId(getVoiceProfile(narrationVoiceId)?.id)">
+                  <Copy :size="13" />
+                </button>
+              </div>
+            </div>
+            <div class="settings-voice-library">
+              <div class="settings-voice-library-head">
+                <span class="render-mode-label">音色库</span>
+                <span class="dim">{{ voiceProfiles.length }} 条</span>
+              </div>
+              <div v-for="voice in voiceProfiles" :key="`settings-${voice.id}`" class="settings-voice-item">
+                <div class="settings-voice-main">
+                  <strong>{{ voice.label }}</strong>
+                  <span class="tag">{{ voice.gender }}</span>
+                </div>
+                <div class="voice-id-copy">
+                  <code>{{ voice.id }}</code>
+                  <button class="icon-btn" type="button" title="复制 Voice ID" aria-label="复制 Voice ID" @click="copyVoiceId(voice.id)">
+                    <Copy :size="12" />
+                  </button>
+                </div>
+                <button class="btn btn-sm settings-voice-preview" type="button" :disabled="voicePreviewLoading === voice.id" @click="previewVoice(voice)">
+                  <Loader2 v-if="voicePreviewLoading === voice.id" :size="12" class="animate-spin" />
+                  <Square v-else-if="voicePreviewId === voice.id && voicePreviewUrl" :size="12" />
+                  <Play v-else :size="12" />
+                  {{ voicePreviewLoading === voice.id ? '生成中' : (voicePreviewId === voice.id && voicePreviewUrl ? '停止' : '试听') }}
+                </button>
+                <audio v-if="voicePreviewId === voice.id && voicePreviewUrl" :key="`settings-audio-${voicePreviewUrl}`" :src="voicePreviewUrl" controls autoplay preload="metadata" @ended="stopVoicePreview" />
+              </div>
             </div>
             <div class="settings-control-row">
               <span class="render-mode-label">解说语速</span>
@@ -623,6 +661,21 @@
                     <span class="voice-library-name">{{ voice.label }}</span>
                     <span class="tag">{{ voice.gender }}</span>
                   </div>
+                  <div class="voice-id-copy voice-library-id">
+                    <code>{{ voice.id }}</code>
+                    <button class="icon-btn" type="button" title="复制 Voice ID" aria-label="复制 Voice ID" @click="copyVoiceId(voice.id)">
+                      <Copy :size="12" />
+                    </button>
+                  </div>
+                  <div class="voice-preview-row">
+                    <button class="btn btn-sm" type="button" :disabled="voicePreviewLoading === voice.id" @click="previewVoice(voice)">
+                      <Loader2 v-if="voicePreviewLoading === voice.id" :size="12" class="animate-spin" />
+                      <Square v-else-if="voicePreviewId === voice.id && voicePreviewUrl" :size="12" />
+                      <Play v-else :size="12" />
+                      {{ voicePreviewLoading === voice.id ? '生成中' : (voicePreviewId === voice.id && voicePreviewUrl ? '停止' : '试听') }}
+                    </button>
+                    <audio v-if="voicePreviewId === voice.id && voicePreviewUrl" :key="voicePreviewUrl" :src="voicePreviewUrl" controls autoplay preload="metadata" @ended="stopVoicePreview" />
+                  </div>
                   <div class="voice-library-traits">{{ voice.traits }}</div>
                   <div class="voice-library-fit">{{ voice.suitable }}</div>
                 </div>
@@ -664,6 +717,12 @@
                   <div class="voice-profile-head">
                     <span class="voice-profile-name">{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.label }}</span>
                     <span class="tag">{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.gender }}</span>
+                  </div>
+                  <div class="voice-id-copy">
+                    <code>{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.id }}</code>
+                    <button class="icon-btn" type="button" title="复制 Voice ID" aria-label="复制 Voice ID" @click="copyVoiceId(getVoiceProfile(c.voice_style || c.voiceStyle)?.id)">
+                      <Copy :size="12" />
+                    </button>
                   </div>
                   <div class="voice-profile-traits">{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.traits }}</div>
                   <div class="voice-profile-fit">{{ getVoiceProfile(c.voice_style || c.voiceStyle)?.suitable }}</div>
@@ -2090,7 +2149,7 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import {
-  Users, MapPin, Video, ImageIcon, Image, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download, Loader2, Settings2, X, Sparkles,
+  Users, MapPin, Video, ImageIcon, Image, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download, Loader2, Settings2, X, Sparkles, Copy, Play, Square,
 } from 'lucide-vue-next'
 import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, ttsAPI, mergeAPI, gridAPI, gridEpisodeAPI, aiConfigAPI, voicesAPI, libraryAPI, taskAPI, introTemplateAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
@@ -2141,7 +2200,7 @@ const isImageStory = computed(() => renderMode.value === 'image_story')
 const autoMode = computed(() => episode.value?.auto_mode === true)
 const enableAiRewrite = computed(() => episode.value?.enable_ai_rewrite !== false)
 const narrationVoiceId = computed(() => episode.value?.narration_voice_id || '')
-const narrationSpeed = computed(() => episode.value?.narration_speed || 1.0)
+const narrationSpeed = computed(() => episode.value?.narration_speed || 1.2)
 const dialogueMode = computed(() => episode.value?.dialogue_mode || 'narration_only')
 const dialogueModeOptions = [
   { label: '无对白', value: 'narration_only' },
@@ -2288,6 +2347,10 @@ const fallbackVoiceProfiles = [
   { id: 'shimmer', label: 'Shimmer', gender: '女声', traits: '明亮、活泼、年轻', suitable: '少女、轻快角色、跳脱配角' },
 ]
 const voiceProfiles = ref(fallbackVoiceProfiles)
+const voicePreviewId = ref(null)
+const voicePreviewUrl = ref('')
+const voicePreviewLoading = ref(null)
+const voicePreviewCache = ref({})
 const voiceSelectOptions = computed(() => voiceProfiles.value.map(v => ({ label: `${v.label} · ${v.traits}`, value: v.id })))
 const narrationVoiceOptions = computed(() => [
   { label: '默认', value: '' },
@@ -3576,6 +3639,53 @@ function updateCharVoice(charId, voiceId) {
 }
 function getVoiceProfile(voiceId) {
   return voiceProfiles.value.find(v => v.id === voiceId) || null
+}
+
+async function previewVoice(voice) {
+  if (voicePreviewId.value === voice.id && voicePreviewUrl.value) {
+    stopVoicePreview()
+    return
+  }
+  const cacheKey = `${lockedAudioConfigId.value || 'active'}:${voice.id}`
+  const cachedUrl = voicePreviewCache.value[cacheKey] || (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(`voice-preview:${cacheKey}`) : '')
+  if (cachedUrl) {
+    voicePreviewId.value = voice.id
+    voicePreviewUrl.value = cachedUrl
+    voicePreviewCache.value[cacheKey] = cachedUrl
+    return
+  }
+  voicePreviewLoading.value = voice.id
+  try {
+    const result = await voicesAPI.preview({
+      voice_id: voice.id,
+      config_id: lockedAudioConfigId.value || null,
+    })
+    voicePreviewId.value = voice.id
+    voicePreviewUrl.value = result?.audio_url ? `/${result.audio_url.replace(/^\//, '')}` : ''
+    if (!voicePreviewUrl.value) throw new Error('接口未返回试听音频')
+    voicePreviewCache.value[cacheKey] = voicePreviewUrl.value
+    if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(`voice-preview:${cacheKey}`, voicePreviewUrl.value)
+  } catch (e) {
+    toast.error(e?.message || '音色试听生成失败')
+  } finally {
+    voicePreviewLoading.value = null
+  }
+}
+
+function stopVoicePreview() {
+  voicePreviewId.value = null
+  voicePreviewUrl.value = ''
+}
+
+async function copyVoiceId(voiceId) {
+  const id = String(voiceId || '').trim()
+  if (!id) return
+  try {
+    await navigator.clipboard.writeText(id)
+    toast.success('Voice ID 已复制')
+  } catch {
+    toast.error('复制失败，请手动选择 Voice ID')
+  }
 }
 const selectedSb = ref(null)
 const bgmLibraryInfo = ref(null)
@@ -5154,6 +5264,16 @@ onMounted(() => {
   justify-self: end;
 }
 
+.settings-voice-library { display: flex; flex-direction: column; gap: 7px; margin: 2px 0 4px 92px; padding-top: 8px; border-top: 1px solid var(--border); }
+.settings-voice-library-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.settings-voice-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); }
+.settings-voice-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.settings-voice-main strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.settings-voice-item .voice-id-copy { grid-column: 1 / 2; }
+.settings-voice-item .voice-id-copy code { font-size: 9px; }
+.settings-voice-item audio { grid-column: 1 / -1; width: 100%; height: 26px; }
+.settings-voice-preview { grid-column: 2; grid-row: 1 / span 2; }
+
 .drawer-inline-controls,
 .drawer-speed-control {
   display: flex;
@@ -6053,6 +6173,11 @@ onMounted(() => {
 .voice-library-item { padding: 10px 12px; border-radius: 14px; background: rgba(255,255,255,0.56); border: 1px solid rgba(27, 41, 64, 0.08); display: flex; flex-direction: column; gap: 4px; }
 .voice-library-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .voice-library-name { font-size: 13px; font-weight: 700; color: var(--text-0); }
+.voice-id-copy { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.voice-id-copy code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 10px; font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+.voice-library-id { padding: 4px 6px; border-radius: 6px; background: rgba(27, 41, 64, 0.045); }
+.voice-id-copy .icon-btn { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--text-3); cursor: pointer; }
+.voice-id-copy .icon-btn:hover { color: var(--accent-text); background: rgba(19, 51, 121, 0.08); }
 .voice-library-traits { font-size: 11px; color: var(--text-1); }
 .voice-library-fit { font-size: 10px; color: var(--text-3); line-height: 1.5; }
 
@@ -7320,6 +7445,8 @@ onMounted(() => {
     align-items: stretch;
     gap: 6px;
   }
+
+  .settings-voice-library { margin-left: 0; }
 
   .settings-control-row .render-mode-switch,
   .settings-control-row .narration-provider-switch,

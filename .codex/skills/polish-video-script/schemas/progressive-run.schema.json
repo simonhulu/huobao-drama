@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Polish Video Script Progressive Run V2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "mode",
+    "run_id",
+    "status",
+    "contract",
+    "stage_map",
+    "events"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "mode": { "enum": ["transplant", "generate"] },
+    "run_id": { "type": "string", "minLength": 1 },
+    "status": {
+      "enum": [
+        "INTAKE_PENDING",
+        "ORIGINAL_STORED",
+        "AWAIT_TOPIC",
+        "TOPIC_CONFIRMED",
+        "AUTOPSY_READY",
+        "SEARCH_RUNNING",
+        "MATERIALS_READY",
+        "CONTRACT_PROPOSED",
+        "CONTRACT_LOCKED",
+        "MAP_PROPOSED",
+        "MAP_LOCKED",
+        "AWAIT_STAGE_PERMISSION",
+        "STAGE_ACTIVE",
+        "AWAIT_CREATOR",
+        "ASSEMBLED",
+        "AUDIT_RUNNING",
+        "REOPEN_PROPOSED",
+        "AUDITED_CANDIDATE",
+        "AWAIT_FINAL_ACK",
+        "PUBLISH_READY",
+        "INVALIDATED"
+      ]
+    },
+    "contract": {
+      "type": "object",
+      "required": [
+        "status",
+        "topic",
+        "topic_confirm_event_id",
+        "audience",
+        "target_platform",
+        "target_duration_seconds",
+        "thesis",
+        "main_hole",
+        "promise",
+        "planned_payoff",
+        "primary_driver",
+        "driver_contract",
+        "audience_bridge"
+      ],
+      "properties": {
+        "status": { "enum": ["proposed", "locked", "stale"] },
+        "topic": { "type": "string", "minLength": 1 },
+        "topic_confirm_event_id": { "type": "string", "minLength": 1 },
+        "audience": { "type": "string", "minLength": 1 },
+        "target_platform": { "type": "string", "minLength": 1 },
+        "target_duration_seconds": { "type": "number", "minimum": 15 },
+        "thesis": { "type": "string", "minLength": 1 },
+        "main_hole": { "type": "string", "minLength": 1 },
+        "promise": { "$ref": "#/$defs/payment" },
+        "planned_payoff": { "$ref": "#/$defs/payment" },
+        "primary_driver": { "$ref": "#/$defs/driver" },
+        "secondary_driver": { "$ref": "#/$defs/driver" },
+        "audience_bridge": { "type": "string", "minLength": 1 },
+        "driver_contract": {
+          "type": "object",
+          "required": ["primary", "evidence_ids", "mechanism", "selection_effect"],
+          "properties": {
+            "primary": { "$ref": "#/$defs/driver" },
+            "evidence_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+            "mechanism": { "type": "string", "minLength": 1 },
+            "selection_effect": { "type": "string", "minLength": 1 },
+            "opposition": { "type": "string" },
+            "cost": { "type": "string" },
+            "escalation": { "type": "string" },
+            "exploration_endpoint": { "type": "string" },
+            "boundary": { "type": "string" },
+            "access_rule": { "type": "string" },
+            "consumed_emotion": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "lock_event_id": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "stage_map": {
+      "type": "object",
+      "required": ["status", "stages"],
+      "properties": {
+        "status": { "enum": ["proposed", "locked", "stale"] },
+        "lock_event_id": { "type": "string" },
+        "stages": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/stage" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "assembly": {
+      "type": "object",
+      "required": ["text", "content_hash"],
+      "properties": {
+        "text": { "type": "string" },
+        "content_hash": { "type": "string" }
+      }
+    },
+    "audits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "verdict", "input_content_hash"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "type": {
+            "enum": ["fact", "structure_payment", "sentence", "scripture", "retention", "comment_share"]
+          },
+          "verdict": { "enum": ["pass", "fail"] },
+          "input_content_hash": { "type": "string", "minLength": 1 },
+          "details": { "type": "object" }
+        },
+        "additionalProperties": true,
+        "allOf": [
+          {
+            "if": {
+              "properties": { "type": { "const": "retention" } },
+              "required": ["type"]
+            },
+            "then": {
+              "required": ["details"],
+              "properties": { "details": { "$ref": "#/$defs/retentionDiagnostic" } }
+            }
+          },
+          {
+            "if": {
+              "properties": { "type": { "const": "comment_share" } },
+              "required": ["type"]
+            },
+            "then": {
+              "required": ["details"],
+              "properties": { "details": { "$ref": "#/$defs/commentShareDiagnostic" } }
+            }
+          }
+        ]
+      }
+    },
+    "final_ack": {
+      "type": "object",
+      "required": ["event_id", "content_hash"],
+      "properties": {
+        "event_id": { "type": "string", "minLength": 1 },
+        "content_hash": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "driver": { "enum": ["山", "海", "墓", "色"] },
+    "diagnosticStatus": { "enum": ["pass", "risk", "block"] },
+    "retentionDiagnostic": {
+      "type": "object",
+      "required": ["prediction_policy", "timing_basis", "windows", "stage_chain", "overall_reason"],
+      "properties": {
+        "prediction_policy": { "const": "qualitative_only" },
+        "timing_basis": {
+          "type": "object",
+          "required": ["kind", "target_duration_seconds"],
+          "properties": {
+            "kind": { "enum": ["character_ratio_estimate", "narration_timestamps"] },
+            "target_duration_seconds": { "type": "number", "minimum": 15 }
+          }
+        },
+        "windows": {
+          "type": "array",
+          "minItems": 5,
+          "items": {
+            "type": "object",
+            "required": ["id", "status", "stage_id", "exact_quote", "viewer_pull", "evidence"],
+            "properties": {
+              "id": { "enum": ["0_2s", "2_5s", "5_15s", "body", "ending"] },
+              "status": { "$ref": "#/$defs/diagnosticStatus" },
+              "stage_id": { "type": "string", "minLength": 1 },
+              "exact_quote": { "type": "string", "minLength": 1 },
+              "viewer_pull": { "type": "string", "minLength": 1 },
+              "evidence": { "type": "string", "minLength": 1 },
+              "repair": { "type": "string" }
+            }
+          }
+        },
+        "stage_chain": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": ["stage_id", "status", "incoming_pull", "new_information", "outgoing_pull", "main_hole_relation"],
+            "properties": {
+              "stage_id": { "type": "string", "minLength": 1 },
+              "status": { "$ref": "#/$defs/diagnosticStatus" },
+              "incoming_pull": { "type": "string", "minLength": 1 },
+              "new_information": { "type": "string", "minLength": 1 },
+              "outgoing_pull": { "type": "string", "minLength": 1 },
+              "main_hole_relation": { "enum": ["open", "shrink", "deepen", "reverse", "raise_stakes", "pay"] },
+              "repair": { "type": "string" }
+            }
+          }
+        },
+        "overall_reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "commentShareDiagnostic": {
+      "type": "object",
+      "required": ["prediction_policy", "comment_strategy", "comment_trigger", "viewer_owned_gap", "share_trigger", "retell_line", "overall_reason"],
+      "properties": {
+        "prediction_policy": { "const": "qualitative_only" },
+        "comment_strategy": { "enum": ["resonance", "confrontation", "expression", "relation"] },
+        "comment_trigger": {
+          "type": "object",
+          "required": ["stage_id", "exact_quote", "mechanism", "expected_comment"],
+          "properties": {
+            "stage_id": { "type": "string", "minLength": 1 },
+            "exact_quote": { "type": "string", "minLength": 1 },
+            "mechanism": { "type": "string", "minLength": 1 },
+            "expected_comment": { "type": "string", "minLength": 1 }
+          }
+        },
+        "viewer_owned_gap": {
+          "type": "object",
+          "required": ["stage_id", "question", "intentionally_open", "answerable_by_viewer"],
+          "properties": {
+            "stage_id": { "type": "string", "minLength": 1 },
+            "question": { "type": "string", "minLength": 1 },
+            "intentionally_open": { "const": true },
+            "answerable_by_viewer": { "const": true }
+          }
+        },
+        "share_trigger": {
+          "type": "object",
+          "required": ["stage_id", "exact_quote", "target_person", "send_reason"],
+          "properties": {
+            "stage_id": { "type": "string", "minLength": 1 },
+            "exact_quote": { "type": "string", "minLength": 1 },
+            "target_person": { "type": "string", "minLength": 1 },
+            "send_reason": { "type": "string", "minLength": 1 }
+          }
+        },
+        "retell_line": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "overall_reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "payment": {
+      "type": "object",
+      "required": ["text", "currency", "subject", "scope"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "currency": { "enum": ["cognitive", "emotional", "social"] },
+        "subject": { "type": "string", "minLength": 1 },
+        "scope": { "type": "string", "minLength": 1 }
+      }
+    },
+    "draftVersion": {
+      "type": "object",
+      "required": ["actor", "text", "content_hash", "reason"],
+      "properties": {
+        "actor": { "enum": ["ai", "creator"] },
+        "text": { "type": "string" },
+        "content_hash": { "type": "string", "minLength": 1 },
+        "parent_hash": { "type": ["string", "null"] },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "required": [
+        "id",
+        "order",
+        "name",
+        "status",
+        "stage_job",
+        "audience_belief_before",
+        "audience_belief_after",
+        "main_hole_relation",
+        "primary_driver",
+        "evidence_ids",
+        "subholes_opened",
+        "subholes_paid",
+        "draft_versions",
+        "upstream_locked_hashes",
+        "downstream_constraints"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "order": { "type": "integer", "minimum": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": ["planned", "active", "awaiting_creator", "locked", "needs_revalidation", "stale_draft"]
+        },
+        "stage_job": { "type": "string", "minLength": 1 },
+        "audience_belief_before": { "type": "string", "minLength": 1 },
+        "audience_belief_after": { "type": "string", "minLength": 1 },
+        "main_hole_relation": {
+          "enum": ["open", "shrink", "deepen", "reverse", "raise_stakes", "pay"]
+        },
+        "primary_driver": { "$ref": "#/$defs/driver" },
+        "evidence_ids": { "type": "array", "items": { "type": "string" } },
+        "subholes_opened": { "type": "array", "items": { "type": "string" } },
+        "subholes_paid": { "type": "array", "items": { "type": "string" } },
+        "creator_decision_needed": { "type": ["string", "null"] },
+        "intentionally_unpaid": { "type": "string" },
+        "must_preserve": { "type": "array", "items": { "type": "string" } },
+        "activation_event_id": { "type": "string" },
+        "draft_versions": { "type": "array", "items": { "$ref": "#/$defs/draftVersion" } },
+        "why_this_draft": {
+          "type": "object",
+          "properties": {
+            "material_reason": { "type": "string" },
+            "theory_reason": { "type": "string" },
+            "structural_reason": { "type": "string" },
+            "intentionally_unpaid": { "type": "string" }
+          }
+        },
+        "upstream_locked_hashes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["stage_id", "hash"],
+            "properties": {
+              "stage_id": { "type": "string" },
+              "hash": { "type": "string" }
+            }
+          }
+        },
+        "locked_text": { "type": "string" },
+        "locked_hash": { "type": "string" },
+        "lock_event_id": { "type": "string" },
+        "downstream_constraints": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "event": {
+      "type": "object",
+      "required": ["id", "kind", "actor", "target_id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": [
+            "topic_confirm",
+            "contract_lock",
+            "map_lock",
+            "stage_activate",
+            "stage_lock",
+            "stage_unlock",
+            "map_unlock",
+            "contract_unlock",
+            "stage_revalidate",
+            "final_ack"
+          ]
+        },
+        "actor": { "const": "creator" },
+        "target_id": { "type": "string", "minLength": 1 },
+        "content_hash": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

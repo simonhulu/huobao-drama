@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
+import fs from 'node:fs'
+import path from 'node:path'
 import { badRequest, notFound, serverError, success } from '../utils/response.js'
-import { deleteMusicAsset, refreshMusicLibrary, loadMusicLibrary, findMusicEntry } from '../services/music-library.js'
+import { deleteMusicAsset, refreshMusicLibrary, loadMusicLibrary, findMusicEntry, MUSIC_DIR } from '../services/music-library.js'
 import { deleteSfxAsset, getSfxLibraryStats, loadMapping, findSfxEntryByAbsolutePath, getSfxUrl, type SfxMapping } from '../services/sfx-library.js'
 
 const app = new Hono()
@@ -51,6 +53,11 @@ app.get('/sfx', (c) => {
     url: `/sfx/${e.relativePath}`,
     pack: e.pack,
     keywords: e.keywords,
+    title: e.title || null,
+    source: e.source || null,
+    source_url: e.sourceUrl || null,
+    license: e.license || null,
+    attribution: e.attribution || null,
   }))
   return success(c, {
     total: items.length,
@@ -108,6 +115,39 @@ app.delete('/music', async (c) => {
   }
 })
 
+const MUSIC_UPLOAD_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'])
+
+/**
+ * POST /api/v1/library/music/upload
+ *
+ * 接收 multipart/form-data 的 file 字段，校验音频扩展名后写入 static/music 目录，
+ * 并刷新 music library 索引。文件名做安全处理：只取 basename，重名时加时间戳防冲突。
+ */
+app.post('/music/upload', async (c) => {
+  const body = await c.req.parseBody()
+  const file = body['file']
+
+  if (!file || !(file instanceof File)) {
+    return badRequest(c, 'file is required')
+  }
+
+  const safeName = path.basename(file.name).replace(/[/\\\0]/g, '')
+  const ext = path.extname(safeName).toLowerCase()
+  if (!MUSIC_UPLOAD_EXTENSIONS.has(ext)) {
+    return badRequest(c, `不支持的音频格式: ${ext || '(无扩展名)'}，仅支持 ${Array.from(MUSIC_UPLOAD_EXTENSIONS).join('/')}`)
+  }
+
+  fs.mkdirSync(MUSIC_DIR, { recursive: true })
+  let filename = safeName
+  if (fs.existsSync(path.join(MUSIC_DIR, filename))) {
+    filename = `${path.basename(safeName, ext)}-${Date.now()}${ext}`
+  }
+  fs.writeFileSync(path.join(MUSIC_DIR, filename), Buffer.from(await file.arrayBuffer()))
+
+  await refreshMusicLibrary()
+  return success(c, { ok: true, path: `static/music/${filename}` })
+})
+
 /**
  * GET /api/v1/library/sfx/lookup?path=sfx/library/...
  *
@@ -127,6 +167,11 @@ app.get('/sfx/lookup', (c) => {
     url: `/${getSfxUrl(entry.relativePath)}`,
     pack: entry.pack,
     keywords: entry.keywords,
+    title: entry.title || null,
+    source: entry.source || null,
+    source_url: entry.sourceUrl || null,
+    license: entry.license || null,
+    attribution: entry.attribution || null,
   })
 })
 

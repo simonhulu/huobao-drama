@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url'
 
 import dramas from './routes/dramas.js'
 import episodes from './routes/episodes.js'
+import deterministicBreaker from './routes/deterministic-breaker.js'
 import storyboards from './routes/storyboards.js'
 import scenes from './routes/scenes.js'
 import characters from './routes/characters.js'
@@ -33,6 +34,7 @@ import aiVoices from './routes/aiVoices.js'
 import library from './routes/library.js'
 import introTemplates from './routes/introTemplates.js'
 import remotion from './routes/remotion.js'
+import sciencePop from './routes/science-pop.js'
 import mediaAccounts from './routes/mediaAccounts.js'
 import dharma from './routes/dharma.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
@@ -55,6 +57,8 @@ import { registerRecapComposeHandler } from './services/tasks/handlers/recap-com
 import { registerCoverGenerateHandler } from './services/tasks/handlers/cover-generate.js'
 import { registerPublishWeChatChannelsHandler } from './services/tasks/handlers/publish-wechat-channels.js'
 import { registerPublishDouyinHandler } from './services/tasks/handlers/publish-douyin.js'
+import { registerNarrativeStoryboardMonitorHandler } from './services/tasks/handlers/narrative-storyboard-monitor.js'
+import { registerSciencePopHandlers } from './services/tasks/handlers/science-pop.js'
 import { registerDharmaEpisodeHandlers } from './services/tasks/handlers/dharma-episode.js'
 import { registerDharmaFootageGenerateHandler } from './services/tasks/handlers/dharma-footage-generate.js'
 
@@ -79,6 +83,7 @@ app.get('/api/v1/health', (c) => c.json({ status: 'ok', timestamp: new Date().to
 const api = new Hono()
 api.route('/dramas', dramas)
 api.route('/episodes', episodes)
+api.route('/episodes', deterministicBreaker)
 api.route('/storyboards', storyboards)
 api.route('/scenes', scenes)
 api.route('/characters', characters)
@@ -101,6 +106,7 @@ api.route('/ai-voices', aiVoices)
 api.route('/library', library)
 api.route('/intro-templates', introTemplates)
 api.route('/remotion', remotion)
+api.route('/science-pop', sciencePop)
 api.route('/media-accounts', mediaAccounts)
 api.route('/dharma', dharma)
 
@@ -123,12 +129,14 @@ registerRecapComposeHandler()
 registerCoverGenerateHandler()
 registerPublishWeChatChannelsHandler()
 registerPublishDouyinHandler()
+registerNarrativeStoryboardMonitorHandler()
+registerSciencePopHandlers()
 registerDharmaEpisodeHandlers()
 registerDharmaFootageGenerateHandler()
 
 const workers: ReturnType<typeof startTaskWorkerLoop>[] = []
 if (process.env.TASK_WORKER_DISABLED !== '1') {
-  const imageWorkerConcurrency = Math.max(1, Number(process.env.IMAGE_TASK_WORKER_CONCURRENCY || 4))
+  const imageWorkerConcurrency = Math.max(1, Number(process.env.IMAGE_TASK_WORKER_CONCURRENCY || 16))
   const generalWorkerConcurrency = Math.max(1, Number(process.env.GENERAL_TASK_WORKER_CONCURRENCY || process.env.TASK_WORKER_CONCURRENCY || 12))
 
   // Image generation gets its own pool so TTS/compose/merge tasks cannot starve it.
@@ -148,6 +156,7 @@ if (process.env.TASK_WORKER_DISABLED !== '1') {
     'merge',
     'recap-compose',
     'intro-compose',
+    'science_pop.compose',
   ])
   const longRunningConcurrency = Math.max(1, Number(process.env.LONG_RUNNING_TASK_WORKER_CONCURRENCY || 2))
   const longRunningLeaseMs = Number(process.env.LONG_RUNNING_TASK_WORKER_LEASE_MS) || 1_800_000
@@ -165,10 +174,10 @@ if (process.env.TASK_WORKER_DISABLED !== '1') {
 
   // Dharma footage generation persists and polls remote image jobs for up to
   // 20 minutes. Keep it on a long lease, but separate it from scarce render
-  // slots so pcore's verified four-job lifecycle capacity can be used.
+  // slots so pcore's lifecycle concurrency (default 400) can be used.
   if (allTypes.includes('dharma.footage_generate')) {
     const dharmaFootageConcurrency = Math.max(1, Number(
-      process.env.DHARMA_FOOTAGE_WORKER_CONCURRENCY || process.env.PCORE_IMAGE_CONCURRENCY || 4,
+      process.env.DHARMA_FOOTAGE_WORKER_CONCURRENCY || process.env.PCORE_IMAGE_CONCURRENCY || 400,
     ))
     workers.push(startTaskWorkerLoop({
       workerId: `worker-dharma-footage-${process.pid}`,

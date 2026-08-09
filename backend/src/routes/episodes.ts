@@ -13,7 +13,7 @@ import {
   requestCancel,
 } from '../services/tasks/store.js'
 import { scheduleAutoStartForEpisode, resetEpisodeStoryboards, scheduleBreakdownAndNarrationForEpisode, scheduleDirectScriptPipeline } from '../services/tasks/auto-pipeline.js'
-import { scheduleCoverGeneration } from '../services/tasks/handlers/cover-generate.js'
+import { HISTORY_FACTORY_ID, isHistoryFactoryEpisode, scheduleCoverGeneration } from '../services/tasks/handlers/cover-generate.js'
 import { confirmPublishWeChatChannels } from '../services/tasks/handlers/publish-wechat-channels.js'
 import { confirmPublishDouyin } from '../services/tasks/handlers/publish-douyin.js'
 import { enhanceCoverPrompt } from '../services/cover-prompt-enhance.js'
@@ -23,8 +23,13 @@ import { resolveStoryboardNarrationTextForTTS, restoreOriginalTextNarrations } f
 import { logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { parseDialogueForTTS, isIgnorableTTS, toAbsPath, resolveNarratorVoice } from '../services/ffmpeg-compose.js'
 import { normalizeTtsText } from '../utils/tts-text.js'
-import { DEFAULT_NARRATION_VOICE_ID } from '../services/narration-defaults.js'
+import { ensureNarrativePlanFromStoryboards, getNarrativeHierarchyForEpisode } from '../services/narrative-hierarchy.js'
+import { defaultNarrationSpeedForGenre, DEFAULT_DHARMA_NARRATION_SPEED, DEFAULT_NARRATION_SPEED, DEFAULT_NARRATION_VOICE_ID } from '../services/narration-defaults.js'
 import { serializePositioning } from '../services/media-accounts.js'
+import {
+  dharmaPublishingPackageFingerprint,
+  normalizeDharmaPublishingPackage,
+} from '../services/dharma-publishing-package.js'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 
@@ -38,6 +43,13 @@ function isTruthy(value: unknown) {
 app.post('/', async (c) => {
   const body = await c.req.json()
   if (!body.drama_id) return badRequest(c, 'drama_id required')
+  const [parentDrama] = db.select({ genre: schema.dramas.genre })
+    .from(schema.dramas)
+    .where(eq(schema.dramas.id, Number(body.drama_id)))
+    .all()
+  const defaultNarrationSpeed = parentDrama?.genre === 'dharma'
+    ? DEFAULT_DHARMA_NARRATION_SPEED
+    : DEFAULT_NARRATION_SPEED
   const auto = isTruthy(c.req.query('auto')) || isTruthy(body.auto) || isTruthy(body.auto_mode)
   if (auto && !body.content) {
     return badRequest(c, 'auto=true 时必须传入 content（原始故事）')
@@ -68,6 +80,7 @@ app.post('/', async (c) => {
     autoMode: auto,
     enableAiRewrite: isTruthy(body.enable_ai_rewrite) || body.enable_ai_rewrite === undefined,
     narrationVoiceId: body.narration_voice_id ?? DEFAULT_NARRATION_VOICE_ID,
+    narrationSpeed: body.narration_speed ?? defaultNarrationSpeed,
     createdAt: ts,
     updatedAt: ts,
   }).run()
@@ -113,12 +126,31 @@ app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
 
-  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'render_mode', 'auto_mode', 'enable_ai_rewrite', 'narration_voice_id', 'narration_speed', 'dialogue_mode', 'narration_mode', 'subtitle_enabled', 'subtitle_font', 'subtitle_color', 'subtitle_size', 'subtitle_position', 'subtitle_margin', 'subtitle_margin_v', 'subtitle_background_color', 'subtitle_stroke_color', 'subtitle_stroke_width', 'opening_hook', 'cliffhanger_hook', 'recap_script', 'series_hook', 'cover_prompt', 'cover_design', 'creative_brief', 'creative_brief_json', 'bgm_audio_url', 'bgm_plan_json']
+  const allowed = ['content', 'script_content', 'title', 'description', 'status', 'render_mode', 'auto_mode', 'enable_ai_rewrite', 'narration_voice_id', 'narration_speed', 'dialogue_mode', 'narration_mode', 'subtitle_enabled', 'subtitle_font', 'subtitle_color', 'subtitle_size', 'subtitle_position', 'subtitle_margin', 'subtitle_margin_v', 'subtitle_background_color', 'subtitle_stroke_color', 'subtitle_stroke_width', 'opening_hook', 'cliffhanger_hook', 'recap_script', 'series_hook', 'cover_prompt', 'cover_design', 'creative_brief', 'creative_brief_json', 'publishing_package', 'bgm_audio_url', 'bgm_plan_json', 'video_url', 'history_factory']
   const updates: Record<string, any> = {}
   for (const key of allowed) {
     if (key in body) updates[key] = body[key]
   }
   if (Object.keys(updates).length === 0) return badRequest(c, 'no valid fields')
+  if ('publishing_package' in updates && 'cover_design' in updates) {
+    return badRequest(c, 'publishing_package and cover_design cannot be updated together')
+  }
+
+  const [epBefore] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  const [parentDrama] = epBefore
+    ? db.select({ genre: schema.dramas.genre }).from(schema.dramas).where(eq(schema.dramas.id, epBefore.dramaId)).all()
+    : []
+  const defaultNarrationSpeed = defaultNarrationSpeedForGenre(parentDrama?.genre)
+  let publishingPackage: ReturnType<typeof normalizeDharmaPublishingPackage> | null = null
+  if ('publishing_package' in updates) {
+    try {
+      publishingPackage = normalizeDharmaPublishingPackage(updates.publishing_package, {
+        expectedTitle: String(updates.title || epBefore?.title || '').trim() || undefined,
+      })
+    } catch (error) {
+      return badRequest(c, error instanceof Error ? error.message : String(error))
+    }
+  }
 
   // Map snake_case to camelCase for drizzle
   const drizzleUpdates: Record<string, any> = { updatedAt: now() }
@@ -133,7 +165,7 @@ app.put('/:id', async (c) => {
   if ('narration_voice_id' in updates) drizzleUpdates.narrationVoiceId = updates.narration_voice_id || null
   if ('narration_speed' in updates) {
     const speed = Number(updates.narration_speed)
-    drizzleUpdates.narrationSpeed = Number.isFinite(speed) && speed >= 0.8 && speed <= 2.5 ? speed : 1.0
+    drizzleUpdates.narrationSpeed = Number.isFinite(speed) && speed >= 0.8 && speed <= 2.5 ? speed : defaultNarrationSpeed
   }
   if ('dialogue_mode' in updates) drizzleUpdates.dialogueMode = updates.dialogue_mode || 'narration_only'
   if ('narration_mode' in updates) drizzleUpdates.narrationMode = updates.narration_mode || 'rewrite'
@@ -154,10 +186,44 @@ app.put('/:id', async (c) => {
   if ('creative_brief' in updates || 'creative_brief_json' in updates) {
     drizzleUpdates.creativeBriefJson = serializePositioning(updates.creative_brief ?? updates.creative_brief_json ?? {})
   }
-  const [epBefore] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if (publishingPackage) {
+    drizzleUpdates.openingHook = publishingPackage.opening_hook
+    drizzleUpdates.cliffhanger = publishingPackage.cliffhanger
+    drizzleUpdates.creativeBriefJson = JSON.stringify(publishingPackage.creative_brief)
+    drizzleUpdates.coverPrompt = publishingPackage.cover_design.ai_prompt
+    drizzleUpdates.coverDesignJson = JSON.stringify(publishingPackage.cover_design)
+    let metadata: Record<string, unknown> = {}
+    try {
+      const parsed = epBefore?.metadata ? JSON.parse(epBefore.metadata) : {}
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) metadata = parsed
+    } catch { /* preserve the package even when legacy metadata is malformed */ }
+    metadata.dharmaPublishing = {
+      schema_version: publishingPackage.schema_version,
+      package_sha256: dharmaPublishingPackageFingerprint(publishingPackage),
+      package: publishingPackage,
+    }
+    drizzleUpdates.metadata = JSON.stringify(metadata)
+  }
+  const narrationSpeedChanged = 'narration_speed' in updates
+    && epBefore
+    && Math.abs(Number(drizzleUpdates.narrationSpeed) - Number(epBefore.narrationSpeed ?? defaultNarrationSpeed)) > 0.0001
+  const historyFactoryEpisode = epBefore ? isHistoryFactoryEpisode(epBefore) : false
+  if ('history_factory' in updates) {
+    if (updates.history_factory !== HISTORY_FACTORY_ID) {
+      return badRequest(c, `history_factory must equal ${HISTORY_FACTORY_ID}`)
+    }
+    let metadata: Record<string, unknown> = {}
+    try {
+      const parsed = epBefore?.metadata ? JSON.parse(epBefore.metadata) : {}
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) metadata = parsed
+    } catch { /* replace malformed legacy metadata with the contract marker */ }
+    metadata.historyFactory = HISTORY_FACTORY_ID
+    drizzleUpdates.metadata = JSON.stringify(metadata)
+  }
   if ('cover_prompt' in updates) drizzleUpdates.coverPrompt = updates.cover_prompt || null
 
   if ('bgm_audio_url' in updates) drizzleUpdates.bgmAudioUrl = updates.bgm_audio_url || null
+    if ('video_url' in updates) drizzleUpdates.videoUrl = updates.video_url || null
   if ('bgm_plan_json' in updates) drizzleUpdates.bgmPlanJson = updates.bgm_plan_json || null
 
   let extractedCoverDesign = null
@@ -170,7 +236,14 @@ app.put('/:id', async (c) => {
         episodeTitle: epBefore?.title,
         episodeNumber: epBefore?.episodeNumber,
         fallbackPrompt: updates.cover_prompt || epBefore?.coverPrompt || undefined,
+        requireExplicitMainTitle: historyFactoryEpisode,
       })
+      if (historyFactoryEpisode && !extractedCoverDesign) {
+        return badRequest(c, '历史工厂 episode 的封面必须由用户提供非空 cover_design.main_title')
+      }
+      if (historyFactoryEpisode && extractedCoverDesign) {
+        extractedCoverDesign = { ...extractedCoverDesign, user_provided_title: true }
+      }
       drizzleUpdates.coverDesignJson = extractedCoverDesign
         ? JSON.stringify(extractedCoverDesign)
         : (updates.cover_design ? JSON.stringify(updates.cover_design) : null)
@@ -183,6 +256,7 @@ app.put('/:id', async (c) => {
       episodeTitle: epBefore?.title,
       episodeNumber: epBefore?.episodeNumber,
       fallbackPrompt: epBefore?.coverPrompt || undefined,
+      requireExplicitMainTitle: historyFactoryEpisode,
     })
     if (extractedCoverDesign) {
       drizzleUpdates.coverDesignJson = JSON.stringify(extractedCoverDesign)
@@ -215,10 +289,16 @@ app.put('/:id', async (c) => {
   }
 
   // Changing the narration voice or speed invalidates previously generated narration audio and composed videos.
-  if ('narration_voice_id' in updates || 'narration_speed' in updates) {
+  if ('narration_voice_id' in updates || narrationSpeedChanged) {
     await db.update(schema.storyboards)
       .set({ narrationAudioUrl: null, composedVideoUrl: null })
       .where(eq(schema.storyboards.episodeId, id))
+  }
+
+  if (narrationSpeedChanged) {
+    await db.update(schema.episodes)
+      .set({ preTtsAudioUrl: null, preTtsTitlesJson: null, videoUrl: null, updatedAt: now() })
+      .where(eq(schema.episodes.id, id))
   }
 
   // Changing subtitle settings invalidates previously composed videos so the new style is applied on next compose.
@@ -256,13 +336,24 @@ app.put('/:id', async (c) => {
   return success(c, {
     auto_started: autoStarted,
     initial_task_id: initialTaskId,
-    cover_design_saved: !!extractedCoverDesign,
-    cover_design: extractedCoverDesign,
+    cover_design_saved: !!extractedCoverDesign || !!publishingPackage,
+    cover_design: extractedCoverDesign || publishingPackage?.cover_design || null,
+    publishing_package_saved: !!publishingPackage,
     pacing_regenerated: !!pacingTask,
     pacing_task_ids: pacingTask
       ? { breaker: pacingTask.breaker.id, splitter: pacingTask.splitter?.id ?? null, narrator: pacingTask.narrator?.id ?? null }
       : null,
+    narration_speed: narrationSpeedChanged ? drizzleUpdates.narrationSpeed : epBefore?.narrationSpeed ?? null,
+    tts_invalidated: Boolean(narrationSpeedChanged),
   })
+})
+
+// GET /episodes/:id — single episode record (pipeline runners use this for delivery readback)
+app.get('/:id', async (c) => {
+  const id = Number(c.req.param('id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, id)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+  return success(c, toSnakeCase(ep))
 })
 
 // GET /episodes/:id/characters — characters linked to this episode
@@ -317,6 +408,18 @@ app.get('/:episode_id/storyboards', async (c) => {
       .filter(ch => (charIdsByStoryboard.get(row.id) || []).includes(ch.id))
       .map(ch => toSnakeCase(ch)),
   })))
+})
+
+// GET /episodes/:id/narrative-hierarchy — v8 叙事层级树（Sequence→Event→Beat→Panel/Shot）
+app.get('/:episode_id/narrative-hierarchy', async (c) => {
+  const episodeId = Number(c.req.param('episode_id'))
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+  const kind = c.req.query('kind') || 'full'
+  // 如果已有 storyboards 但还没有 narrative plan，自动从 storyboards 同步一份轻量层级，
+  // 这样 UI 在图片生成前就能看到 Sequence→Event→Beat→Panel 结构。
+  ensureNarrativePlanFromStoryboards(episodeId, kind)
+  return success(c, getNarrativeHierarchyForEpisode(episodeId, kind))
 })
 
 // GET /episodes/:id/pipeline-status — 流水线进度
@@ -518,7 +621,8 @@ app.post('/:id/generate-narration-audio', async (c) => {
   const sbs = db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId)).all()
 
-  const speed = ep.narrationSpeed ?? 1.0
+  const [drama] = db.select({ genre: schema.dramas.genre }).from(schema.dramas).where(eq(schema.dramas.id, ep.dramaId)).all()
+  const speed = ep.narrationSpeed ?? defaultNarrationSpeedForGenre(drama?.genre)
 
   function narrationTTSHash(sb: typeof sbs[number]): string {
     const { voiceId, audioConfigId } = resolveNarratorVoice(episodeId)
@@ -837,9 +941,27 @@ app.post('/:id/generate-covers', async (c) => {
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c, 'Episode not found')
 
-  const coverDesign = typeof body?.cover_design === 'object' && body.cover_design !== null
+  const requestedCoverDesign = typeof body?.cover_design === 'object' && body.cover_design !== null
     ? body.cover_design as Record<string, unknown>
     : undefined
+  const historyFactoryEpisode = isHistoryFactoryEpisode(ep)
+  let coverDesign: any = requestedCoverDesign
+
+  if (historyFactoryEpisode) {
+    if (!requestedCoverDesign) {
+      return badRequest(c, '历史工厂 episode 的封面必须由用户提供 cover_design.main_title')
+    }
+    coverDesign = extractCoverDesign(requestedCoverDesign, {
+      episodeTitle: ep.title,
+      episodeNumber: ep.episodeNumber,
+      fallbackPrompt: typeof body?.prompt === 'string' ? body.prompt : ep.coverPrompt || undefined,
+      requireExplicitMainTitle: true,
+    }) || undefined
+    if (!coverDesign) {
+      return badRequest(c, '历史工厂 episode 的封面必须由用户提供非空 cover_design.main_title')
+    }
+    coverDesign = { ...coverDesign, user_provided_title: true }
+  }
 
   if (coverDesign) {
     db.update(schema.episodes)
@@ -897,6 +1019,9 @@ app.post('/:id/enhance-cover-prompt', async (c) => {
   const body = await c.req.json().catch(() => ({} as Record<string, unknown>))
   const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   if (!ep) return notFound(c, 'Episode not found')
+  if (isHistoryFactoryEpisode(ep)) {
+    return badRequest(c, '历史工厂封面禁止使用 AI 生成标题；请直接提交用户指定的 cover_design.main_title')
+  }
 
   const roughPrompt = typeof body?.prompt === 'string' ? body.prompt : ep.coverPrompt
   if (!roughPrompt?.trim()) return badRequest(c, 'prompt is required')

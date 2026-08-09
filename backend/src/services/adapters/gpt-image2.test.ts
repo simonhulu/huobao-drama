@@ -50,6 +50,14 @@ test('keeps exact dimensions for tiered models', () => {
   assert.equal(request.body.size, '1024x1024')
 })
 
+test('keeps the canonical square size for the active un-suffixed 1K alias', () => {
+  const request = adapter.buildGenerateRequest(config, {
+    ...record,
+    size: '1024x1024',
+  })
+  assert.equal(request.body.size, '1024x1024')
+})
+
 test('parses async submission and same-resource polling', () => {
   assert.deepEqual(adapter.parseGenerateResponse({
     id: 'task_img_123',

@@ -13,6 +13,7 @@ import { normalizeStoryboardImagePromptForAspectRatio } from '../../services/sto
 import { applyPreTTSTimingsToStoryboards, splitLongStoryboardsByPreTTS } from '../../services/episode-tts.js'
 import { usesOriginalTextForNarration } from '../../services/episode-mode.js'
 import { validateDirectorPlan } from '../../services/director-plan.js'
+import { ensureNarrativePlanFromStoryboards } from '../../services/narrative-hierarchy.js'
 
 const STORY_RETENTION_RULES = [
   '镜头服务于故事，不得只保留表面动作。',
@@ -212,7 +213,7 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         atmosphere: z.string(),
         image_prompt: z.string(),
         video_prompt: z.string(),
-        bgm_prompt: z.string(),
+        bgm_prompt: z.string().optional(),
         sound_effect: z.string(),
         duration: z.number(),
         energy_level: z.enum(['high', 'medium', 'low']).optional(),
@@ -296,9 +297,11 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         const { updated, fallback } = applyPreTTSTimingsToStoryboards(episodeId)
         logTaskSuccess('StoryboardTool', 'pre-tts-timing-applied', { episodeId, updated, fallback })
 
-        // 自动 12 秒拆分已临时关闭，优先保证粗分质量
-        // const { split, created, fallback: splitFallback } = await splitLongStoryboardsByPreTTS(episodeId, 12)
-        // logTaskSuccess('StoryboardTool', 'pre-tts-split-applied', { episodeId, split, created, fallback: splitFallback })
+        // 每个单图分镜必须 ≤ 8 秒（grid.episode_generate 的硬门槛，见 lessons-learned #3）。
+        // 粗分由 breaker 产出（每个镜头对应原文一句），这里按真实 TTS 时间轴把 >8s 的镜头
+        // 在标点处拆成 ≤8s 的子镜头，避免 LLM 单次 save 调用因篇幅过长被截断。
+        const { split, created, fallback: splitFallback } = await splitLongStoryboardsByPreTTS(episodeId, 8)
+        logTaskSuccess('StoryboardTool', 'pre-tts-split-applied', { episodeId, split, created, fallback: splitFallback })
 
         // 重新计算总时长
         const refreshed = db.select().from(schema.storyboards)
@@ -316,6 +319,14 @@ export function createStoryboardTools(episodeId: number, dramaId: number) {
         count: shotsToSave.length,
         totalDuration,
       })
+
+      // 分镜保存后立即同步一份轻量叙事层级，让 UI 无需等 grid 生成也能看到结构。
+      try {
+        ensureNarrativePlanFromStoryboards(episodeId, 'full')
+      } catch (syncErr: any) {
+        console.error(`[StoryboardTool] ensureNarrativePlanFromStoryboards failed for episode ${episodeId}:`, syncErr.message)
+      }
+
       return { message: `Saved ${shotsToSave.length} storyboards`, count: shotsToSave.length, total_duration: totalDuration }
     },
   })

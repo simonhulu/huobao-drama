@@ -8,6 +8,17 @@ const dbDir = mkdtempSync(join(tmpdir(), 'huobao-tts-limiter-'))
 process.env.DB_PATH = join(dbDir, 'test.db')
 
 const { TTSGenerationLimiter } = await import('./tts-generation.js')
+const {
+  DEFAULT_QWEN3_TTS_REQUEST_TIMEOUT_MS,
+  resolveQwen3TTSRequestTimeoutMs,
+} = await import('./adapters/qwen3-tts.js')
+
+test('Qwen3 TTS request timeout exceeds long-form local generation time', () => {
+  assert.equal(resolveQwen3TTSRequestTimeoutMs({}), DEFAULT_QWEN3_TTS_REQUEST_TIMEOUT_MS)
+  assert.equal(DEFAULT_QWEN3_TTS_REQUEST_TIMEOUT_MS, 3 * 60 * 60_000)
+  assert.equal(resolveQwen3TTSRequestTimeoutMs({ QWEN3_TTS_REQUEST_TIMEOUT_MS: '7200000' }), 7_200_000)
+  assert.equal(resolveQwen3TTSRequestTimeoutMs({ QWEN3_TTS_REQUEST_TIMEOUT_MS: 'invalid' }), DEFAULT_QWEN3_TTS_REQUEST_TIMEOUT_MS)
+})
 
 test('TTSGenerationLimiter caps executions per interval', async () => {
   const limiter = new TTSGenerationLimiter(10, 100, 2)

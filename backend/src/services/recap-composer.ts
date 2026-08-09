@@ -5,7 +5,7 @@ import { db, schema } from '../db/index.js'
 import { eq, and } from 'drizzle-orm'
 import { fileURLToPath } from 'url'
 import { generateTTS as defaultGenerateTTS } from './tts-generation.js'
-import { DEFAULT_NARRATION_VOICE_ID } from './narration-defaults.js'
+import { DEFAULT_NARRATION_SPEED, DEFAULT_NARRATION_VOICE_ID } from './narration-defaults.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DATA_ROOT = path.resolve(__dirname, '../../../data')
@@ -284,7 +284,7 @@ export async function composeRecapForEpisode(
     text,
     voice: voice || DEFAULT_NARRATION_VOICE_ID,
     subtitleEnable: false,
-    speed: speed ?? 1.15,
+    speed: speed ?? DEFAULT_NARRATION_SPEED,
   }))
   const runCommand = deps.runCommand ?? defaultRunCommand
 

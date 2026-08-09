@@ -96,6 +96,7 @@ export const mediaAccountAPI = {
 }
 
 export const episodeAPI = {
+  get: (id: number) => api.get<any>(`/episodes/${id}`),
   create: (data: any) => api.post('/episodes', data),
   update: (id: number, data: any) => api.put(`/episodes/${id}`, data),
   del: (id: number) => api.del(`/episodes/${id}`),
@@ -274,6 +275,7 @@ export const skillsAPI = {
 
 export const voicesAPI = {
   list: (provider?: string) => api.get(`/ai-voices${provider ? `?provider=${provider}` : ''}`),
+  preview: (data: { voice_id: string; config_id?: number | null; text?: string }) => api.post('/ai-voices/preview', data),
   sync: () => api.post('/ai-voices/sync', {}),
   design: (data: { config_id?: number; voice_name?: string; prompt: string; preview_text: string; aigc_watermark?: boolean }) =>
     api.post('/ai-voices/design', data),

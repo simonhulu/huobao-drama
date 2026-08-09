@@ -119,8 +119,10 @@ function normalizeSize(value: string, model: string): string {
   if (size === 'auto' || /^\d+:\d+$/.test(size)) return size
   const match = /^(\d+)x(\d+)$/i.exec(size)
   if (!match) return size
-  // The un-tiered web model documents aspect ratios, while tiered models accept exact dimensions.
-  if (/-[124]k$/i.test(model)) return size
+  // Tiered models accept exact dimensions. The active pcore 1K endpoint also
+  // requires the canonical square size as pixels even when the model name is
+  // the un-suffixed `gpt-image-2` alias.
+  if (/-[124]k$/i.test(model) || size === '1024x1024') return size
   const width = Number(match[1])
   const height = Number(match[2])
   const divisor = gcd(width, height)

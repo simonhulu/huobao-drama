@@ -14,6 +14,7 @@ import { fileURLToPath } from 'url'
 import { buildEgakiChildEnv } from '../services/egaki-chatgpt-image.js'
 import { maskSecret } from '../services/secret-crypto.js'
 import { buildRightCodeTaskUrl } from '../services/adapters/rightcode-image.js'
+import { ensureQwen3TTSServer, isQwen3TTSProvider } from '../services/adapters/qwen3-tts.js'
 
 const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -299,6 +300,43 @@ async function probeEgakiChatGpt() {
   }
 }
 
+async function probeQwen3TTS(baseUrl?: string) {
+  const healthUrl = `${(baseUrl || 'http://127.0.0.1:5987').replace(/\/+$/, '')}/health`
+  try {
+    await ensureQwen3TTSServer({
+      provider: 'qwen3-tts',
+      baseUrl: baseUrl || '',
+      apiKey: '',
+      model: '',
+    })
+    const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(5000) })
+    const data: any = await resp.json().catch(() => ({}))
+    return {
+      ok: resp.ok,
+      reachable: resp.ok,
+      status: resp.status,
+      status_text: resp.ok ? 'ok' : 'health check failed',
+      method: 'GET',
+      url: healthUrl,
+      message: resp.ok
+        ? (data?.loaded ? '本地 server 正常，模型已加载' : '本地 server 正常（模型将在首次生成时加载）')
+        : '本地 server 健康检查失败',
+      response_preview: JSON.stringify(data).slice(0, 200),
+    }
+  } catch (error: any) {
+    return {
+      ok: false,
+      reachable: false,
+      status: 0,
+      status_text: 'local probe failed',
+      method: 'GET',
+      url: healthUrl,
+      message: error?.message || 'Qwen3-TTS 本地 server 启动失败',
+      response_preview: '',
+    }
+  }
+}
+
 // GET /ai-configs?service_type=text
 app.get('/', async (c) => {
   const serviceType = c.req.query('service_type')
@@ -439,7 +477,7 @@ app.post('/test', async (c) => {
   const apiKey = storedConfig?.apiKey || body.api_key
   const configModel = storedConfig?.model ? JSON.parse(storedConfig.model) : body.model
   const provider = String(providerName || '').toLowerCase()
-  if (!serviceType || !providerName || (provider !== 'egaki-chatgpt' && !baseUrl)) {
+  if (!serviceType || !providerName || (provider !== 'egaki-chatgpt' && !isQwen3TTSProvider(provider) && !baseUrl)) {
     return badRequest(c, 'service_type, provider and base_url are required')
   }
 
@@ -447,6 +485,14 @@ app.post('/test', async (c) => {
     const payload = await probeEgakiChatGpt()
     if (payload.ok) logTaskSuccess('AIConfig', 'egaki-chatgpt-probe-done', { reachable: payload.reachable })
     else logTaskError('AIConfig', 'egaki-chatgpt-probe-failed', { message: payload.message })
+    return success(c, payload)
+  }
+
+  // 本地 Qwen3-TTS：probe 会按需拉起本地 server，再打 /health
+  if (serviceType === 'audio' && isQwen3TTSProvider(provider)) {
+    const payload = await probeQwen3TTS(baseUrl)
+    if (payload.ok) logTaskSuccess('AIConfig', 'qwen3-tts-probe-done', { reachable: payload.reachable })
+    else logTaskError('AIConfig', 'qwen3-tts-probe-failed', { message: payload.message })
     return success(c, payload)
   }
 

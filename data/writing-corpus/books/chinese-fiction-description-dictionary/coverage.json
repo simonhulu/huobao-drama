@@ -1,0 +1,81 @@
+{
+  "id": "chinese-fiction-description-dictionary",
+  "title": "中国小说描写辞典",
+  "author": "殷海国",
+  "format": "pdf",
+  "sha256": "2bd47a3eafb011bc96dfc566527689090d8f28c26aa7587ec1574bc675ee6b1e",
+  "bytes": 27313790,
+  "source_units": 959,
+  "processed_units": 959,
+  "anomalous_units": 11,
+  "character_count": 751571,
+  "anomalies": [
+    {
+      "page": 1,
+      "reason": "low_character_count",
+      "character_count": 0,
+      "average_confidence": 0
+    },
+    {
+      "page": 2,
+      "reason": "low_character_count",
+      "character_count": 18,
+      "average_confidence": 0.53333336
+    },
+    {
+      "page": 39,
+      "reason": "low_character_count",
+      "character_count": 13,
+      "average_confidence": 0.825
+    },
+    {
+      "page": 40,
+      "reason": "low_character_count",
+      "character_count": 0,
+      "average_confidence": 0
+    },
+    {
+      "page": 390,
+      "reason": "low_confidence",
+      "character_count": 67,
+      "average_confidence": 0.36666667
+    },
+    {
+      "page": 475,
+      "reason": "low_confidence",
+      "character_count": 824,
+      "average_confidence": 0.4466667
+    },
+    {
+      "page": 488,
+      "reason": "low_character_count",
+      "character_count": 0,
+      "average_confidence": 0
+    },
+    {
+      "page": 489,
+      "reason": "low_character_count",
+      "character_count": 9,
+      "average_confidence": 0.36666667
+    },
+    {
+      "page": 490,
+      "reason": "low_character_count",
+      "character_count": 1,
+      "average_confidence": 0.3
+    },
+    {
+      "page": 870,
+      "reason": "low_confidence",
+      "character_count": 206,
+      "average_confidence": 0.34999996
+    },
+    {
+      "page": 945,
+      "reason": "low_confidence",
+      "character_count": 669,
+      "average_confidence": 0.4428571
+    }
+  ],
+  "status": "converted_with_review_items"
+}

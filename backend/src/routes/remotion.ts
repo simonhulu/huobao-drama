@@ -31,6 +31,11 @@ import {
   splitStoryIntoEpisodes,
 } from '../services/episode-splitter.js'
 import { parseJsonRecord, serializePositioning } from '../services/media-accounts.js'
+import { getNarrativeStoryboardProgress } from '../services/narrative-storyboard-progress.js'
+import { ensureNarrativePlanFromStoryboards, getNarrativeHierarchyForEpisode, importNarrativePlan, updatePanelStatus, mapSoundPlanDocument, findPlanId, upsertSheets, applyPanelStates } from '../services/narrative-hierarchy.js'
+import { listProjectRenderArtifacts } from '../services/render-artifacts.js'
+import { createTask } from '../services/tasks/store.js'
+import { DEFAULT_NARRATION_SPEED } from '../services/narration-defaults.js'
 
 const app = new Hono()
 
@@ -184,6 +189,7 @@ app.post('/projects/intake', async (c) => {
           workflowType: 'direct_script',
           narrationMode: 'verbatim',
           dialogueMode: 'narration_only',
+          narrationSpeed: DEFAULT_NARRATION_SPEED,
           autoMode: false,
           enableAiRewrite: false,
           status: 'draft',
@@ -239,6 +245,55 @@ app.post('/projects/intake', async (c) => {
     const message = error instanceof Error ? error.message : String(error)
     return badRequest(c, message)
   }
+})
+
+app.delete('/projects/:id', async (c) => {
+  const param = c.req.param('id')
+  const numericId = Number(param)
+  const ts = now()
+
+  if (!Number.isInteger(numericId) || numericId <= 0) return badRequest(c, 'invalid id')
+
+  // 先按 source_episode_id 查找 remotion project
+  const project = db.select().from(schema.remotionProjects)
+    .where(and(
+      eq(schema.remotionProjects.sourceEpisodeId, numericId),
+      isNull(schema.remotionProjects.deletedAt),
+    )).get()
+
+  if (project) {
+    db.update(schema.remotionProjects)
+      .set({ deletedAt: ts, updatedAt: ts })
+      .where(eq(schema.remotionProjects.id, project.id))
+      .run()
+    return success(c, { id: project.id, deleted: true, sourceEpisodeId: numericId })
+  }
+
+  // 再按 project id 查找
+  const projectById = db.select().from(schema.remotionProjects)
+    .where(and(
+      eq(schema.remotionProjects.id, numericId),
+      isNull(schema.remotionProjects.deletedAt),
+    )).get()
+
+  if (projectById) {
+    db.update(schema.remotionProjects)
+      .set({ deletedAt: ts, updatedAt: ts })
+      .where(eq(schema.remotionProjects.id, projectById.id))
+      .run()
+    return success(c, { id: projectById.id, deleted: true, sourceEpisodeId: projectById.sourceEpisodeId })
+  }
+
+  // 没有 remotion project——检查 episode 是否存在，清理关联数据使其从列表消失
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, numericId)).all()
+  if (!ep) return notFound(c, 'Episode not found')
+
+  // 清理 narrative plans
+  db.delete(schema.narrativePlans).where(eq(schema.narrativePlans.episodeId, numericId)).run()
+  // 删除 storyboard
+  db.delete(schema.storyboards).where(eq(schema.storyboards.episodeId, numericId)).run()
+
+  return success(c, { id: numericId, deleted: true, episodeCleaned: true })
 })
 
 app.post('/projects/:id/stages/:stage', async (c) => {
@@ -393,6 +448,164 @@ app.get('/projects', (c) => success(c, listRemotionProjects({
 // The Web UI reads the business hierarchy first, then loads one production
 // snapshot for the selected Episode. Existing producer/query endpoints remain flat.
 app.get('/projects/tree', (c) => success(c, listRemotionProductionTree()))
+
+app.get('/projects/:id/narrative-storyboard-progress', (c) => {
+  const projectId = projectIdFromParam(c.req.param('id'))
+  if (!projectId) return badRequest(c, 'invalid project id')
+  const snapshot = getRemotionProjectSnapshot(projectId)
+  return snapshot
+    ? success(c, getNarrativeStoryboardProgress(projectId))
+    : notFound(c, 'Remotion project not found')
+})
+
+// v8 渲染产物发现：列出 project-{id}-*.mp4（deliver/pilot/proof 等分类），
+// 并把该 source episode 的 history-comic 交付（episodes.video_url）一并纳入。
+app.get('/projects/:id/render-artifacts', (c) => {
+  const projectId = projectIdFromParam(c.req.param('id'))
+  if (!projectId) return badRequest(c, 'invalid project id')
+  const snapshot = getRemotionProjectSnapshot(projectId)
+  if (!snapshot) return notFound(c, 'Remotion project not found')
+  let episodeVideoUrl: string | null = null
+  const sourceEpisodeId = snapshot.project.sourceEpisodeId
+  if (sourceEpisodeId != null) {
+    const [ep] = db.select({ videoUrl: schema.episodes.videoUrl })
+      .from(schema.episodes)
+      .where(eq(schema.episodes.id, sourceEpisodeId))
+      .all()
+    episodeVideoUrl = ep?.videoUrl ?? null
+  }
+  return success(c, { artifacts: listProjectRenderArtifacts(projectId, { episodeVideoUrl }) })
+})
+
+// v8 叙事层级：查询（episode 维度，生产中心页用）
+app.get('/projects/:id/narrative-hierarchy', (c) => {
+  const projectId = projectIdFromParam(c.req.param('id'))
+  if (!projectId) return badRequest(c, 'invalid project id')
+  const snapshot = getRemotionProjectSnapshot(projectId)
+  if (!snapshot) return notFound(c, 'Remotion project not found')
+  if (!snapshot.project.sourceEpisodeId) return badRequest(c, 'project has no source episode')
+  const kind = c.req.query('kind') || 'full'
+  // 如果已有 storyboards 但还没有 narrative plan，自动从 storyboards 同步一份轻量层级。
+  ensureNarrativePlanFromStoryboards(snapshot.project.sourceEpisodeId, kind)
+  return success(c, getNarrativeHierarchyForEpisode(snapshot.project.sourceEpisodeId, kind))
+})
+
+// v8 叙事层级：整包导入（producer 写库路径，事务内整体替换）
+app.post('/projects/:id/narrative-hierarchy/import', async (c) => {
+  const projectId = projectIdFromParam(c.req.param('id'))
+  if (!projectId) return badRequest(c, 'invalid project id')
+  const snapshot = getRemotionProjectSnapshot(projectId)
+  if (!snapshot) return notFound(c, 'Remotion project not found')
+  if (!snapshot.project.sourceEpisodeId) return badRequest(c, 'project has no source episode')
+  const body = await c.req.json().catch(() => null)
+  if (!body || !Array.isArray(body.sequences)) return badRequest(c, 'sequences required')
+  const result = importNarrativePlan({
+    ...body,
+    episodeId: snapshot.project.sourceEpisodeId,
+    remotionProjectId: projectId,
+    kind: body.kind || 'full',
+  })
+  return success(c, result)
+})
+
+// v8 叙事层级：原始文档导入（producer 直接 POST sound-plan / sheet-manifest / production-state）
+app.post('/projects/:id/narrative-hierarchy/import-document', async (c) => {
+  const projectId = projectIdFromParam(c.req.param('id'))
+  if (!projectId) return badRequest(c, 'invalid project id')
+  const snapshot = getRemotionProjectSnapshot(projectId)
+  if (!snapshot) return notFound(c, 'Remotion project not found')
+  const body = await c.req.json().catch(() => null)
+  if (!body || (!body.plan && !body.sheetManifest && !body.productionState)) {
+    return badRequest(c, 'plan, sheetManifest or productionState required')
+  }
+  if (!snapshot.project.sourceEpisodeId) return badRequest(c, 'project has no source episode')
+  const episodeId = snapshot.project.sourceEpisodeId
+  const kind = body.kind || 'full'
+
+  if (body.plan) {
+    const mapped = mapSoundPlanDocument(body)
+    const result = importNarrativePlan({
+      episodeId,
+      remotionProjectId: projectId,
+      kind,
+      ...mapped,
+    })
+    return success(c, result)
+  }
+
+  const planId = findPlanId(episodeId, kind)
+  if (!planId) return notFound(c, 'narrative plan not found; import plan first')
+
+  if (body.sheetManifest) {
+    const sheets = (body.sheetManifest.sheets ?? []).map((sh: any) => ({
+      sheetKey: sh.id,
+      sequenceKey: sh.sequenceId ?? null,
+      title: sh.sequenceTitle ?? null,
+      imageUrl: typeof sh.imageUrl === 'string' ? sh.imageUrl.replace(/^\//, '') : null,
+      panelKeys: sh.panelIds ?? [],
+    }))
+    return success(c, upsertSheets(planId, sheets))
+  }
+
+  const states = Object.entries(body.productionState.finals ?? {}).map(([panelKey, st]: [string, any]) => ({
+    panelKey,
+    genStatus: st.status ?? 'pending',
+    generationId: st.generationId ?? null,
+    taskId: st.taskId ?? null,
+    prompt: st.prompt ?? null,
+    finalPath: typeof st.localPath === 'string' ? st.localPath.replace(/^\//, '') : null,
+    referenceMode: st.referenceMode ?? null,
+    error: st.error ?? null,
+  }))
+  return success(c, applyPanelStates(planId, states))
+})
+
+// v8 叙事层级：单 panel 生产状态汇报
+app.put('/projects/:id/narrative-panels/:panelKey', async (c) => {
+  const projectId = projectIdFromParam(c.req.param('id'))
+  if (!projectId) return badRequest(c, 'invalid project id')
+  const snapshot = getRemotionProjectSnapshot(projectId)
+  if (!snapshot) return notFound(c, 'Remotion project not found')
+  const body = await c.req.json().catch(() => null)
+  if (!body?.genStatus) return badRequest(c, 'genStatus required')
+  if (!snapshot.project.sourceEpisodeId) return badRequest(c, 'project has no source episode')
+  const result = updatePanelStatus({
+    episodeId: snapshot.project.sourceEpisodeId,
+    kind: body.kind,
+    panelKey: c.req.param('panelKey'),
+    genStatus: body.genStatus,
+    generationId: body.generationId ?? null,
+    taskId: body.taskId ?? null,
+    prompt: body.prompt ?? null,
+    finalPath: body.finalPath ?? null,
+    referenceMode: body.referenceMode ?? null,
+    error: body.error ?? null,
+  })
+  return result.updated ? success(c, result) : notFound(c, 'panel not found')
+})
+
+app.post('/projects/:id/narrative-storyboard-progress/monitor', (c) => {
+  const projectId = projectIdFromParam(c.req.param('id'))
+  if (!projectId) return badRequest(c, 'invalid project id')
+  const snapshot = getRemotionProjectSnapshot(projectId)
+  if (!snapshot) return notFound(c, 'Remotion project not found')
+  const progress = getNarrativeStoryboardProgress(projectId)
+  if (!progress.available) return badRequest(c, `Project ${projectId} has no narrative storyboard production plan`)
+
+  const task = createTask({
+    type: 'remotion.narrative_storyboard.monitor',
+    dramaId: snapshot.project.sourceDramaId,
+    episodeId: snapshot.project.sourceEpisodeId,
+    scopeType: 'remotion_project',
+    scopeId: projectId,
+    idempotencyKey: `remotion:narrative-storyboard:${projectId}:full-v2`,
+    payload: { project_id: projectId, production_panels: progress.productionPanels },
+    provider: progress.provider,
+    maxAttempts: 1,
+    priority: 20,
+  })
+  return created(c, task)
+})
 
 app.get('/projects/:id', (c) => {
   const projectId = projectIdFromParam(c.req.param('id'))

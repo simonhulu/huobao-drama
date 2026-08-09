@@ -100,6 +100,65 @@ test('Remotion refuses an account override that differs from the content project
   )
 })
 
+test('Remotion refuses direct-script projects without a frozen pre-TTS timeline', () => {
+  const ts = timestamp()
+  const dramaId = Number(db.insert(schema.dramas).values({
+    mediaAccountId: testAccountId,
+    title: '时间轴门禁测试',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const episodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 1,
+    title: '缺少 pre-TTS',
+    content: '先生成语音，再依据时间戳拆镜。',
+    workflowType: 'direct_script',
+    narrationMode: 'verbatim',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  assert.throws(
+    () => createRemotionProjectFromEpisode(episodeId),
+    /requires pre-TTS audio and MiniMax titles before Remotion project creation/,
+  )
+})
+
+test('Remotion refuses direct-script storyboards that repeat or omit pre-TTS narration', () => {
+  const ts = timestamp()
+  const dramaId = Number(db.insert(schema.dramas).values({
+    mediaAccountId: testAccountId,
+    title: '口播覆盖门禁测试',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const episodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 1,
+    title: '重复口播',
+    content: '卫青受辱。犯人看相。',
+    workflowType: 'direct_script',
+    narrationMode: 'verbatim',
+    preTtsAudioUrl: 'static/audio/master.mp3',
+    preTtsTitlesJson: JSON.stringify([
+      { text: '卫青受辱。', text_begin: 0, text_end: 5, time_begin: 0, time_end: 1000 },
+      { text: '犯人看相。', text_begin: 5, text_end: 10, time_begin: 1000, time_end: 2000 },
+    ]),
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  db.insert(schema.storyboards).values([
+    { episodeId, storyboardNumber: 1, description: '卫青受辱。', duration: 1, createdAt: ts, updatedAt: ts },
+    { episodeId, storyboardNumber: 2, description: '卫青受辱。', duration: 1, createdAt: ts, updatedAt: ts },
+  ]).run()
+
+  assert.throws(
+    () => createRemotionProjectFromEpisode(episodeId),
+    /storyboard narration does not exactly cover.*missing, repeated, or out of order/,
+  )
+})
+
 test('Remotion shot writes enforce the default and hard duration limits', () => {
   const project = createRemotionProjectFromScript('镜头节奏校验。', {
     title: '镜头节奏校验',
@@ -162,6 +221,51 @@ test('Remotion resolves staged storyboards before frozen source storyboards', ()
     () => resolveRemotionStoryboards([], []),
     /requires semantic source storyboards; run storyboard_breaker first/,
   )
+})
+
+test('Remotion project planning carries the frozen project style into asset prompts', () => {
+  const ts = timestamp()
+  const dramaId = Number(db.insert(schema.dramas).values({
+    mediaAccountId: testAccountId,
+    title: '风格契约桥接测试',
+    projectPositioningJson: JSON.stringify({
+      style_id: 'cold_ink_spatial',
+      style_name: '冷墨史诗·三维空间二维绘',
+    }),
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const episodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 1,
+    title: '风格契约集',
+    content: '猎场发生了一次决定性事件。',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  db.insert(schema.storyboards).values({
+    episodeId,
+    storyboardNumber: 1,
+    title: '猎场事件',
+    location: '甘泉宫猎场',
+    time: '公元前118年，白天',
+    action: '霍去病在马上拉弓，李敢坠马',
+    narration: '猎场发生了决定性的一箭。',
+    duration: 5,
+    createdAt: ts,
+    updatedAt: ts,
+  }).run()
+
+  const project = createRemotionProjectFromEpisode(episodeId)
+  if (!project) throw new Error('project creation failed')
+  const result = planRemotionProject(project.project.id)
+  const asset = result.plan.assets.find((item) => item.prompt)
+  assert.ok(asset)
+  assert.match((asset?.prompt as any).text, /cold_ink_spatial/)
+  assert.equal((asset?.metadata as any).visualStyleId, 'cold_ink_spatial')
+  const persisted = result.assets.find((item) => item.assetKey === asset?.assetKey)
+  assert.ok(persisted)
+  assert.match((persisted?.prompt as any).text, /cold_ink_spatial/)
 })
 
 test('Remotion project imports a source snapshot without mutating legacy storyboard media', () => {

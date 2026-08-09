@@ -50,15 +50,29 @@ test('styleToPromptPhrase maps new historical and cinematic styles', () => {
   assert.match(styleToPromptPhrase('institutional_tableau'), /制度剧场/)
 })
 
+test('styleToPromptPhrase maps Dharma emotional presets and recommends ink for Dharma genre', () => {
+  assert.match(styleToPromptPhrase('dharma-emotional-ink-v1'), /new Chinese ink-wash/)
+  assert.match(styleToPromptPhrase('dharma-surreal-dream-v1'), /poetic surreal dreamscape/)
+  assert.match(styleToPromptPhrase('dharma-minimal-light-v1'), /one precise beam of natural light/)
+  assert.equal(recommendedStyleForGenre('dharma'), 'dharma-emotional-ink-v1')
+})
+
+test('styleToPromptPhrase maps epic fantasy character presets', () => {
+  assert.match(styleToPromptPhrase('dragon_rider_cover'), /golden plate armor/)
+  assert.match(styleToPromptPhrase('dragon_rider_cover'), /449:600 vertical/)
+  assert.match(styleToPromptPhrase('volcanic_forge_blacksmith'), /subterranean forge cavern/)
+  assert.match(styleToPromptPhrase('volcanic_forge_blacksmith'), /4:5 vertical/)
+})
+
 test('recommendedStyleForGenre maps themes to recommended visual styles', () => {
-  assert.equal(recommendedStyleForGenre('generic'), 'cinematic')
-  assert.equal(recommendedStyleForGenre('history'), 'historical_systems')
+  assert.equal(recommendedStyleForGenre('generic'), 'cold_ink_spatial')
+  assert.equal(recommendedStyleForGenre('history'), 'cold_ink_spatial')
   assert.equal(recommendedStyleForGenre('scifi'), 'cyberpunk')
   assert.equal(recommendedStyleForGenre('mythology'), 'eastern_fantasy')
   assert.equal(recommendedStyleForGenre('space'), 'cinematic')
   assert.equal(recommendedStyleForGenre('deepsea'), 'documentary')
   assert.equal(recommendedStyleForGenre('ancient'), 'chinese_gongbi')
   assert.equal(recommendedStyleForGenre('wasteland'), 'cinematic')
-  assert.equal(recommendedStyleForGenre(''), 'cinematic')
-  assert.equal(recommendedStyleForGenre(null), 'cinematic')
+  assert.equal(recommendedStyleForGenre(''), 'cold_ink_spatial')
+  assert.equal(recommendedStyleForGenre(null), 'cold_ink_spatial')
 })

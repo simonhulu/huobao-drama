@@ -186,7 +186,8 @@ function scoreEntryForProfile(
     score += Math.min(12, overlapScore)
   }
 
-  if (entry.source === 'minimax') score += 2
+  if (entry.source === 'sa3') score += 10
+  else if (entry.source === 'minimax') score += 2
 
   if (entry.duration >= 45) score += 3
   else if (entry.duration >= 25) score += 1

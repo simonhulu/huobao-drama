@@ -2,11 +2,12 @@
 /**
  * 阶段 1 · 数据准备
  *
- *   node run-tsx.mjs scripts/wechat/prepare.mjs --provider db --episode 436
+ *   node scripts/wechat/prepare.mjs 436
+ *   node scripts/wechat/prepare.mjs "http://localhost:3013/drama/93/episode/3"
  *   （或用 tsx / node，见 SKILL.md）
  *
  * 职责：拿到"要上传什么"，产出一个已校验的 manifest JSON，供后面的 operate 阶段消费。
- * 数据来源通过 --provider 切换（可插拔）。目前实现 db provider；
+ * 数据来源通过 --provider 切换（可插拔，默认 db）。目前实现 db provider；
  * 以后加 file / api provider 只需实现同一个 load() 契约，后续阶段完全不用改。
  *
  * 输出文件：data/publish-manifests/wechat-<episode>.json
@@ -15,8 +16,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import sharp from 'sharp'
-import Database from 'better-sqlite3'
 import { PROJECT_ROOT, COVER_TARGETS, emit, fail } from './lib.mjs'
+import { loadEpisodeFromDb } from '../publish-episode-reference.mjs'
 
 // --- 参数解析 -------------------------------------------------------------
 function parseArgs(argv) {
@@ -24,9 +25,10 @@ function parseArgs(argv) {
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--provider') args.provider = argv[++i]
-    else if (a === '--episode') args.episode = Number(argv[++i])
+    else if (a === '--episode') args.episodeReference = argv[++i]
     else if (a === '--title') args.title = argv[++i]
     else if (a === '--out') args.out = argv[++i]
+    else if (!a.startsWith('--') && !args.reference) args.reference = a
   }
   return args
 }
@@ -68,29 +70,13 @@ async function ensureAspectRatio(sourcePath, ratio) {
 
 const providers = {
   async db(args) {
-    if (!args.episode) fail('db provider 需要 --episode <id>', 2)
-    const dbPath = process.env.DB_PATH || path.join(PROJECT_ROOT, 'data/huobao_drama.db')
-    const db = new Database(dbPath, { readonly: true, timeout: 30000 })
-    try {
-      const ep = db.prepare('SELECT * FROM episodes WHERE id = ?').get(args.episode)
-      if (!ep) fail(`episode ${args.episode} 不存在`, 2)
-      const title = args.title || ep.video_title || ep.title || `第${ep.episode_number}集`
-      // 作品描述 = 开头钩子 + 结尾悬念，绝不做 AI 创作
-      const description = [ep.opening_hook, ep.cliffhanger]
-        .map((s) => (s || '').trim())
-        .filter(Boolean)
-        .join('\n\n')
-      return {
-        episode_id: ep.id,
-        title,
-        description,
-        video_path: ep.video_url,
-        cover_3x4_src: ep.cover_image_3x4_url,
-        cover_4x3_src: ep.cover_image_4x3_url,
-      }
-    } finally {
-      db.close()
-    }
+    const reference = args.episodeReference || args.reference
+    if (!reference) fail('db provider 需要 episode id/URL（例如 833 或 /dharma/episode/833）', 2)
+    return loadEpisodeFromDb(reference, {
+      dbPath: process.env.DB_PATH || path.join(PROJECT_ROOT, 'data/huobao_drama.db'),
+      projectRoot: PROJECT_ROOT,
+      title: args.title,
+    })
   },
 }
 
@@ -104,9 +90,10 @@ async function main() {
 
   // 校验必填
   if (!raw.video_path) fail('缺少视频，无法发布', 2)
-  if (!raw.cover_3x4_src) fail('缺少 3:4 封面', 2)
-  if (!raw.cover_4x3_src) fail('缺少 4:3 封面', 2)
-  if (!raw.description) fail('缺少作品描述（开头钩子+结尾悬念都为空）', 2)
+  if (!raw.cover_3x4_src) fail(`缺少 3:4 封面。请先生成封面：curl -X POST http://localhost:3013/api/v1/episodes/${raw.episode_id}/generate-covers -H "Content-Type: application/json" -d '{}'`, 2)
+  if (!raw.cover_4x3_src) fail(`缺少 4:3 封面。请先生成封面：curl -X POST http://localhost:3013/api/v1/episodes/${raw.episode_id}/generate-covers -H "Content-Type: application/json" -d '{"frame_type":"4:3"}'`, 2)
+  if (!raw.opening_hook) fail('数据库缺少 opening_hook，无法生成社交平台描述', 2)
+  if (!raw.cliffhanger) fail('数据库缺少 cliffhanger，无法生成社交平台描述', 2)
 
   // 解析绝对路径 + 校验文件存在
   const videoPath = toAbsPath(raw.video_path)
@@ -126,6 +113,8 @@ async function main() {
     episode_id: raw.episode_id,
     session: `wechat-${raw.episode_id}`,
     title: raw.title,
+    opening_hook: raw.opening_hook,
+    cliffhanger: raw.cliffhanger,
     description: raw.description,
     video_path: videoPath,
     cover_3x4_path: cover3x4Path,
@@ -141,4 +130,4 @@ async function main() {
   emit({ ok: true, manifest_path: outPath, session: manifest.session, title: manifest.title, description_len: manifest.description.length })
 }
 
-main().catch((err) => fail(err.message, 1))
+main().catch((err) => fail(err.message, err.exitCode || 1))

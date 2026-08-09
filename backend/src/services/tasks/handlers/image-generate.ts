@@ -7,6 +7,7 @@ import { db, schema } from '../../../db/index.js'
 import { eq } from 'drizzle-orm'
 import { classifyImageError } from '../../../utils/error-taxonomy.js'
 import { listTaskEvents } from '../store.js'
+import { updatePanelStatusFromImageGeneration } from '../../narrative-hierarchy.js'
 import type { TaskContext, TaskHandler } from '../types.js'
 
 interface ImageGeneratePayload {
@@ -39,6 +40,14 @@ export function createImageGenerateHandler(deps: ImageGenerateDeps = {}): TaskHa
       ctx.progress('Starting image generation', 0, 3)
       ctx.event('image.generation', { generationId })
       let result
+      function syncPanelStatus() {
+        try {
+          updatePanelStatusFromImageGeneration(generationId)
+        } catch (panelErr: any) {
+          console.error(`[image-generate] sync panel status failed for generation ${generationId}:`, panelErr.message)
+        }
+      }
+
       try {
         result = await execute(generationId, { configId, taskContext: ctx })
       } catch (err: any) {
@@ -48,6 +57,7 @@ export function createImageGenerateHandler(deps: ImageGenerateDeps = {}): TaskHa
           .some(event => event.eventType === 'image.prompt_repaired')
 
         if (classification.code !== 'content_policy_violation' || alreadyRepaired) {
+          syncPanelStatus()
           throw error
         }
 
@@ -64,6 +74,7 @@ export function createImageGenerateHandler(deps: ImageGenerateDeps = {}): TaskHa
             generationId,
             error: repairErr instanceof Error ? repairErr.message : String(repairErr),
           })
+          syncPanelStatus()
           throw error
         }
 
@@ -72,6 +83,14 @@ export function createImageGenerateHandler(deps: ImageGenerateDeps = {}): TaskHa
       }
       ctx.progress('Image generation completed', 3, 3)
       ctx.event('image.completed', result)
+
+
+      // 将单张图片的生产结果同步回 narrative hierarchy，使 UI 能逐张刷新。
+      try {
+        updatePanelStatusFromImageGeneration(result.image_generation_id)
+      } catch (panelErr: any) {
+        console.error(`[image-generate] sync panel status failed for generation ${result.image_generation_id}:`, panelErr.message)
+      }
 
       // 自动流水线：单张图片完成后，尝试为本集所有已就绪分镜调度合成
       scheduleComposeIfStoryboardReady(result.image_generation_id)

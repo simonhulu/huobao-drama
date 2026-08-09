@@ -29,7 +29,7 @@ export interface MusicLibraryEntry {
   intensity?: 'low' | 'medium' | 'high'
   tags?: string[]
   episodeId?: number
-  source: 'minimax' | 'local' | 'freepack' | 'unknown'
+  source: 'minimax' | 'local' | 'freepack' | 'unknown' | 'sa3'
   createdAt: string
 }
 
@@ -106,6 +106,7 @@ function listMusicFiles(): MusicFileInfo[] {
 
 function guessSource(filename: string, existing?: MusicLibraryEntry): MusicLibraryEntry['source'] {
   if (existing?.source) return existing.source
+  if (existing?.source === 'sa3') return 'sa3'
   // UUID 文件名通常是 MiniMax 生成
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./i.test(filename)) {
     return 'minimax'
@@ -218,6 +219,7 @@ export function recordGeneratedMusic(
     episodeId?: number
     duration?: number
     tags?: string[]
+    source?: MusicLibraryEntry['source']
   },
 ): MusicLibraryEntry {
   const lib = loadMusicLibrary()
@@ -234,7 +236,7 @@ export function recordGeneratedMusic(
     intensity: metadata.intensity,
     tags: metadata.tags ?? deriveTagsFromPrompt(metadata.prompt, metadata.emotionBucket, metadata.intensity),
     episodeId: metadata.episodeId,
-    source: 'minimax',
+    source: metadata.source ?? 'minimax',
     createdAt: new Date().toISOString(),
   }
 

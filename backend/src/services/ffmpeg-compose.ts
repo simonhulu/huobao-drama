@@ -21,7 +21,7 @@ import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWar
 import { findSfxFiles, findAmbientFile, getSfxUrl } from './sfx-library.js'
 import { applyAudioProfileToStoryboard } from './audio-profile.js'
 import { normalizeTtsText } from '../utils/tts-text.js'
-import { DEFAULT_NARRATION_VOICE_ID } from './narration-defaults.js'
+import { DEFAULT_NARRATION_SPEED, DEFAULT_NARRATION_VOICE_ID } from './narration-defaults.js'
 import {
   buildStoryboardComposition,
   renderStoryboardComposition,
@@ -223,7 +223,7 @@ export async function ensureStoryboardAudio(
       logTaskProgress('ComposeTask', 'reuse-narration-tts', { storyboardId })
     } else {
       const { voiceId, audioConfigId } = resolveNarratorVoice(sb.episodeId)
-      const speed = ep?.narrationSpeed ?? 1.0
+      const speed = ep?.narrationSpeed ?? DEFAULT_NARRATION_SPEED
       logTaskProgress('ComposeTask', 'generate-narration-tts', { storyboardId, voiceId, speed, textPreview: narrationText.slice(0, 40) })
       narrationAudioUrl = await generateTTS({
         text: narrationText,

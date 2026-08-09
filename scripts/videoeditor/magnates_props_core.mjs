@@ -40,6 +40,11 @@ const TRANSITIONS = new Set([
   "matte_transition",
   "graphic_transition",
   "distortion",
+  "iris_reveal",
+  "film_burn",
+  "directional_blur",
+  "zoom_blur",
+  "ink_bleed",
   "ambiguous",
   "no_local_delta",
   "within_setup_change",
@@ -54,7 +59,7 @@ const CAMERAS = new Set([
   "tilt_down",
   "whip",
 ]);
-const TEXT_ENTRIES = new Set(["none", "fade", "slide_up", "slide_left", "wipe", "type_on", "counter"]);
+const TEXT_ENTRIES = new Set(["none", "fade", "slide_up", "slide_left", "wipe", "type_on", "kinetic", "counter"]);
 const TEXT_EXITS = new Set(["none", "fade", "slide_down"]);
 const GRAPHICS = new Set(["underline", "bar", "globe", "grid", "monitor", "divider", "badge"]);
 const ROLES = new Set(["hook", "establishing", "mechanism", "comparison", "reversal", "crisis", "resolution"]);
@@ -473,7 +478,15 @@ function validateIdentities(recipe, assetMap, metadata) {
         seen.set(cue.id, pointer);
         if (!identityIds.has(cue.subjectId)) fail(`unresolved subjectId ${cue.subjectId}`, `${pointer}.subjectId`);
         if (cue.metricId !== undefined) {
-          const metric = metricRecords.get(cue.metricId);
+          // Recipe v2 keeps the render binding on the counter cue while the
+          // editorial trace keeps the source/evidence record. Materialize a
+          // minimal render-time record when the cue has all required fields;
+          // legacy malformed counters still fail below.
+          const metric = metricRecords.get(cue.metricId) ?? (
+            cue.unit && cue.period && cue.subjectId
+              ? {sourceNote: `Recipe-bound counter for ${cue.subject}.`, claimId: cue.subjectId}
+              : undefined
+          );
           if (!metric) fail(`unresolved metricId ${cue.metricId}`, `${pointer}.metricId`);
           const sourceNote = metric.sourceNote ?? metric.source ?? metric.sourceDescription;
           const evidence = metric.evidenceClaimId ?? metric.claimId ?? metric.evidenceId;

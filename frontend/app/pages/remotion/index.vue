@@ -8,7 +8,7 @@
           <p class="page-desc">Remotion History Factory · 账号 → 项目 → Episode</p>
         </div>
       </div>
-      <button class="btn btn-ghost btn-icon" type="button" title="刷新" aria-label="刷新" :disabled="loading" @click="refresh">
+      <button class="btn btn-ghost btn-icon" type="button" title="刷新" aria-label="刷新" :disabled="loading" @click="refreshAll">
         <RefreshCw :size="16" :class="{ 'spin-once': loading }" />
       </button>
     </header>
@@ -69,6 +69,9 @@
               <span>风格目录</span>
               <span>{{ stylePilots.length }}</span>
             </div>
+            <div v-if="copiedStyleId" class="style-copy-feedback" role="status" aria-live="polite">
+              已复制风格 ID：<code>{{ copiedStyleId }}</code>
+            </div>
             <button
               v-for="(style, index) in stylePilots"
               :key="style.id"
@@ -100,12 +103,26 @@
                   <span class="screen-label">当前预览</span>
                   <strong>{{ selectedStyle.name }}</strong>
                 </div>
-                <a class="btn btn-sm btn-ghost screen-open" :href="selectedStyle.url" target="_blank" rel="noreferrer">
-                  <ExternalLink :size="13" /> 打开视频
-                </a>
+                  <a v-if="selectedStyle.url" class="btn btn-sm btn-ghost screen-open" :href="selectedStyle.url" target="_blank" rel="noreferrer">
+                  <ExternalLink :size="13" /> {{ selectedStyle.mediaType === 'image' ? '打开示意图' : '打开视频' }}
+                  </a>
               </figcaption>
               <div class="video-shell">
+                <img
+                  v-if="selectedStyle.mediaType === 'image'"
+                  :key="selectedStyle.id"
+                  class="style-video style-image"
+                  :src="selectedStyle.url"
+                  :alt="`${selectedStyle.name}示意图`"
+                />
+                <div v-else-if="selectedStyle.mediaType === 'prompt'" class="style-prompt-preview">
+                  <span class="prompt-preview-kicker">PROMPT PRESET</span>
+                  <strong>{{ selectedStyle.name }}</strong>
+                  <p>{{ selectedStyle.prompt }}</p>
+                  <span class="prompt-preview-meta">{{ selectedStyle.aspectRatio }} · {{ selectedStyle.mood }}</span>
+                </div>
                 <video
+                  v-else
                   :key="selectedStyle.id"
                   class="style-video"
                   :src="selectedStyle.url"
@@ -161,7 +178,16 @@
               @blur="pausePilotPreview"
             >
               <span class="compare-media">
-                <video :src="style.url" muted loop playsinline preload="metadata" @loadedmetadata="primePilotFrame" />
+                <img
+                  v-if="style.mediaType === 'image'"
+                  :src="style.url"
+                  :alt="`${style.name}示意图`"
+                />
+                <div v-else-if="style.mediaType === 'prompt'" class="style-prompt-thumb">
+                  <span>{{ style.aspectRatio }}</span>
+                  <strong>{{ style.name }}</strong>
+                </div>
+                <video v-else :src="style.url" muted loop playsinline preload="metadata" @loadedmetadata="primePilotFrame" />
                 <span class="compare-index">{{ pad2(index + 1) }}</span>
                 <span v-if="style.id === selectedStyleId" class="compare-check"><CheckCircle2 :size="15" /></span>
               </span>
@@ -235,6 +261,7 @@
                 <th class="col-ep">集</th>
                 <th class="col-title">标题</th>
                 <th class="col-status">状态</th>
+                <th class="col-panels">画格</th>
                 <th class="col-shots">分镜</th>
                 <th class="col-review">三审</th>
                 <th class="col-render">渲染时间</th>
@@ -254,12 +281,19 @@
                 </td>
                 <td class="col-ep">
                   <span class="ep-code">E{{ pad2(item.episode_number) }}</span>
+                  <span class="ep-id mono">#{{ item.episode_id }}</span>
                 </td>
                 <td class="col-title">
                   <span class="truncate" :title="item.title">{{ item.title }}</span>
                 </td>
                 <td class="col-status">
                   <span class="stage-pill" :class="stageOf(item).kind">{{ stageOf(item).label }}</span>
+                </td>
+                <td class="col-panels">
+                  <span v-if="item.narrative_panels_total" :class="['review-text', item.narrative_panels_completed === item.narrative_panels_total ? 'review-pass' : '']">
+                    {{ item.narrative_panels_completed }}/{{ item.narrative_panels_total }}
+                  </span>
+                  <span v-else class="review-none">—</span>
                 </td>
                 <td class="col-shots">
                   <span v-if="item.cells_ready > 0 && item.cells_ready < item.shot_count" class="mono">{{ item.cells_ready }}/{{ item.shot_count }}</span>
@@ -280,9 +314,15 @@
                     <a v-if="item.has_render && item.render_url" class="btn btn-sm btn-primary" :href="item.render_url" target="_blank">
                       <Play :size="13" /> 播放
                     </a>
+                    <NuxtLink class="btn btn-sm" :to="`/remotion/episode/${item.episode_id}`">
+                      生产中心
+                    </NuxtLink>
                     <a class="btn btn-sm btn-ghost" :href="episodeUrl(item)">
                       {{ item.has_render ? '分镜' : '去生产' }}
                     </a>
+                    <button class="btn btn-sm btn-ghost btn-danger" type="button" :disabled="deletingId === item.episode_id" @click="askDelete(item)">
+                      <Trash2 :size="13" />
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -318,46 +358,43 @@
           </div>
         </div>
       </template>
-
-      <!-- Legacy records -->
-      <details v-if="legacyItems.length" class="legacy-block">
-        <summary>
-          旧版生产记录
-          <span class="count-badge">{{ legacyItems.length }}</span>
-        </summary>
-        <div class="legacy-table-wrap">
-          <table class="legacy-table">
-            <thead>
-              <tr>
-                <th>标题</th>
-                <th>状态</th>
-                <th>更新时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="p in legacyItems" :key="p.id">
-                <td>{{ p.title }}</td>
-                <td><span class="stage-pill pending">{{ p.status }}</span></td>
-                <td class="mono">{{ fmtTime(p.updated_at) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </details>
     </template>
+
+    <!-- 删除确认弹窗 -->
+    <Teleport to="body">
+      <div v-if="deleteTarget" class="modal-overlay" @click.self="cancelDelete">
+        <div class="modal-card modal-confirm" role="dialog" aria-modal="true" aria-label="确认删除">
+          <div class="modal-icon">
+            <TriangleAlert :size="22" />
+          </div>
+          <h3>确认删除</h3>
+          <p>
+            确定要删除 <strong>{{ deleteTarget.title }}</strong>（E{{ pad2(deleteTarget.episode_number) }} · {{ deleteTarget.drama_title }}）吗？
+          </p>
+          <p class="modal-hint">此操作不可撤销。</p>
+          <div class="modal-actions">
+            <button class="btn btn-ghost" type="button" :disabled="deleting" @click="cancelDelete">取消</button>
+            <button class="btn btn-danger" type="button" :disabled="deleting" @click="doDelete">
+              {{ deleting ? '删除中…' : '确认删除' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { CheckCircle2, CircleX, ExternalLink, Eye, Film, FilterX, Layers3, LayoutGrid, LoaderCircle, Palette, Play, RefreshCw, Search, UserRound } from 'lucide-vue-next'
+import { CheckCircle2, CircleX, ExternalLink, Eye, Film, FilterX, Layers3, LayoutGrid, LoaderCircle, Palette, Play, RefreshCw, Search, Trash2, TriangleAlert, UserRound } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
-import { gridEpisodeAPI, remotionAPI } from '~/composables/useApi'
+import { dramaAPI, gridEpisodeAPI, remotionAPI } from '~/composables/useApi'
 
 interface ProductionItem {
   episode_id: number
   drama_id: number
   drama_title: string
+  drama_style: string | null
   account_id: number | null
   account_name: string | null
   episode_number: number
@@ -366,6 +403,9 @@ interface ProductionItem {
   cells_ready: number
   review_passed: number | null
   review_total: number | null
+  narrative_panels_total: number | null
+  narrative_panels_completed: number | null
+  narrative_plan_id: number | null
   has_render: boolean
   render_url: string | null
   render_at: string | null
@@ -375,7 +415,6 @@ interface ProductionItem {
 
 const items = ref<ProductionItem[]>([])
 const total = ref(0)
-const legacyItems = ref<any[]>([])
 const loading = ref(false)
 const loaded = ref(false)
 const error = ref('')
@@ -386,7 +425,8 @@ const filterAccountId = ref<number | string>('')
 const filterDramaId = ref<number | string>('')
 const filterStatus = ref('')
 const filterQuery = ref('')
-const selectedStyleId = ref('republican-shanghai')
+const selectedStyleId = ref('cold-ink-spatial')
+const copiedStyleId = ref('')
 const styleMode = ref<'preview' | 'compare'>('preview')
 const PILOT_PREVIEW_TIME = 1
 
@@ -399,6 +439,50 @@ const statusOptions = [
 ]
 const pageSizeOptions = PAGE_SIZE_OPTIONS.map((n) => ({ label: String(n), value: n }))
 const stylePilots = [
+  {
+    id: 'cold-eastern-epic',
+    name: '冷调东方史诗',
+    desc: '冷墨、火光、城关与王朝尺度。',
+    mood: '东方史诗',
+    lens: '3D空间·2D表面',
+    profile: '三维建筑空间与材质，二维墨线角色和手绘颗粒',
+    url: '/static/images/abbcc747-19d4-4354-88cc-b1c7a0a8a2a1.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'cold-ink-spatial',
+    name: '冷墨史诗·三维空间二维绘',
+    desc: '二维角色嵌入三维战场的关键帧。',
+    mood: '冷墨战争',
+    lens: '前中后景',
+    profile: '三维光影材质、二维轮廓剪影与硬边色块',
+    url: '/static/images/49a99608-8177-4ec6-a454-4fc0afb0da6d.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'dragon-rider-cover',
+    name: '赤龙骑士·史诗封面',
+    desc: '低机位巨龙前景与金甲骑士中景的尺度叙事。',
+    mood: '奇幻封面',
+    lens: '低机位',
+    profile: '红棕鳞片、金色轮廓光、尘土街景和竖幅封面构图',
+    aspectRatio: '449:600',
+    prompt: '金甲骑士骑乘红棕巨龙；暖金轮廓光、medieval stone street、红棕/金/赭石色与高细节鳞片材质。',
+    url: '/static/images/48e35261-633b-4092-a46d-115bf37a04ae.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'volcanic-forge-blacksmith',
+    name: '熔岩锻造·铁匠史诗',
+    desc: '熔钢、铁砧和熔岩瀑布共同构成的力量特写。',
+    mood: '史诗锻造',
+    lens: '低机位',
+    profile: '4:5竖幅、熔钢主光、橙烟氛围和铸铁/皮革材质',
+    aspectRatio: '4:5',
+    prompt: '伤疤铁匠举锤锻造；地下熔炉、熔岩瀑布、橙色烟雾、强对比光影与电影级金属材质。',
+    url: '/static/images/7d50d486-beb7-42ec-a3e7-f0ec896704f7.png',
+    mediaType: 'image',
+  },
   {
     id: 'republican-shanghai',
     name: '民国上海复古',
@@ -480,10 +564,134 @@ const stylePilots = [
     profile: '冷暖分离、干净肤色和预告片节奏',
     url: '/static/remotion/grid-story-ep564-pilot-60s-commercial-teal-orange.mp4',
   },
+  {
+    id: 'retro-anime-1980s',
+    name: '1980s 复古动漫',
+    desc: '粗黑描线、赛璐璐上色、黄金年代 OVA 剧场版质感。',
+    mood: '复古动漫',
+    lens: '群像演说',
+    profile: '粗黑干净线条、高饱和色彩、赛璐璐阴影、手绘 2D 动画与繁复背景细节',
+    aspectRatio: '9:16',
+    prompt: 'In a 1980s anime style. Fantasy anime show screengrab, a man stands on the edge of a boulder facing of a crowd of people, he appears to be giving a speech. the people look like a race of farmers and the land is green with mountain ranges in the background. Rendered in the classic 1980s Japanese anime style with bold, clean black linework, vibrant saturated colors, large expressive eyes, dynamic character poses, cel-shaded shading, intricate background details, and a nostalgic hand-drawn 2D animation aesthetic reminiscent of vintage theatrical and OVA anime from that golden era --chaos 10 --ar 9:16 --exp 30 --profile inqx7j9 86in93e --hd --preview --v 8.1',
+    url: '/static/images/2de65704-5e5f-4204-9714-88f21c7e149f.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'wabi-sabi-minimal',
+    name: '侘寂日式极简',
+    desc: '白墙树影、室内外流动、禅意留白。',
+    mood: '日式极简',
+    lens: '自然光',
+    profile: '大面积白墙、树影斑驳、柔和自然光与大地色调',
+    aspectRatio: '1402:1122',
+    prompt: 'Wabi-sabi Japanese minimalist interior, vast white plaster walls with intricate dappled tree shadow patterns cast by natural diffused light, indoor-outdoor flow through large glass opening, muted earth tone palette of cream, warm beige, natural wood, and soft sage green, serene zen atmosphere, architectural photography style, clean lines and generous negative space, understated elegance, tranquil contemplative mood, soft natural lighting, photorealistic, 8k, masterpiece',
+    url: '/static/images/wabi-sabi-minimal.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'dreamy-pastoral-healing',
+    name: '梦幻田园治愈',
+    desc: '金色黄昏、丁达尔光、柔焦散景的自然疗愈。',
+    mood: '田园治愈',
+    lens: '丁达尔光',
+    profile: '黄金时段体积光、暖琥珀色调、浅景深与梦幻光斑',
+    aspectRatio: '1402:1122',
+    prompt: 'Dreamy pastoral healing photography, golden hour volumetric lighting with dramatic god rays filtering through lush tree canopy, warm amber and honey color palette, floating dust motes and magical light particles in the air, ethereal and serene atmosphere, cinematic composition, shallow depth of field with soft bokeh, photorealistic yet painterly, lush natural environment, water reflections, tranquil and meditative mood, 8k, masterpiece',
+    url: '/static/images/dreamy-pastoral-healing.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'song-dynasty-aesthetic',
+    name: '宋韵新中式',
+    desc: '工笔水彩、矿物色、留白与禅意。',
+    mood: '宋韵新中式',
+    lens: '工笔画',
+    profile: '工笔与水彩融合、低饱和矿物色、宣纸质感与书法印章',
+    aspectRatio: '1024:1536',
+    prompt: 'Song Dynasty aesthetic, neo-Chinese classical illustration, gongbi painting meets soft watercolor, muted mineral color palette of cream white, soft jade green, blush pink, and ink grey, minimalist composition with generous negative space, soft diffused natural light from upper right casting long elegant shadows and dappled patterns, zen and contemplative atmosphere, subtle texture of rice paper, vertical Chinese calligraphy and small red seal stamps as decorative elements, ultra-detailed, 8k, masterpiece',
+    url: '/static/images/song-dynasty-aesthetic.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'london-autumn-cinematic-illustration',
+    name: '伦敦秋日电影感插画',
+    desc: '写实城市建筑与动画人物融合的黄金时刻旅行插画。',
+    mood: '秋日旅行',
+    lens: '3:4竖构图',
+    profile: '暖琥珀逆光、地标建筑、落叶动态与细致手绘背景',
+    aspectRatio: '3:4',
+    prompt: 'Anime-influenced realistic illustration, golden hour warm amber lighting, autumn cityscape with falling leaves, atmospheric landmark architecture, cinematic composition, soft lens flare, cozy seasonal mood, highly detailed hand-painted background',
+    url: '/static/images/6453114d-68f1-4e9d-9e5b-821b80480885.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'warm-children-watercolor-storybook',
+    name: '温暖手绘儿童绘本',
+    desc: '圆润角色、数字水彩和柔和笔触构成的亲情绘本风格。',
+    mood: '温暖童话',
+    lens: '关系中景',
+    profile: '大头小身比例、灰尘蓝与暖土色、可见水彩纹理',
+    aspectRatio: '1:1',
+    prompt: "Children's book illustration, textured digital watercolor, soft rounded character design with exaggerated proportions, muted earth tone palette, gentle expressive faces, visible brush stroke texture, minimal background, whimsical tender storybook atmosphere",
+    url: '/static/images/ff76f394-35b1-4b6f-ae7f-0ee10461f4ad.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'japanese-cel-animation-twilight',
+    name: '冷峻日式赛璐珞漫画',
+    desc: '强黑线、平涂色块与蓝调黄昏城市的写实动画风格。',
+    mood: '黄昏孤独',
+    lens: '侧面肖像',
+    profile: '粗黑轮廓、赛璐珞阴影、冷蓝环境与暖灯点缀',
+    aspectRatio: '1:1',
+    prompt: 'Cel-shaded anime illustration, strong black outline art, flat color blocks with selective shading, blue-grey twilight palette with warm interior light accents, Japanese urban street scene, melancholic evening atmosphere, cinematic side profile, realistic proportions with stylized features',
+    url: '/static/images/c5178f70-cce2-4933-aab9-efb25567937c.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'stylized-3d-explorer-character',
+    name: '3D皮克斯式角色渲染',
+    desc: '纯色背景、暖灯笼主光与丰富材质的3D角色设计。',
+    mood: '奇幻探索',
+    lens: '侧面全身',
+    profile: '略夸张比例、羊毛皮革材质、深青背景与暖色道具光',
+    aspectRatio: '9:16',
+    prompt: 'Stylized 3D animated character render, slightly exaggerated proportions with realistic material textures, dramatic studio lighting against a solid deep teal background, warm lantern key light, detailed wool corduroy leather and woven materials, soft shadows, cinematic toy-like character design',
+    url: '/static/images/c2e87394-6c53-4436-92a7-48ed4d726c5b.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'american-comic-graffiti-propaganda',
+    name: '美式硬核漫画涂鸦',
+    desc: '多格分镜、粗黑墨线、喷溅网点与街头海报质感。',
+    mood: '公共冲突',
+    lens: '低机位多格',
+    profile: '动态斜线、交叉排线、半色调网点和高对比红白蓝',
+    aspectRatio: '9:16',
+    prompt: 'American comic book multi-panel layout, bold black ink outlines with cross-hatching, ink splatter and halftone textures, graffiti street art influence, distressed patriotic graphic background, dynamic low-angle action composition, high contrast red white blue palette, energetic editorial poster aesthetic',
+    url: '/static/images/e91d3a2a-c298-4041-92f0-1eb9f8c2063e.png',
+    mediaType: 'image',
+  },
+  {
+    id: 'y2k-film-bedroom-snapshot',
+    name: 'Y2K卧室胶片快照',
+    desc: 'CRT、钨丝台灯与胶片噪点组成的千禧年深夜私密空间。',
+    mood: '深夜怀旧',
+    lens: '近距离抓拍',
+    profile: '暖钨丝与屏幕冷光混合、生活杂物、35mm颗粒和轻微运动模糊',
+    aspectRatio: '2:3',
+    prompt: 'Y2K early 2000s bedroom scene, shot on 35mm film or early digital camera, warm tungsten lighting mixed with CRT screen glow, nostalgic intimate atmosphere, film grain and soft focus, cozy cluttered personal space, candid pose, lo-fi aesthetic, muted warm palette',
+    url: '/static/images/49f17891-9ecd-4dd6-9f5e-72ac2c960e26.png',
+    mediaType: 'image',
+  },
 ]
 
 const allItems = computed(() => items.value)
 const selectedStyle = computed(() => stylePilots.find((style) => style.id === selectedStyleId.value) ?? stylePilots[0])
+const currentDramaId = computed(() => {
+  if (filterDramaId.value) return Number(filterDramaId.value)
+  return allItems.value[0]?.drama_id ?? null
+})
 
 const accountOptions = computed(() => {
   const map = new Map<number | null, string>()
@@ -563,8 +771,30 @@ function pad2(n: number) {
   return String(n).padStart(2, '0')
 }
 
-function selectStyle(styleId: string) {
+async function selectStyle(styleId: string) {
   selectedStyleId.value = styleId
+  copiedStyleId.value = styleId
+  try {
+    await navigator.clipboard.writeText(styleId)
+  } catch {
+    const input = document.createElement('textarea')
+    input.value = styleId
+    input.setAttribute('readonly', '')
+    input.style.position = 'fixed'
+    input.style.opacity = '0'
+    document.body.appendChild(input)
+    input.select()
+    document.execCommand('copy')
+    input.remove()
+  }
+  const dramaId = currentDramaId.value
+  if (dramaId) {
+    try {
+      await dramaAPI.update(dramaId, { style: styleId })
+    } catch (err) {
+      console.error('保存项目风格失败', err)
+    }
+  }
 }
 
 function setStyleMode(mode: 'preview' | 'compare') {
@@ -640,23 +870,56 @@ function clearFilters() {
   filterQuery.value = ''
 }
 
+// ---- Delete ----
+const deleteTarget = ref<ProductionItem | null>(null)
+const deletingId = ref<number | null>(null)
+const deleting = ref(false)
+
+function askDelete(item: ProductionItem) {
+  deleteTarget.value = item
+}
+
+function cancelDelete() {
+  deleteTarget.value = null
+}
+
+async function doDelete() {
+  if (!deleteTarget.value) return
+  const id = deleteTarget.value.episode_id
+  deleting.value = true
+  deletingId.value = id
+  try {
+    await remotionAPI.del(id)
+    deleteTarget.value = null
+    deletingId.value = null
+    await refresh()
+  } catch (err: any) {
+    error.value = err?.message || '删除失败'
+    deleteTarget.value = null
+  } finally {
+    deleting.value = false
+  }
+}
+
+function refreshAll() {
+  void refresh()
+}
+
 async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    const [prod, legacy] = await Promise.all([
-      gridEpisodeAPI.productions(0, pageSize.value, {
-        account_id: filterAccountId.value ? Number(filterAccountId.value) : null,
-        drama_id: filterDramaId.value ? Number(filterDramaId.value) : null,
-        status: filterStatus.value || null,
-        q: filterQuery.value.trim() || null,
-      }),
-      remotionAPI.list().catch(() => [] as any[]),
-    ])
+    const prod = await gridEpisodeAPI.productions(0, pageSize.value, {
+      account_id: filterAccountId.value ? Number(filterAccountId.value) : null,
+      drama_id: filterDramaId.value ? Number(filterDramaId.value) : null,
+      status: filterStatus.value || null,
+      q: filterQuery.value.trim() || null,
+    })
     items.value = prod?.items ?? []
     total.value = prod?.total ?? 0
-    legacyItems.value = Array.isArray(legacy) ? legacy : []
     currentPage.value = 1
+    const style = items.value[0]?.drama_style
+    if (style) selectedStyleId.value = style
   } catch (err: any) {
     error.value = err?.message || '读取失败'
   } finally {
@@ -694,7 +957,9 @@ watch([currentPage, pageSize], () => {
   loadPage()
 })
 
-onMounted(refresh)
+onMounted(() => {
+  void refresh()
+})
 </script>
 
 <style scoped>
@@ -899,7 +1164,8 @@ onMounted(refresh)
 .style-rail {
   display: grid;
   align-content: start;
-  grid-template-rows: 24px repeat(9, minmax(32px, 1fr));
+  grid-template-rows: auto;
+  grid-auto-rows: minmax(32px, auto);
   gap: 1px;
   min-width: 0;
   min-height: 0;
@@ -920,6 +1186,19 @@ onMounted(refresh)
 .style-rail-head span:last-child {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+.style-copy-feedback {
+  margin: 0 8px 8px;
+  padding: 7px 8px;
+  border-left: 2px solid var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent-text);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.style-copy-feedback code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: inherit;
 }
 .rail-style {
   display: grid;
@@ -1051,6 +1330,40 @@ onMounted(refresh)
   object-fit: contain;
   background: var(--style-ink-soft);
 }
+.style-prompt-preview {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  padding: clamp(18px, 4vw, 48px);
+  overflow: auto;
+  background: #171512;
+  color: #f1e7d2;
+}
+.style-prompt-preview strong {
+  max-width: 18ch;
+  color: #f5c66b;
+  font-family: var(--font-display);
+  font-size: clamp(22px, 3vw, 42px);
+  line-height: 1.05;
+}
+.style-prompt-preview p {
+  max-width: 70ch;
+  margin: 0;
+  color: #d5c6ae;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.prompt-preview-kicker,
+.prompt-preview-meta {
+  color: #a89577;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
 .style-inspector {
   display: grid;
   grid-template-rows: auto auto auto;
@@ -1177,11 +1490,31 @@ onMounted(refresh)
   border-radius: 4px;
   background: var(--style-ink);
 }
-.compare-media video {
+.compare-media video,
+.compare-media img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+.style-prompt-thumb {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  height: 100%;
+  padding: 8px;
+  background: #171512;
+  color: #f1e7d2;
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+.style-prompt-thumb span {
+  color: #a89577;
+}
+.style-prompt-thumb strong {
+  color: #f5c66b;
+  font-size: 10px;
+  line-height: 1.2;
 }
 .compare-index,
 .compare-check {
@@ -1345,13 +1678,20 @@ onMounted(refresh)
 
 /* Table */
 .table-wrap {
-  overflow: hidden;
+  overflow-x: auto;
   border-radius: 8px;
 }
 .prod-table {
   width: 100%;
+  min-width: 1180px;
   border-collapse: collapse;
   font-size: 13px;
+}
+.prod-table .col-actions {
+  position: sticky;
+  right: 0;
+  background: var(--bg-0);
+  box-shadow: -8px 0 12px -8px rgba(50, 74, 114, 0.25);
 }
 .prod-table th,
 .prod-table td {
@@ -1381,6 +1721,7 @@ onMounted(refresh)
 .col-title { min-width: 180px; }
 .col-status { width: 110px; }
 .col-shots { width: 64px; text-align: center; }
+.col-panels { width: 72px; text-align: center; }
 .col-review { width: 72px; text-align: center; }
 .col-render { width: 110px; }
 .col-actions { width: 150px; text-align: right; white-space: nowrap; }
@@ -1398,6 +1739,12 @@ onMounted(refresh)
   border-radius: 5px;
   padding: 1px 6px;
   font-family: var(--font-mono);
+}
+.col-ep .ep-id {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-3);
 }
 .stage-pill {
   display: inline-flex;
@@ -1458,57 +1805,6 @@ onMounted(refresh)
 .page-buttons .btn {
   min-width: 32px;
 }
-
-/* Legacy */
-.legacy-block {
-  margin-top: 24px;
-  border-top: 1px solid var(--border);
-  padding-top: 16px;
-}
-.legacy-block summary {
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--text-3);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  list-style: none;
-  user-select: none;
-}
-.legacy-block summary::-webkit-details-marker { display: none; }
-.count-badge {
-  font-size: 11px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--bg-2);
-  color: var(--text-3);
-  font-weight: 400;
-}
-.legacy-table-wrap {
-  margin-top: 10px;
-  overflow: hidden;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-surface);
-}
-.legacy-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-.legacy-table th,
-.legacy-table td {
-  text-align: left;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--border);
-}
-.legacy-table th {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-3);
-  background: var(--bg-1);
-}
-.legacy-table tbody tr:last-child td { border-bottom: none; }
 
 @media (max-width: 1100px) {
   .style-console-body {
@@ -1625,6 +1921,7 @@ onMounted(refresh)
   .prod-table .col-account,
   .prod-table .col-drama,
   .prod-table .col-review,
+  .prod-table .col-panels,
   .prod-table .col-render { display: none; }
   .pagination-bar {
     flex-wrap: wrap;
@@ -1680,5 +1977,86 @@ onMounted(refresh)
     animation-duration: 1ms;
     animation-iteration-count: 1;
   }
+}
+
+/* Delete button */
+.btn-danger {
+  color: var(--error);
+  border-color: var(--error);
+  background: transparent;
+}
+.btn-danger:hover {
+  background: var(--error);
+  color: #fff;
+}
+
+/* Modal overlay */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  animation: modal-fade-in 150ms ease-out;
+}
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.modal-card {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.25);
+  padding: 24px;
+  max-width: 420px;
+  width: calc(100vw - 32px);
+  animation: modal-scale-in 180ms ease-out;
+}
+@keyframes modal-scale-in {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+.modal-confirm {
+  text-align: center;
+}
+.modal-icon {
+  color: var(--error);
+  margin-bottom: 12px;
+}
+.modal-confirm h3 {
+  margin: 0 0 8px;
+  font-size: 17px;
+  color: var(--text-0);
+}
+.modal-confirm p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.modal-confirm p strong {
+  color: var(--text-0);
+}
+.modal-hint {
+  font-size: 11px !important;
+  color: var(--text-3) !important;
+}
+.modal-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+.modal-actions .btn-danger {
+  background: var(--error);
+  color: #fff;
+  border-color: var(--error);
+  font-weight: 600;
+}
+.modal-actions .btn-danger:hover {
+  opacity: 0.88;
 }
 </style>

@@ -30,8 +30,8 @@ test('splitLongStoryboardsByPreTTS splits shots longer than 12 seconds at senten
     scriptContent: source,
     preTtsTitlesJson: JSON.stringify([
       { text: '第一句。', text_begin: 0, text_end: 4, time_begin: 0, time_end: 7000 },
-      { text: '第二句。', text_begin: 4, text_end: 8, time_begin: 7000, time_end: 14000 },
-      { text: '第三句。', text_begin: 8, text_end: 12, time_begin: 14000, time_end: 21000 },
+      { text: '第二句。', text_begin: 42, text_end: 46, time_begin: 7000, time_end: 14000 },
+      { text: '第三句。', text_begin: 84, text_end: 88, time_begin: 14000, time_end: 21000 },
     ]),
     createdAt: ts,
     updatedAt: ts,

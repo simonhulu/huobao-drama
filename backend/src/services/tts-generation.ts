@@ -9,8 +9,15 @@ import { fileURLToPath } from 'url'
 import { v4 as uuid } from 'uuid'
 import { getAudioConfigById } from './ai.js'
 import { getTTSAdapter } from './adapters/registry.js'
+import {
+  ensureQwen3TTSServer,
+  fetchQwen3TTS,
+  isQwen3TTSProvider,
+  resolveQwen3TTSRequestTimeoutMs,
+} from './adapters/qwen3-tts.js'
+import { resolveQwen3Instruct } from './qwen3-voice.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
-import { normalizeTtsText } from '../utils/tts-text.js'
+import { sanitizeTtsInput } from '../utils/tts-text.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -105,12 +112,19 @@ export async function generateTTSWithMetadata(params: TTSParams): Promise<TTSRes
   const config = getAudioConfigById(params.configId)
   const adapter = getTTSAdapter(config.provider)
 
-  // 统一清洗：移除零宽字符、装饰分隔线、CJK 间多余空格等
-  const cleanedText = normalizeTtsText(params.text)
+  // 统一清洗：移除 Markdown/HTML 标记、零宽字符、装饰分隔线、CJK 间多余空格等
+  const cleanedText = sanitizeTtsInput(params.text)
   if (!cleanedText) {
     throw new Error('TTS text is empty after normalization')
   }
   params = { ...params, text: cleanedText }
+
+  // 本地 Qwen3-TTS：确保 server 已启动，并把 voice id 解析成 VoiceDesign instruct
+  const qwen3 = isQwen3TTSProvider(config.provider)
+  if (qwen3) {
+    await ensureQwen3TTSServer(config)
+    params = { ...params, voice: resolveQwen3Instruct(params.voice, config) }
+  }
 
   logTaskStart('AudioTask', 'tts-generate', {
     provider: config.provider,
@@ -143,12 +157,15 @@ export async function generateTTSWithMetadata(params: TTSParams): Promise<TTSRes
     body,
   })
 
-  const resp = await ttsGenerationLimiter.run(() => fetch(url, {
+  const requestInit = {
     method,
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
-  }))
+    signal: AbortSignal.timeout(qwen3 ? resolveQwen3TTSRequestTimeoutMs() : 120_000),
+  }
+  const resp = await ttsGenerationLimiter.run(() => (
+    qwen3 ? fetchQwen3TTS(url, requestInit) : fetch(url, requestInit)
+  ))
 
   if (!resp.ok) {
     const errText = await resp.text()
@@ -215,7 +232,7 @@ function normalizeAudio(inputPath: string, outputPath: string): Promise<void> {
     ffmpeg(inputPath)
       .audioFilters('loudnorm=I=-16:TP=-1.5:LRA=11')
       .audioCodec('aac')
-      .audioBitrate('192k')
+      .audioBitrate('128k')
       .output(outputPath)
       .on('end', () => resolve())
       .on('error', (err) => reject(err))

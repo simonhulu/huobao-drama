@@ -4,6 +4,7 @@ export interface CoverDesignExtractionContext {
   episodeTitle?: string
   episodeNumber?: number
   fallbackPrompt?: string
+  requireExplicitMainTitle?: boolean
 }
 
 type JsonObject = Record<string, unknown>
@@ -112,6 +113,7 @@ function normalizeExtractedDesign(value: JsonObject, context: CoverDesignExtract
   }
 
   if (!design.main_title && !design.ai_prompt && !design.description) return null
+  if (context.requireExplicitMainTitle && !design.main_title) return null
   return normalizeCoverDesign(
     design,
     context.episodeTitle || '',
@@ -218,6 +220,7 @@ function extractMarkdownDesign(text: string, context: CoverDesignExtractionConte
   }
 
   if (!design.main_title && !design.ai_prompt && !design.description) return null
+  if (context.requireExplicitMainTitle && !design.main_title) return null
   return normalizeCoverDesign(
     design,
     context.episodeTitle || '',

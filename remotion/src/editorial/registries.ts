@@ -44,6 +44,11 @@ export const TRANSITION_RENDERERS = {
   matte_transition: definition("transition.matte_transition", "transition"),
   graphic_transition: definition("transition.graphic_transition", "transition"),
   distortion: definition("transition.distortion", "transition"),
+  iris_reveal: definition("transition.iris_reveal", "transition"),
+  film_burn: definition("transition.film_burn", "transition"),
+  directional_blur: definition("transition.directional_blur", "transition"),
+  zoom_blur: definition("transition.zoom_blur", "transition"),
+  ink_bleed: definition("transition.ink_bleed", "transition"),
   ambiguous: definition("transition.ambiguous", "transition", "constant"),
   no_local_delta: definition("transition.no_local_delta", "transition", "constant"),
   within_setup_change: definition("transition.within_setup_change", "transition", "constant"),
@@ -56,6 +61,7 @@ export const TEXT_ENTRY_RENDERERS = {
   slide_left: definition("text.entry.slide_left", "text"),
   wipe: definition("text.entry.wipe", "text"),
   type_on: definition("text.entry.type_on", "text"),
+  kinetic: definition("text.entry.kinetic", "text"),
   counter: definition("text.entry.counter", "text"),
 } satisfies Record<TextEntry, RendererDefinition>;
 

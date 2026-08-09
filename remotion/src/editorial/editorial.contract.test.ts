@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cameraTransform } from "./camera";
+import { audioAutomationGain, audioEnvelopeVolume } from "./audio";
 import { dimensionPx, positionCss, textWidth } from "./coordinates";
 import type { EditorialShot } from "./types";
 import {
@@ -15,6 +16,7 @@ import {
   outgoingTransitionStyle,
   transitionFrames,
 } from "./transitions";
+import { textCueStyle } from "./text";
 
 function shot(id: string, durationInFrames = 30, backgroundSrc = "plate-a.png"): EditorialShot {
   return {
@@ -115,17 +117,49 @@ test("transition classes map to explicit bridge primitives", () => {
   assert.equal(transitionFrames({ class: "graphic_transition", frames: 8 }), 8);
   assert.equal(transitionFrames({ class: "matte_transition", frames: 8 }), 8);
   assert.equal(transitionFrames({ class: "distortion", frames: 8 }), 8);
+  assert.equal(transitionFrames({ class: "iris_reveal", frames: 8 }), 8);
+  assert.equal(transitionFrames({ class: "film_burn", frames: 8 }), 8);
+  assert.equal(transitionFrames({ class: "directional_blur", frames: 8 }), 8);
+  assert.equal(transitionFrames({ class: "zoom_blur", frames: 8 }), 8);
+  assert.equal(transitionFrames({ class: "ink_bleed", frames: 8 }), 8);
   assert.equal(isBridgeTransition("blur_bridge"), true);
   assert.equal(isBridgeTransition("graphic_transition"), true);
   assert.equal(isBridgeTransition("distortion"), true);
+  assert.equal(isBridgeTransition("film_burn"), true);
+  assert.equal(isBridgeTransition("directional_blur"), true);
+  assert.equal(isBridgeTransition("zoom_blur"), true);
+  assert.equal(isBridgeTransition("ink_bleed"), true);
   assert.equal(isBridgeTransition("ambiguous"), false);
 
   assert.equal(incomingTransitionStyle({ class: "dissolve", frames: 8 }, 0, 8).opacity, 0);
   assert.match(String(incomingTransitionStyle({ class: "blur_bridge", frames: 8 }, 0, 8).filter), /blur/);
   assert.match(String(incomingTransitionStyle({ class: "matte_transition", frames: 8 }, 4, 8).clipPath), /polygon/);
   assert.match(String(incomingTransitionStyle({ class: "distortion", frames: 8 }, 0, 8).transform), /skewX/);
+  assert.match(String(incomingTransitionStyle({ class: "iris_reveal", frames: 8 }, 4, 8).clipPath), /circle/);
+  assert.match(String(incomingTransitionStyle({ class: "film_burn", frames: 8 }, 4, 8).filter), /sepia/);
+  assert.match(String(incomingTransitionStyle({ class: "directional_blur", frames: 8 }, 0, 8).filter), /blur/);
+  assert.match(String(incomingTransitionStyle({ class: "zoom_blur", frames: 8 }, 0, 8).transform), /scale/);
+  assert.match(String(incomingTransitionStyle({ class: "ink_bleed", frames: 8 }, 4, 8).maskImage), /radial-gradient/);
   assert.ok(Number(outgoingTransitionStyle({ class: "graphic_transition", frames: 8 }, 29, 30).opacity) < 1);
   assert.match(String(outgoingTransitionStyle({ class: "matte_transition", frames: 8 }, 29, 30).clipPath), /polygon/);
+});
+
+test("audio envelopes fade cleanly and duck under narration", () => {
+  const base = {
+    durationInFrames: 300,
+    fadeInFrames: 30,
+    fadeOutFrames: 30,
+    volume: 0.2,
+  };
+  assert.equal(audioEnvelopeVolume(0, base), 0);
+  assert.ok(audioEnvelopeVolume(15, base) > 0);
+  assert.equal(audioEnvelopeVolume(150, base), 0.2);
+  assert.equal(audioEnvelopeVolume(299, base), 0);
+  assert.ok(audioEnvelopeVolume(150, {...base, narrationDuck: 0.4, narrationActive: true}) < 0.1);
+  assert.equal(audioAutomationGain(0, [{frame: 0, gain: 0.5}, {frame: 100, gain: 1}]), 0.5);
+  assert.equal(audioAutomationGain(50, [{frame: 0, gain: 0.5}, {frame: 100, gain: 1}]), 0.75);
+  assert.equal(audioAutomationGain(150, [{frame: 0, gain: 0.5}, {frame: 100, gain: 1}]), 1);
+  assert.ok(Math.abs(audioEnvelopeVolume(50, {...base, automation: [{frame: 0, gain: 0.5}, {frame: 100, gain: 1}]}) - 0.15) < 1e-9);
 });
 
 test("camera hold is stable and pan/tilt stays inside crop headroom", () => {
@@ -154,4 +188,16 @@ test("v2 cue geometry stays normalized in logical design space", () => {
   assert.equal(positionCss(8, 8, "legacy"), "8%" );
   assert.equal(dimensionPx(360, 280, "x", "legacy"), 360);
   assert.equal(textWidth(360, "legacy"), 360);
+});
+
+test("kinetic typography variants have distinct frameless motion fingerprints", () => {
+  const base = { subject: "历史转折", text: "历史转折", startFrame: 0, endFrame: 30, entry: "kinetic" as const };
+  const impact = textCueStyle({ ...base, variant: "impact" }, 4);
+  const stamp = textCueStyle({ ...base, variant: "stamp" }, 4);
+  const whisper = textCueStyle({ ...base, variant: "whisper" }, 4);
+  assert.notEqual(impact.transform, stamp.transform);
+  assert.notEqual(stamp.transform, whisper.transform);
+  assert.equal(impact.backgroundColor, undefined);
+  assert.equal(stamp.border, undefined);
+  assert.match(String(stamp.WebkitTextStroke), /1px/);
 });

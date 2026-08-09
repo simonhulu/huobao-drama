@@ -12,7 +12,7 @@ import { smartSplitDirectScript, splitDirectScriptByMarkers, type DirectScriptSe
 import { createTask, addTaskDependency } from '../services/tasks/store.js'
 import { scheduleCoverGeneration } from '../services/tasks/handlers/cover-generate.js'
 import { normalizeTtsText } from '../utils/tts-text.js'
-import { DEFAULT_NARRATION_VOICE_ID } from '../services/narration-defaults.js'
+import { defaultNarrationSpeedForGenre, DEFAULT_DHARMA_NARRATION_SPEED, DEFAULT_NARRATION_SPEED, DEFAULT_NARRATION_VOICE_ID } from '../services/narration-defaults.js'
 import { getDefaultMediaAccountRow, getMediaAccountRow, normalizeMediaAccount, parseJsonRecord, serializePositioning } from '../services/media-accounts.js'
 
 const app = new Hono()
@@ -68,6 +68,7 @@ app.get('/', async (c) => {
   const pageSize = Number(c.req.query('page_size') || 20)
   const status = c.req.query('status')
   const keyword = c.req.query('keyword')
+  const genre = c.req.query('genre')
 
   let query = db.select().from(schema.dramas).where(isNull(schema.dramas.deletedAt))
 
@@ -76,6 +77,7 @@ app.get('/', async (c) => {
 
   if (status) filtered = filtered.filter(d => d.status === status)
   if (keyword) filtered = filtered.filter(d => d.title.includes(keyword))
+  if (genre) filtered = filtered.filter(d => d.genre === genre)
 
   const total = filtered.length
   const items = filtered.slice((page - 1) * pageSize, page * pageSize)
@@ -95,6 +97,7 @@ app.get('/', async (c) => {
       tags: drama.tags ? JSON.parse(drama.tags) : [],
       media_account: (drama.mediaAccountId ? accountsById.get(drama.mediaAccountId) : null) || null,
       project_positioning: parseJsonRecord(drama.projectPositioningJson),
+      publish_sync: parseJsonRecord(drama.publishSyncJson),
       total_episodes: eps.length,
       episodes: toSnakeCaseArray(eps),
       characters: toSnakeCaseArray(chars),
@@ -143,6 +146,7 @@ app.post('/', async (c) => {
         dramaId: result.id,
         episodeNumber: i,
         title: `第${i}集`,
+        narrationSpeed: defaultNarrationSpeedForGenre(result.genre),
         status: 'draft',
         createdAt: ts,
         updatedAt: ts,
@@ -184,6 +188,7 @@ app.post('/:id/smart-split', async (c) => {
   const style = body.style === 'ai_manga_drama' ? 'ai_manga_drama' : body.style === 'default' ? 'default' : undefined
   const replaceExisting = body.replace === true
   const coverPromptBase = body.cover_prompt?.trim() || `为短剧《${drama.title}》生成一张有冲突感或悬念感的封面照，突出本集核心情节与人物情绪`
+  const skipCoverGeneration = isTruthy(body.skip_cover_generation ?? body.skipCoverGeneration)
 
   if (!sourceText || !durationPresetId || !Number.isInteger(imageConfigId) || !Number.isInteger(videoConfigId) || !Number.isInteger(audioConfigId)) {
     return badRequest(c, 'source_text、duration_preset、image_config_id、video_config_id、audio_config_id 必填')
@@ -247,6 +252,7 @@ app.post('/:id/smart-split', async (c) => {
             renderMode,
             dialogueMode: 'narration_only',
             narrationVoiceId: DEFAULT_NARRATION_VOICE_ID,
+            narrationSpeed: DEFAULT_NARRATION_SPEED,
             workflowType: 'story_rewrite',
             status: 'draft',
             updatedAt: ts,
@@ -269,6 +275,7 @@ app.post('/:id/smart-split', async (c) => {
             renderMode,
             dialogueMode: 'narration_only',
             narrationVoiceId: DEFAULT_NARRATION_VOICE_ID,
+            narrationSpeed: DEFAULT_NARRATION_SPEED,
             workflowType: 'story_rewrite',
             status: 'draft',
             createdAt: ts,
@@ -384,6 +391,9 @@ app.post('/:id/import-script', async (c) => {
   const retentionMode: RetentionMode = cleanMode === 'retention' ? 'tight' : 'standard'
   const hookStyle = parseHookStyle(body.hook_style)
   const cleanAlreadyApplied = isTruthy(body.clean_already_applied)
+  const isHistoryFactoryImport = body.history_factory === 'remotion-history-factory'
+  const skipCoverGeneration = isHistoryFactoryImport
+    || isTruthy(body.skip_cover_generation ?? body.skipCoverGeneration)
 
   // 可选：AI 清理解说稿。留存优化模式先做保真清理，后续按分集逐段做结构编辑。
   const shouldClean = body.clean === true || body.enable_clean === true
@@ -494,17 +504,24 @@ app.post('/:id/import-script', async (c) => {
       openingHook: openingHook || null,
       cliffhanger: cliffhanger || null,
       retentionBeats: retentionBeats ? JSON.stringify(retentionBeats) : null,
-      metadata: buildEpisodeSplitMetadata(segment, directSplitResult?.plotProgressionChain ?? []),
+      metadata: isHistoryFactoryImport
+        ? JSON.stringify({
+            ...JSON.parse(buildEpisodeSplitMetadata(segment, directSplitResult?.plotProgressionChain ?? [])),
+            historyFactory: 'remotion-history-factory',
+          })
+        : buildEpisodeSplitMetadata(segment, directSplitResult?.plotProgressionChain ?? []),
       imageConfigId: body.image_config_id ?? null,
       videoConfigId: body.video_config_id ?? null,
       audioConfigId: body.audio_config_id ?? null,
       aspectRatio: body.aspect_ratio ?? '16:9',
       renderMode: body.render_mode === 'ai_video' ? 'ai_video' : 'image_story',
-      autoMode: true,
+      autoMode: false, // direct_script 走 v8 Grid Pipeline，禁止旧 auto-pipeline
       enableAiRewrite: false,
       workflowType: 'direct_script',
       narrationMode: 'verbatim',
       narrationVoiceId: body.narration_voice_id ?? DEFAULT_NARRATION_VOICE_ID,
+      narrationSpeed: body.narration_speed
+        ?? (drama.genre === 'dharma' ? DEFAULT_DHARMA_NARRATION_SPEED : DEFAULT_NARRATION_SPEED),
       createdAt: ts,
       updatedAt: ts,
     }).run()
@@ -538,14 +555,17 @@ app.post('/:id/import-script', async (c) => {
     .where(eq(schema.dramas.id, dramaId))
     .run()
 
-  // 为每一集调度封面生成任务，传入的 cover_prompt 会按单集内容微调
+  // History factory intake explicitly skips this side effect. Its cover contract
+  // is separate and requires a user-provided cover design/title.
   const coverTaskIds: number[] = []
-  for (const ep of createdEpisodes) {
-    try {
-      const coverTask = scheduleCoverGeneration(ep.id, { roughPrompt: coverPromptBase })
-      coverTaskIds.push(coverTask.id)
-    } catch (coverErr: any) {
-      console.error(`[import-script] schedule cover generation failed for episode ${ep.id}:`, coverErr.message)
+  if (!skipCoverGeneration) {
+    for (const ep of createdEpisodes) {
+      try {
+        const coverTask = scheduleCoverGeneration(ep.id, { roughPrompt: coverPromptBase })
+        coverTaskIds.push(coverTask.id)
+      } catch (coverErr: any) {
+        console.error(`[import-script] schedule cover generation failed for episode ${ep.id}:`, coverErr.message)
+      }
     }
   }
 
@@ -638,6 +658,7 @@ app.get('/:id', async (c) => {
       return account ? normalizeMediaAccount(account) : null
     })(),
     project_positioning: parseJsonRecord(drama.projectPositioningJson),
+    publish_sync: parseJsonRecord(drama.publishSyncJson),
     episodes: enrichedEpisodes,
     characters: toSnakeCaseArray(chars),
     scenes: toSnakeCaseArray(scns),
@@ -657,6 +678,24 @@ app.put('/:id', async (c) => {
   if (body.status !== undefined) updates.status = body.status
   if (body.tags !== undefined) updates.tags = JSON.stringify(body.tags)
   if (body.metadata !== undefined) updates.metadata = body.metadata
+  if (body.publish_sync !== undefined) {
+    if (typeof body.publish_sync !== 'object' || body.publish_sync === null || Array.isArray(body.publish_sync)) {
+      return badRequest(c, 'publish_sync must be an object')
+    }
+    const sync: Record<string, { done: boolean; at: string | null }> = {}
+    for (const [platform, value] of Object.entries(body.publish_sync as Record<string, unknown>)) {
+      if (!/^[a-z0-9_]{1,32}$/.test(platform)) return badRequest(c, 'publish_sync platform keys must be lowercase slugs')
+      if (typeof value === 'boolean') {
+        sync[platform] = { done: value, at: value ? now() : null }
+      } else if (value && typeof value === 'object' && typeof (value as any).done === 'boolean') {
+        const v = value as { done: boolean; at?: unknown }
+        sync[platform] = { done: v.done, at: v.done ? (typeof v.at === 'string' ? v.at : now()) : null }
+      } else {
+        return badRequest(c, 'publish_sync values must be booleans or { done, at } objects')
+      }
+    }
+    updates.publishSyncJson = JSON.stringify(sync)
+  }
   if (body.media_account_id !== undefined || body.mediaAccountId !== undefined) {
     const accountId = Number(body.media_account_id ?? body.mediaAccountId)
     const account = Number.isInteger(accountId) && accountId > 0 ? getMediaAccountRow(accountId) : null
@@ -701,6 +740,12 @@ app.put('/:id/episodes', async (c) => {
   const body = await c.req.json()
   const episodes = body.episodes || []
   const ts = now()
+  const [drama] = db.select({ genre: schema.dramas.genre })
+    .from(schema.dramas)
+    .where(eq(schema.dramas.id, dramaId))
+    .all()
+  if (!drama) return notFound(c, '剧本不存在')
+  const defaultNarrationSpeed = defaultNarrationSpeedForGenre(drama.genre)
 
   for (const ep of episodes) {
     if (ep.id) {
@@ -711,6 +756,7 @@ app.put('/:id/episodes', async (c) => {
         dramaId,
         episodeNumber: ep.episode_number || ep.episodeNumber || 1,
         title: ep.title || '未命名',
+        narrationSpeed: ep.narration_speed ?? ep.narrationSpeed ?? defaultNarrationSpeed,
         createdAt: ts,
         updatedAt: ts,
       })
@@ -753,6 +799,7 @@ app.post('/:id/episodes', async (c) => {
     autoMode: auto,
     enableAiRewrite: body.enable_ai_rewrite === undefined ? true : isTruthy(body.enable_ai_rewrite),
     narrationVoiceId: body.narration_voice_id ?? DEFAULT_NARRATION_VOICE_ID,
+    narrationSpeed: body.narration_speed ?? defaultNarrationSpeedForGenre(drama.genre),
     status: 'draft',
     createdAt: ts,
     updatedAt: ts,

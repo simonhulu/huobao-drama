@@ -130,6 +130,7 @@ export type ShowcaseShot = {
   imageUrl: string;
   fallbackImageUrl?: string | null;
   audioUrl?: string | null;
+  audioStartFrame?: number;
   narration?: string | null;
   graphic: string;
   visualMode?: string;
@@ -152,6 +153,7 @@ export type EpisodeShowcaseProps = {
   fps: number;
   shots: ShowcaseShot[];
   durationInFrames: number;
+  captions?: CaptionSegment[];
   audioUrl?: string | null;
   audioVolume?: number;
 };
@@ -384,7 +386,9 @@ function CameraPlate({ imageUrl, beat }: { imageUrl: string; beat: EditBeat }) {
   const actionMotion = /action|follow|pan|横移|跟拍/i.test(`${beat.role} ${beat.motion}`);
   const impactMotion = beat.role === "impact" || /impact|sharp|hard cut/i.test(beat.motion);
   const movementEnvelope = impactMotion
-    ? interpolate(frame, [0, 2, 8, duration], [1, 0.62, 0.12, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" })
+    ? duration <= 8
+      ? interpolate(frame, [0, duration], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" })
+      : interpolate(frame, [0, 2, 8, duration], [1, 0.62, 0.12, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" })
     : actionMotion
       ? interpolate(frame, [0, duration * 0.18, duration], [0, 1, 0.35], { easing: Easing.inOut(Easing.quad), extrapolateLeft: "clamp", extrapolateRight: "clamp" })
       : interpolate(frame, [0, duration], [0.24, 0.16], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
@@ -422,7 +426,9 @@ function CameraPlate({ imageUrl, beat }: { imageUrl: string; beat: EditBeat }) {
 
 function StockBrollClip({ item, durationInFrames }: { item: StockBroll; durationInFrames: number }) {
   const frame = useCurrentFrame();
-  const fade = interpolate(frame, [0, Math.min(12, durationInFrames / 4), Math.max(1, durationInFrames - 14), durationInFrames], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const fade = durationInFrames <= 26
+    ? 1
+    : interpolate(frame, [0, Math.min(12, durationInFrames / 4), durationInFrames - 14, durationInFrames], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   const drift = Math.sin(frame * 0.025 + stableHash(item.videoId) % 13) * 0.8;
   const video = <OffthreadVideo src={item.videoUrl} muted volume={0} playbackRate={0.96} style={{ position: "absolute", inset: "-5%", width: "110%", height: "110%", objectFit: "cover", filter: "saturate(0.78) contrast(1.06) brightness(0.86)", transform: `scale(1.03) translate3d(${drift}%, 0, 0)` }} />;
   const opacity = fade * (item.opacity ?? 0.96);
@@ -459,12 +465,31 @@ function CaptionOverlay({ shot }: { shot: ShowcaseShot }) {
   const frame = useCurrentFrame();
   const active = shot.captionSegments?.find((segment) => frame >= segment.startFrame && frame < segment.endFrame);
   if (!active?.text) return null;
-  const fade = interpolate(frame, [active.startFrame, active.startFrame + 5, active.endFrame - 8, active.endFrame], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const segmentDuration = active.endFrame - active.startFrame;
+  // Very short captions cannot fit separate enter and exit windows.
+  const fade = segmentDuration <= 13
+    ? 1
+    : interpolate(frame, [active.startFrame, active.startFrame + 5, active.endFrame - 8, active.endFrame], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   return (
     <div style={{ position: "absolute", left: 94, right: 94, bottom: 42, display: "flex", justifyContent: "center", opacity: fade, fontFamily: FONT, zIndex: 40 }}>
       <div style={{ boxSizing: "border-box", width: "min(88%, 1080px)", maxHeight: 126, overflow: "hidden", padding: "12px 24px 13px", backgroundColor: "rgba(9,10,10,0.76)", borderLeft: `3px solid ${GOLD}`, boxShadow: "0 9px 30px rgba(0,0,0,0.26)", transform: `translateY(${(1 - fade) * 8}px)` }}>
         <span style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", overflowWrap: "anywhere", wordBreak: "break-all", color: "#fff9ee", fontSize: 28, lineHeight: 1.42, letterSpacing: "0.02em", textAlign: "center", textShadow: "0 2px 8px rgba(0,0,0,0.65)" }}>
           <AnimatedText text={active.text} delay={active.startFrame} stagger={0.55} animation="rise" />
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function GlobalCaptionOverlay({ captions }: { captions: CaptionSegment[] }) {
+  const frame = useCurrentFrame();
+  const active = captions.find((segment) => frame >= segment.startFrame && frame < segment.endFrame);
+  if (!active?.text) return null;
+  return (
+    <div style={{ position: "absolute", left: 94, right: 94, bottom: 42, display: "flex", justifyContent: "center", fontFamily: FONT, zIndex: 40 }}>
+      <div style={{ boxSizing: "border-box", width: "min(88%, 1080px)", maxHeight: 126, overflow: "hidden", padding: "12px 24px 13px", backgroundColor: "rgba(9,10,10,0.76)", borderLeft: `3px solid ${GOLD}`, boxShadow: "0 9px 30px rgba(0,0,0,0.26)" }}>
+        <span style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", overflowWrap: "anywhere", wordBreak: "break-all", color: "#fff9ee", fontSize: 28, lineHeight: 1.42, letterSpacing: "0.02em", textAlign: "center", textShadow: "0 2px 8px rgba(0,0,0,0.65)" }}>
+          {active.text}
         </span>
       </div>
     </div>
@@ -481,7 +506,9 @@ function GraphicOverlay({ graphic }: { graphic: string }) {
   const frame = useCurrentFrame();
   const { durationInFrames } = useVideoConfig();
   const enter = spring({ frame, fps: 30, config: { damping: 18, mass: 0.7, stiffness: 100 }, durationInFrames: Math.min(24, durationInFrames) });
-  const fade = interpolate(frame, [0, 10, durationInFrames - 14, durationInFrames], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const fade = durationInFrames <= 24
+    ? 1
+    : interpolate(frame, [0, 10, durationInFrames - 14, durationInFrames], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   const opacity = clamp(enter * fade, 0, 1);
   const labelStyle = { fontFamily: FONT, color: PAPER, textShadow: "0 2px 10px rgba(0,0,0,0.65)" };
   const shell = (children: React.ReactNode, style: Record<string, string | number> = {}) => <div style={{ position: "absolute", opacity, ...labelStyle, ...style }}>{children}</div>;
@@ -1253,7 +1280,7 @@ function TradeFlowMapScene({ map, sceneId }: { map: MigrationMap; sceneId: strin
   );
 }
 
-function ShotScene({ shot }: { shot: ShowcaseShot }) {
+function ShotScene({ shot, allowShotAudio = true }: { shot: ShowcaseShot; allowShotAudio?: boolean }) {
   const { fps } = useVideoConfig();
   const hasCharacters = (shot.characters?.length || 0) > 0;
   const hasStock = (shot.stockBroll?.length || 0) > 0;
@@ -1291,21 +1318,23 @@ function ShotScene({ shot }: { shot: ShowcaseShot }) {
       {!isStoryFirst && !isMap && !isTradeMap && !stockPrimary && !isLayeredComposite && !hasLegacyCharacters && <GraphicOverlay graphic={shot.graphic} />}
       {!isMap && !isTradeMap && (isLayeredComposite || hasLegacyCharacters) && shot.graphic === "rulers" && <div style={{ position: "absolute", top: 116, right: 70, fontFamily: FONT, color: PAPER, fontSize: 17, opacity: 0.78, zIndex: 20 }}><AnimatedText text="政策如何落到百姓身上" animation="wipe" /></div>}
       <CaptionOverlay shot={shot} />
-      {shot.audioUrl && <Audio src={shot.audioUrl} volume={0.96} />}
+      {allowShotAudio && shot.audioUrl && <Audio src={shot.audioUrl} startFrom={shot.audioStartFrame ?? 0} volume={0.96} />}
     </AbsoluteFill>
   );
 }
 
-export const EpisodeShowcase: React.FC<EpisodeShowcaseProps> = ({ shots, audioUrl, audioVolume = 0.96 }) => {
+export const EpisodeShowcase: React.FC<EpisodeShowcaseProps> = ({ shots, captions = [], audioUrl, audioVolume = 0.96 }) => {
   let cursor = 0;
+  const allowShotAudio = !audioUrl;
   return (
     <AbsoluteFill style={{ backgroundColor: "#0b0c0d" }}>
       {audioUrl && <Audio src={audioUrl} volume={audioVolume} />}
       {shots.map((shot, index) => {
         const from = cursor;
         cursor += shot.durationInFrames;
-        return <Sequence key={`${shot.storyboardId}-${index}`} from={from} durationInFrames={shot.durationInFrames} premountFor={12}><ShotScene shot={shot} /></Sequence>;
+        return <Sequence key={`${shot.storyboardId}-${index}`} from={from} durationInFrames={shot.durationInFrames} premountFor={12}><ShotScene shot={shot} allowShotAudio={allowShotAudio} /></Sequence>;
       })}
+      {captions.length > 0 && <GlobalCaptionOverlay captions={captions} />}
     </AbsoluteFill>
   );
 };

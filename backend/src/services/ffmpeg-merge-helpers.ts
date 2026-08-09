@@ -19,7 +19,7 @@ export function addSilentAudio(inputPath: string, outputPath: string): Promise<v
         '-c:v', 'copy',
         '-c:a', 'aac',
         '-ar', '48000',
-        '-b:a', '192k',
+        '-b:a', '128k',
         '-shortest',
       ])
       .output(outputPath)

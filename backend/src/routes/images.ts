@@ -1,14 +1,42 @@
 import { Hono } from 'hono'
 import { eq, inArray } from 'drizzle-orm'
-import { db, schema } from '../db/index.js'
+import { db, runImmediateTransaction, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
-import { createImageGenerationRecord } from '../services/image-generation.js'
 import { buildStoryboardImagePrompt } from '../services/storyboard-image-prompt.js'
 import { buildConsistencySeed, buildConsistencySuffix, buildStoryboardConsistencyInput } from '../services/image-seed.js'
 import { aspectRatioToSize } from '../services/adapters/aspect-ratio-to-size.js'
-import { createTask } from '../services/tasks/store.js'
+import { createTaskInTransaction, getActiveTaskByIdempotency } from '../services/tasks/store.js'
+import { taskEventBus } from '../services/tasks/events.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { normalizeStoryboardImagePromptForAspectRatio } from '../services/storyboard-aspect-prompt.js'
+import { parseAIConfigModels } from '../services/ai.js'
+
+function resolveSelectedImageConfig(configId?: number) {
+  if (configId != null) {
+    const [explicit] = db.select().from(schema.aiServiceConfigs)
+      .where(eq(schema.aiServiceConfigs.id, configId))
+      .all()
+    if (explicit?.isActive) return explicit
+  }
+
+  return db.select().from(schema.aiServiceConfigs).all()
+    .filter((config) => config.serviceType === 'image' && config.isActive)
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0))[0]
+}
+
+function imageSizeForRequest(aspectRatio: string | null | undefined, model?: string) {
+  if (model === 'gpt-image-2-1k') {
+    if (aspectRatio === '9:16') return '720x1280'
+    if (aspectRatio === '1:1') return '960x960'
+    return '1280x720'
+  }
+  return aspectRatioToSize(aspectRatio)
+}
+
+function imageGenerationIdFromTask(task: { payload: any }): number | null {
+  const id = Number(task.payload?.image_generation_id)
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
 
 function parseReferenceImages(raw: string | null | undefined): string[] {
   if (!raw) return []
@@ -118,6 +146,7 @@ app.post('/', async (c) => {
     let storyboardEpisodeId: number | null = null
     let effectiveAspectRatio: string | null | undefined = body.aspect_ratio
     let referenceImages: string[] = body.reference_images || []
+    const requestedModel = typeof body.model === 'string' ? body.model.trim() : ''
 
     let dramaStyle: string | undefined
     if (body.drama_id) {
@@ -172,21 +201,14 @@ app.post('/', async (c) => {
     })
     logTaskPayload('ImageAPI', 'request body', body)
 
-    const generationId = createImageGenerationRecord({
-      storyboardId: body.storyboard_id,
-      dramaId: body.drama_id,
-      sceneId: body.scene_id,
-      characterId: body.character_id,
-      prompt,
-      size: aspectRatioToSize(effectiveAspectRatio),
-      referenceImages,
-      frameType: body.frame_type,
-      configId,
-      seed,
-      style: dramaStyle,
-    })
+    if (requestedModel) {
+      const selectedConfig = resolveSelectedImageConfig(configId)
+      if (selectedConfig && !parseAIConfigModels(selectedConfig.model).includes(requestedModel)) {
+        return badRequest(c, `model ${requestedModel} is not configured for the selected image service`)
+      }
+    }
 
-    const task = createTask({
+    const taskInput = {
       type: 'image.generate',
       dramaId: body.drama_id ? Number(body.drama_id) : null,
       episodeId: storyboardEpisodeId ?? null,
@@ -194,12 +216,77 @@ app.post('/', async (c) => {
       scopeId: body.storyboard_id ? Number(body.storyboard_id) : body.character_id ? Number(body.character_id) : body.scene_id ? Number(body.scene_id) : null,
       priority: body.character_id ? 10 : body.scene_id ? 5 : 0,
       idempotencyKey: `image.generate:${body.storyboard_id ? 'storyboard' : body.character_id ? 'character' : body.scene_id ? 'scene' : 'global'}:${body.storyboard_id || body.character_id || body.scene_id || body.drama_id || 'new'}:${body.frame_type || 'default'}`,
-      payload: {
-        image_generation_id: generationId,
-        config_id: configId,
-        frame_type: body.frame_type,
-      },
+    }
+
+    const selectedConfig = resolveSelectedImageConfig(configId)
+    if (!selectedConfig) throw new Error('No active image AI config')
+
+    const generationParams = {
+      storyboardId: body.storyboard_id,
+      dramaId: body.drama_id,
+      sceneId: body.scene_id,
+      characterId: body.character_id,
+      prompt,
+      model: requestedModel || undefined,
+      size: imageSizeForRequest(effectiveAspectRatio, requestedModel),
+      referenceImages,
+      frameType: body.frame_type,
+      seed,
+      style: body.style || dramaStyle,
+    }
+
+    const { generationId, task, taskCreated } = runImmediateTransaction(() => {
+      const existing = getActiveTaskByIdempotency(taskInput.type, taskInput.idempotencyKey)
+      if (existing) {
+        const existingGenerationId = imageGenerationIdFromTask(existing)
+        if (!existingGenerationId) throw new Error('Existing image task is missing image_generation_id')
+        return { generationId: existingGenerationId, task: existing, taskCreated: false }
+      }
+
+      const ts = now()
+      const insertResult = db.insert(schema.imageGenerations).values({
+        storyboardId: generationParams.storyboardId,
+        dramaId: generationParams.dramaId,
+        sceneId: generationParams.sceneId,
+        characterId: generationParams.characterId,
+        prompt: generationParams.prompt,
+        model: generationParams.model || selectedConfig.model,
+        provider: selectedConfig.provider,
+        size: generationParams.size || '1920x1080',
+        frameType: generationParams.frameType,
+        seed: generationParams.seed,
+        style: generationParams.style,
+        referenceImages: generationParams.referenceImages ? JSON.stringify(generationParams.referenceImages) : null,
+        status: 'processing',
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      const insertedGenerationId = Number(insertResult.lastInsertRowid)
+      const taskResult = createTaskInTransaction(db, {
+        ...taskInput,
+        payload: {
+          image_generation_id: insertedGenerationId,
+          config_id: configId,
+          frame_type: body.frame_type,
+        },
+      })
+      const authoritativeGenerationId = imageGenerationIdFromTask(taskResult.task)
+      if (!authoritativeGenerationId) throw new Error('Image task is missing image_generation_id')
+      if (authoritativeGenerationId !== insertedGenerationId) {
+        db.delete(schema.imageGenerations)
+          .where(eq(schema.imageGenerations.id, insertedGenerationId))
+          .run()
+      }
+      return {
+        generationId: authoritativeGenerationId,
+        task: taskResult.task,
+        taskCreated: taskResult.created,
+      }
     })
+
+    if (taskCreated) {
+      taskEventBus.notifyTaskChanged(task, 'created')
+    }
 
     logTaskSuccess('ImageAPI', 'generate', { generationId, taskId: task.id })
     return created(c, { id: generationId, task_id: task.id, status: 'pending' })

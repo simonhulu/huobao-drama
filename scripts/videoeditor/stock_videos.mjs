@@ -53,19 +53,31 @@ export function getProviderApiKey(provider, env = process.env) {
   throw new Error(`Missing API key for ${provider}. Set ${names.join(' or ')}.`)
 }
 
-function chooseBestVideoFile(files) {
+export function chooseBestVideoFile(files, { targetWidth = 1280, targetHeight = 720 } = {}) {
+  const normalizedTargetWidth = Math.max(1, Math.round(toNumber(targetWidth) || 1280))
+  const normalizedTargetHeight = Math.max(1, Math.round(toNumber(targetHeight) || 720))
   const candidates = (Array.isArray(files) ? files : Object.values(files || {}))
     .map((file) => ({
       width: Math.round(toNumber(file?.width)),
       height: Math.round(toNumber(file?.height)),
       downloadUrl: firstUrl(file?.link, file?.url, file?.download_url, file?.downloadUrl),
     }))
-    .filter((file) => file.downloadUrl && file.width >= 720 && file.height > 0 && file.width > file.height)
+    .filter((file) => (
+      file.downloadUrl
+      && file.width >= normalizedTargetWidth
+      && file.height >= normalizedTargetHeight
+      && file.width > file.height
+    ))
     .sort((a, b) => {
       const aRatioDelta = Math.abs(a.width / a.height - 16 / 9)
       const bRatioDelta = Math.abs(b.width / b.height - 16 / 9)
       if (aRatioDelta !== bRatioDelta) return aRatioDelta - bRatioDelta
-      return b.width - a.width
+      // Delivery is 1280x720. Prefer the closest adequate rendition over a
+      // 4K original, which otherwise dominates download and decode time.
+      const aScale = Math.max(a.width / normalizedTargetWidth, a.height / normalizedTargetHeight)
+      const bScale = Math.max(b.width / normalizedTargetWidth, b.height / normalizedTargetHeight)
+      if (aScale !== bScale) return aScale - bScale
+      return a.width * a.height - b.width * b.height
     })
   return candidates[0] || null
 }
@@ -91,11 +103,11 @@ function meetsDuration(item, minDuration) {
   return toNumber(item?.duration) >= toNumber(minDuration)
 }
 
-export function normalizePexelsVideos(response, { query = '', minDuration = 0 } = {}) {
+export function normalizePexelsVideos(response, { query = '', minDuration = 0, targetWidth, targetHeight } = {}) {
   return (Array.isArray(response?.videos) ? response.videos : [])
     .filter((video) => meetsDuration(video, minDuration))
     .map((video) => {
-      const selected = chooseBestVideoFile(video?.video_files)
+      const selected = chooseBestVideoFile(video?.video_files, { targetWidth, targetHeight })
       return selected && normalizeItem({
         provider: 'pexels',
         videoId: video?.id,
@@ -112,11 +124,11 @@ export function normalizePexelsVideos(response, { query = '', minDuration = 0 } 
     .filter(Boolean)
 }
 
-export function normalizePixabayVideos(response, { query = '', minDuration = 0 } = {}) {
+export function normalizePixabayVideos(response, { query = '', minDuration = 0, targetWidth, targetHeight } = {}) {
   return (Array.isArray(response?.hits) ? response.hits : [])
     .filter((video) => meetsDuration(video, minDuration))
     .map((video) => {
-      const selected = chooseBestVideoFile(video?.videos)
+      const selected = chooseBestVideoFile(video?.videos, { targetWidth, targetHeight })
       return selected && normalizeItem({
         provider: 'pixabay',
         videoId: video?.id,
@@ -133,7 +145,7 @@ export function normalizePixabayVideos(response, { query = '', minDuration = 0 }
     .filter(Boolean)
 }
 
-export function normalizeCoverrVideos(response, { query = '', minDuration = 0 } = {}) {
+export function normalizeCoverrVideos(response, { query = '', minDuration = 0, targetWidth, targetHeight } = {}) {
   return (Array.isArray(response?.hits) ? response.hits : [])
     .map((video) => {
       const duration = Math.floor(toNumber(video?.duration))
@@ -144,7 +156,7 @@ export function normalizeCoverrVideos(response, { query = '', minDuration = 0 } 
           height: video?.height || video?.metadata?.height || video?.video_height || 1080,
           url: video?.urls?.mp4_download || video?.urls?.mp4 || video?.download_url,
         },
-      ])
+      ], { targetWidth, targetHeight })
       return selected && normalizeItem({
         provider: 'coverr',
         videoId: video?.id,
@@ -170,7 +182,16 @@ async function fetchJson(url, options, fetchImpl = fetch) {
   return response.json()
 }
 
-export async function searchStockVideos({ provider, query, limit = 10, minDuration = 0, env = process.env, fetchImpl = fetch }) {
+export async function searchStockVideos({
+  provider,
+  query,
+  limit = 10,
+  minDuration = 0,
+  targetWidth = 1280,
+  targetHeight = 720,
+  env = process.env,
+  fetchImpl = fetch,
+}) {
   if (!providers.has(provider)) throw new Error(`Unsupported provider "${provider}". Use pexels, pixabay, or coverr.`)
   if (!query) throw new Error('Missing --query.')
   const apiKey = getProviderApiKey(provider, env)
@@ -182,7 +203,12 @@ export async function searchStockVideos({ provider, query, limit = 10, minDurati
     const body = await fetchJson(`https://api.pexels.com/videos/search?${params}`, {
       headers: { Authorization: apiKey },
     }, fetchImpl)
-    return normalizePexelsVideos(body, { query, minDuration: normalizedMinDuration }).slice(0, normalizedLimit)
+    return normalizePexelsVideos(body, {
+      query,
+      minDuration: normalizedMinDuration,
+      targetWidth,
+      targetHeight,
+    }).slice(0, normalizedLimit)
   }
 
   if (provider === 'pixabay') {
@@ -193,7 +219,12 @@ export async function searchStockVideos({ provider, query, limit = 10, minDurati
       key: apiKey,
     })
     const body = await fetchJson(`https://pixabay.com/api/videos/?${params}`, {}, fetchImpl)
-    return normalizePixabayVideos(body, { query, minDuration: normalizedMinDuration }).slice(0, normalizedLimit)
+    return normalizePixabayVideos(body, {
+      query,
+      minDuration: normalizedMinDuration,
+      targetWidth,
+      targetHeight,
+    }).slice(0, normalizedLimit)
   }
 
   const params = new URLSearchParams({
@@ -205,16 +236,31 @@ export async function searchStockVideos({ provider, query, limit = 10, minDurati
   const body = await fetchJson(`https://api.coverr.co/videos?${params}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   }, fetchImpl)
-  return normalizeCoverrVideos(body, { query, minDuration: normalizedMinDuration }).slice(0, normalizedLimit)
+  return normalizeCoverrVideos(body, {
+    query,
+    minDuration: normalizedMinDuration,
+    targetWidth,
+    targetHeight,
+  }).slice(0, normalizedLimit)
 }
 
-export function buildSearchManifest({ provider, query, minDuration = 0, results, now = () => new Date().toISOString() }) {
+export function buildSearchManifest({
+  provider,
+  query,
+  minDuration = 0,
+  targetWidth = 1280,
+  targetHeight = 720,
+  results,
+  now = () => new Date().toISOString(),
+}) {
   return {
     schemaVersion: 1,
     kind: 'videoeditor-stock-videos',
     provider,
     query,
     minDuration: toNumber(minDuration),
+    targetWidth: Math.round(toNumber(targetWidth) || 1280),
+    targetHeight: Math.round(toNumber(targetHeight) || 720),
     generatedAt: now(),
     results,
   }
@@ -239,14 +285,16 @@ function parseArgs(argv) {
     }
   }
   args.minDuration = args['min-duration'] ?? args.minDuration
+  args.targetWidth = args['target-width'] ?? args.targetWidth
+  args.targetHeight = args['target-height'] ?? args.targetHeight
   return args
 }
 
 function usage() {
   return [
     'Usage:',
-    '  node scripts/videoeditor/stock_videos.mjs search --provider pexels --query "clouds" [--limit 10] [--min-duration 4] [--output manifest.json]',
-    '  node scripts/videoeditor/stock_videos.mjs download --manifest manifest.json [--dest data/static/remotion/stock]',
+    '  node scripts/videoeditor/stock_videos.mjs search --provider pexels --query "clouds" [--limit 10] [--min-duration 4] [--target-width 1280] [--target-height 720] [--output manifest.json]',
+    '  node scripts/videoeditor/stock_videos.mjs download --manifest manifest.json [--dest data/static/remotion/stock] [--concurrency 4]',
   ].join('\n')
 }
 
@@ -263,18 +311,57 @@ async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, 'utf8'))
 }
 
-export async function downloadFromManifest({ manifestPath, dest = defaultStockDir, fetchImpl = fetch, now = () => new Date().toISOString() }) {
+function normalizeDownloadConcurrency(value) {
+  const numeric = Number.parseInt(value, 10)
+  return Math.max(1, Math.min(8, Number.isFinite(numeric) ? numeric : 4))
+}
+
+async function pathExists(filePath) {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function runWithConcurrency(items, concurrency, task) {
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor]
+      cursor += 1
+      await task(item)
+    }
+  })
+  await Promise.all(workers)
+}
+
+export async function downloadFromManifest({
+  manifestPath,
+  dest = defaultStockDir,
+  concurrency = 4,
+  fetchImpl = fetch,
+  now = () => new Date().toISOString(),
+}) {
   if (!manifestPath) throw new Error('Missing --manifest.')
   const manifest = await readJson(manifestPath)
   const results = Array.isArray(manifest?.results) ? manifest.results : []
   await fs.mkdir(dest, { recursive: true })
 
+  const queue = results.filter((item) => item?.downloadUrl)
+  const maxConcurrency = normalizeDownloadConcurrency(concurrency)
   let downloaded = 0
-  for (const item of results) {
-    if (!item?.downloadUrl) continue
+  let skipped = results.length - queue.length
+  await runWithConcurrency(queue, maxConcurrency, async (item) => {
     const provider = safeFilePart(item.provider || manifest.provider || 'stock')
     const videoId = safeFilePart(item.videoId || item.id)
     const localPath = path.join(dest, `${provider}-${videoId}.mp4`)
+    if (await pathExists(localPath)) {
+      item.localPath = localPath
+      skipped += 1
+      return
+    }
     const response = await fetchImpl(item.downloadUrl)
     if (!response.ok) throw new Error(`Download failed for ${provider}-${videoId}: ${response.status} ${response.statusText || ''}`)
     const bytes = Buffer.from(await response.arrayBuffer())
@@ -284,11 +371,11 @@ export async function downloadFromManifest({ manifestPath, dest = defaultStockDi
     item.sha256 = crypto.createHash('sha256').update(bytes).digest('hex')
     item.bytes = bytes.length
     downloaded += 1
-  }
+  })
 
   manifest.downloadedAt = now()
   await writeJson(manifestPath, manifest)
-  return { manifestPath, downloaded, skipped: results.length - downloaded, dest }
+  return { manifestPath, downloaded, skipped, concurrency: maxConcurrency, dest }
 }
 
 async function runCli(argv = process.argv.slice(2)) {
@@ -299,11 +386,15 @@ async function runCli(argv = process.argv.slice(2)) {
       query: args.query,
       limit: args.limit,
       minDuration: args.minDuration,
+      targetWidth: args.targetWidth,
+      targetHeight: args.targetHeight,
     })
     const manifest = buildSearchManifest({
       provider: args.provider,
       query: args.query,
       minDuration: args.minDuration,
+      targetWidth: args.targetWidth,
+      targetHeight: args.targetHeight,
       results,
     })
     const outputPath = args.output || args.manifest
@@ -320,6 +411,7 @@ async function runCli(argv = process.argv.slice(2)) {
     const result = await downloadFromManifest({
       manifestPath: args.manifest || args.output,
       dest: args.dest || defaultStockDir,
+      concurrency: args.concurrency,
     })
     console.log(JSON.stringify(result, null, 2))
     return

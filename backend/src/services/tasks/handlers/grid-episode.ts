@@ -8,10 +8,14 @@ import fs from 'fs'
 import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
 import { registerTaskHandler } from '../registry.js'
-import { runEpisodeGridPipeline } from '../../grid-narrative-pipeline.js'
+import { runEpisodeGridPipeline, designEpisodeSequenceBeats } from '../../grid-narrative-pipeline.js'
 import { areStoryboardNumbersContiguous, buildGridStoryProps } from '../../grid-story-props.js'
+import { buildGridAudioPlan, mixGridEpisodeAudio } from '../../composition/grid-audio-mix.js'
+import { ensureSa3AudioAssetsForEpisode } from '../../composition/sa3-audio-preflight.js'
 import { reviewEpisodeGridCells } from '../../grid-review.js'
 import { generateEpisodeVideos } from '../../grok-video.js'
+import { generateOpeningVideo } from '../../opening-storyboard.js'
+import { getNarrativePlanStatus } from '../../narrative-hierarchy.js'
 import { db, schema } from '../../../db/index.js'
 import { eq } from 'drizzle-orm'
 import type { TaskContext, TaskHandler } from '../types.js'
@@ -64,7 +68,7 @@ export function createGridEpisodeGenerateHandler(): TaskHandler<GridEpisodeGener
         throw new Error(`grid pipeline all failed: ${result.failed[0].error}`)
       }
       let review: Awaited<ReturnType<typeof reviewEpisodeGridCells>> | null = null
-      if (ctx.payload.review !== false) {
+      if (ctx.payload.review === true) {
         review = await reviewEpisodeGridCells(
           episodeId,
           {
@@ -152,14 +156,8 @@ function resolveBgmPath(episodeId: number): string | null {
   return fs.existsSync(abs) ? abs : null
 }
 
-/** BGM 混音：音量压到 0.15 + 人声侧链闪避 + 限幅，BGM 短于正片时循环 */
-async function mixBgmIfAvailable(episodeId: number, cleanPath: string, finalPath: string, ctx: TaskContext<any>): Promise<string | null> {
-  const bgmPath = resolveBgmPath(episodeId)
-  if (!bgmPath) {
-    fs.renameSync(cleanPath, finalPath)
-    return null
-  }
-  ctx.progress('BGM 混音', 0, 1)
+/** 旧版单轨 BGM 混音（音量 0.15 + 侧链闪避 + 限幅），作为升级混音失败时的兜底 */
+async function legacyMixBgm(bgmPath: string, cleanPath: string, finalPath: string): Promise<void> {
   const filter =
     '[1:a]volume=0.15[bgm];' +
     '[bgm][0:a]sidechaincompress=threshold=0.02:ratio=9:attack=18:release=300[duck];' +
@@ -175,7 +173,7 @@ async function mixBgmIfAvailable(episodeId: number, cleanPath: string, finalPath
     '-map', '[a]',
     '-c:v', 'copy',
     '-c:a', 'aac',
-    '-b:a', '192k',
+    '-b:a', '128k',
     finalPath,
   ]
   await new Promise<void>((resolve, reject) => {
@@ -190,8 +188,66 @@ async function mixBgmIfAvailable(episodeId: number, cleanPath: string, finalPath
       else reject(new Error(`ffmpeg mix exit ${code}: ${tail.slice(-500)}`))
     })
   })
+}
+
+interface GridAudioMixSummary {
+  bgmCues: number
+  sfxCues: number
+  ambienceCues: number
+  tracks: Array<{ path: string; emotionBucket: string; role: string }>
+}
+
+/**
+ * 集级音频混音（v2）：多幕 BGM cue + 场景 SFX cue + 侧链闪避 + 终混 loudnorm。
+ * 失败降级链：v2 混音 → 旧单轨混音 → 无混音（rename），音频问题绝不阻塞渲染出片。
+ */
+async function mixBgmIfAvailable(
+  episodeId: number,
+  cleanPath: string,
+  finalPath: string,
+  ctx: TaskContext<any>,
+  opts: { maxDurationSec?: number } = {},
+): Promise<GridAudioMixSummary | null> {
+  try {
+    // SA3 优先：先确保本集所需 BGM / ambience 都有 SA3 生成素材缓存
+    try {
+      await ensureSa3AudioAssetsForEpisode(episodeId)
+    } catch (sa3Err) {
+      ctx.event('grid.episode.sa3_preflight_failed', {
+        episode_id: episodeId,
+        error: sa3Err instanceof Error ? sa3Err.message : String(sa3Err),
+      })
+      // 预生成失败不阻塞渲染，回退到本地库兜底
+    }
+
+    const plan = buildGridAudioPlan(episodeId, { maxDurationSec: opts.maxDurationSec })
+    if (plan) {
+      ctx.progress(`音频混音（BGM ${plan.bgmCues.length} 幕 / 环境音 ${plan.ambienceCues.length} 段 / SFX ${plan.sfxCues.length} 处）`, 0, 1)
+      await mixGridEpisodeAudio(cleanPath, finalPath, plan)
+      fs.rmSync(cleanPath, { force: true })
+      return {
+        bgmCues: plan.bgmCues.length,
+        sfxCues: plan.sfxCues.length,
+        ambienceCues: plan.ambienceCues.length,
+        tracks: plan.tracks.map((t) => ({ path: t.path, emotionBucket: t.emotionBucket, role: t.role })),
+      }
+    }
+  } catch (err) {
+    ctx.event('grid.episode.audio_mix_v2_failed', {
+      episode_id: episodeId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  const bgmPath = resolveBgmPath(episodeId)
+  if (!bgmPath) {
+    fs.renameSync(cleanPath, finalPath)
+    return null
+  }
+  ctx.progress('BGM 混音（单轨兜底）', 0, 1)
+  await legacyMixBgm(bgmPath, cleanPath, finalPath)
   fs.rmSync(cleanPath, { force: true })
-  return bgmPath
+  return { bgmCues: 1, sfxCues: 0, ambienceCues: 0, tracks: [{ path: path.relative(repoRoot, bgmPath), emotionBucket: 'neutral', role: 'primary' }] }
 }
 
 export function createGridEpisodeRenderHandler(): TaskHandler<GridEpisodeRenderPayload> {
@@ -205,6 +261,17 @@ export function createGridEpisodeRenderHandler(): TaskHandler<GridEpisodeRenderP
         : undefined
       const maxDurationSec = Number(ctx.payload.max_duration_sec)
       const isPilot = Number.isFinite(maxDurationSec) && maxDurationSec > 0
+
+      // ── v8 阶段门禁：叙事设计必须先于渲染完成（与 generate 同一道闸）──
+      const planStatus = getNarrativePlanStatus(episodeId, 'full')
+      if (!planStatus.isReal) {
+        throw new Error(
+          `[v8 阶段门禁] Episode ${episodeId} 没有真实叙事层级计划（${
+            planStatus.exists ? `当前只有「${planStatus.timingSource ?? '未知'}」分镜平铺骨架` : '尚未导入'
+          }），禁止渲染。先完成叙事设计并通过 narrative-hierarchy/import 写库。`,
+        )
+      }
+
       if (onlyStoryboardIds?.length) {
         const selectedNumbers = db.select().from(schema.storyboards)
           .where(eq(schema.storyboards.episodeId, episodeId)).all()
@@ -215,11 +282,46 @@ export function createGridEpisodeRenderHandler(): TaskHandler<GridEpisodeRenderP
           throw new Error('non-contiguous storyboard render would skip narration')
         }
       }
+
+      // ── 资产预检：范围内分镜的指定视频必须在盘上；第一镜必须配置了视频 ──
+      // buildGridStoryProps 对缺文件/缺配置是静默降级的（视频退化为静态图），
+      // 这里把降级提前变成明确的失败。
+      const scoped = db.select().from(schema.storyboards)
+        .where(eq(schema.storyboards.episodeId, episodeId))
+        .orderBy(schema.storyboards.storyboardNumber).all()
+        .filter((sb) => !onlyStoryboardIds || onlyStoryboardIds.includes(sb.id))
+      const missingVideos: string[] = []
+      for (const sb of scoped) {
+        let gc: any = null
+        try { gc = sb.gridCells ? JSON.parse(sb.gridCells) : null } catch { /* ignore */ }
+        const videoSrc = gc?.video?.src ? String(gc.video.src).replace(/^\//, '') : null
+        if (videoSrc && !fs.existsSync(path.join(repoRoot, 'data', videoSrc))) {
+          missingVideos.push(`#${sb.storyboardNumber}: ${videoSrc}`)
+        }
+      }
+      if (missingVideos.length) {
+        throw new Error(`分镜视频文件缺失：${missingVideos.join('；')}。请重新运行 grid.episode_videos（force）再渲染`)
+      }
+      const firstShot = scoped[0]
+      if (firstShot?.storyboardNumber === 1) {
+        let gc: any = null
+        try { gc = firstShot.gridCells ? JSON.parse(firstShot.gridCells) : null } catch { /* ignore */ }
+        if (!gc?.video?.src) {
+          throw new Error('第一镜必须是视频（2 秒 / 5 秒留存门）：请先运行 grid.episode_videos 为第一镜解析视频资产')
+        }
+      }
+
       const built = buildGridStoryProps(episodeId, {
         onlyStoryboardIds,
         maxDurationSec: isPilot ? maxDurationSec : undefined,
       })
       if (built.shotCount === 0) throw new Error('no grid cells built; run grid.episode_generate first')
+      if (built.skippedStoryboards.length) {
+        throw new Error(
+          `有 ${built.skippedStoryboards.length} 个分镜缺生产图（#${built.skippedStoryboards.join(', #')}），` +
+          `直接渲染会丢失旁白。请先用 grid.episode_generate（onlyStoryboardIds）补齐`,
+        )
+      }
 
       const fileStem = isPilot
         ? `grid-story-ep${episodeId}-pilot-${Math.round(maxDurationSec)}s`
@@ -227,7 +329,9 @@ export function createGridEpisodeRenderHandler(): TaskHandler<GridEpisodeRenderP
       const finalPath = path.join(repoRoot, 'data/static/remotion', `${fileStem}.mp4`)
       const cleanPath = path.join(repoRoot, 'data/static/remotion', `${fileStem}.clean.mp4`)
       await runRemotionRender(built.propsPath, cleanPath, ctx)
-      const bgm = await mixBgmIfAvailable(episodeId, cleanPath, finalPath, ctx)
+      const audio = await mixBgmIfAvailable(episodeId, cleanPath, finalPath, ctx, {
+        maxDurationSec: isPilot ? maxDurationSec : undefined,
+      })
 
       const response = {
         episode_id: episodeId,
@@ -235,7 +339,7 @@ export function createGridEpisodeRenderHandler(): TaskHandler<GridEpisodeRenderP
         duration_frames: built.durationInFrames,
         skipped_storyboards: built.skippedStoryboards,
         output: `static/remotion/${fileStem}.mp4`,
-        bgm: bgm ? path.relative(repoRoot, bgm) : null,
+        audio,
       }
       ctx.event('grid.episode.rendered', response)
       return response
@@ -316,8 +420,73 @@ export function createGridEpisodeVideosHandler(): TaskHandler<GridEpisodeVideosP
   }
 }
 
+interface GridEpisodeDesignPayload {
+  episode_id?: number
+  episodeId?: number
+  only_sequence_ids?: number[]
+  only_storyboard_ids?: number[]
+}
+
+export function createGridEpisodeDesignHandler(): TaskHandler<GridEpisodeDesignPayload> {
+  return {
+    resumable: true,
+    maxAttempts: 1,
+    async run(ctx: TaskContext<GridEpisodeDesignPayload>) {
+      const episodeId = resolveEpisodeId(ctx.payload)
+      // 仅设计连续性（相机轨道 + 锚点），持久化到 narrative_sequences.design_json；
+      // 不生成任何图片，可在批量生图前审查。
+      const results = await designEpisodeSequenceBeats(
+        episodeId,
+        {
+          onlySequenceIds: Array.isArray(ctx.payload.only_sequence_ids)
+            ? ctx.payload.only_sequence_ids.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+            : undefined,
+          onlyStoryboardIds: Array.isArray(ctx.payload.only_storyboard_ids)
+            ? ctx.payload.only_storyboard_ids.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+            : undefined,
+        },
+        (current, total, message) => ctx.progress(message, current, total),
+      )
+      ctx.event('grid.episode.design', { episodeId, sequences: results.length })
+      return { episodeId, designed_sequences: results.length, seqKeys: results.map((r) => r.seqKey) }
+    },
+  }
+}
+
+interface GridEpisodeOpeningPayload {
+  episode_id?: number
+  episodeId?: number
+  force?: boolean
+  duration_sec?: number
+  resolution?: string
+}
+
+export function createGridEpisodeOpeningHandler(): TaskHandler<GridEpisodeOpeningPayload> {
+  return {
+    resumable: true,
+    maxAttempts: 1,
+    async run(ctx: TaskContext<GridEpisodeOpeningPayload>) {
+      const episodeId = resolveEpisodeId(ctx.payload)
+      // 开场视频：先设计独立 storyboard，再 t2v 生成 ~8s 写回 introVideoUrl（片头前置）。
+      const result = await generateOpeningVideo(
+        episodeId,
+        {
+          force: Boolean(ctx.payload.force),
+          durationSec: Number(ctx.payload.duration_sec) || undefined,
+          resolution: ctx.payload.resolution,
+        },
+        (current, total, message) => ctx.progress(message, current, total),
+      )
+      ctx.event('grid.episode.opening', { episodeId, ...result })
+      return result
+    },
+  }
+}
+
 export function registerGridEpisodeHandlers() {
   registerTaskHandler('grid.episode_generate', createGridEpisodeGenerateHandler())
+  registerTaskHandler('grid.episode_design', createGridEpisodeDesignHandler())
+  registerTaskHandler('grid.episode_opening', createGridEpisodeOpeningHandler())
   registerTaskHandler('grid.episode_render', createGridEpisodeRenderHandler())
   registerTaskHandler('grid.episode_review', createGridEpisodeReviewHandler())
   registerTaskHandler('grid.episode_videos', createGridEpisodeVideosHandler())

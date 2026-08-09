@@ -119,7 +119,7 @@ async function requestPromptRepair(input: {
       response_format: { type: 'json_object' },
       thinking: { type: 'disabled' },
     }),
-  }, { timeoutMs: 60_000, maxAttempts: 2 })
+  }, { timeoutMs: 60_000, maxAttempts: 2, lane: 'text-agent' })
 
   const data = await resp.json() as any
   const content = data?.choices?.[0]?.message?.content

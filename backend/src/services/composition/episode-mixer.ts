@@ -81,10 +81,14 @@ function normalizeVideo(inputPath: string, outputPath: string, targetWidth: numb
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true })
     ffmpeg(inputPath)
-      .videoFilter(`scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease,pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2,format=yuv420p`)
+      .videoFilter(`scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease,pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p`)
       .audioCodec('aac')
-      .audioBitrate('192k')
+      .audioBitrate('128k')
+      .audioFrequency(48000)
+      .audioChannels(2)
       .outputOptions([
+        ...getVideoEncoderOptions({ width: targetWidth, height: targetHeight }),
+        '-r', '30',
         '-color_range', 'mpeg',
         '-movflags', '+faststart',
       ])
@@ -95,24 +99,56 @@ function normalizeVideo(inputPath: string, outputPath: string, targetWidth: numb
   })
 }
 
-async function buildConcatVideo(shots: Shot[], outputPath: string): Promise<void> {
+async function buildConcatVideo(
+  shots: Shot[],
+  outputPath: string,
+  dimensions: { width: number; height: number },
+): Promise<void> {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true })
 
   // 优先尝试 concat demuxer + -c copy，避免整集视频被再次重编码。
-  // 如果镜头编码参数不一致导致失败，再回退到 filter_complex 重编码。
   try {
     await buildConcatVideoCopy(shots, outputPath)
     return
   } catch (copyErr: any) {
-    logTaskProgress('EpisodeMixer', 'concat-copy-fallback', {
+    logTaskProgress('EpisodeMixer', 'concat-copy-normalize-fallback', {
       reason: copyErr.message || 'concat copy failed',
       shots: shots.length,
     })
   }
 
-  // 使用 filter_complex concat，避免 concat demuxer 在音频参数变化时产生 DTS 错乱、
-  // 时长翻倍等问题。每个镜头的音视频先统一格式后再拼接。
-  console.log('[EpisodeMixer] filter_complex concat fallback, shots:', shots.length)
+  // 失败时先把每个镜头标准化成完全一致的编码参数，再 concat copy。
+  // 这比 filter_complex 整集重编码快得多：每个镜头只转一次，拼接阶段是纯 copy。
+  console.log('[EpisodeMixer] normalize-then-copy fallback, shots:', shots.length)
+  const normalizedPaths: string[] = []
+  try {
+    for (const s of shots) {
+      const normalizedPath = path.join(path.dirname(outputPath), `${uuid()}_normalized.mp4`)
+      await normalizeVideo(toAbsPath(s.videoPath), normalizedPath, dimensions.width, dimensions.height)
+      normalizedPaths.push(normalizedPath)
+    }
+
+    const normalizedShots = shots.map((s, i) => ({ ...s, videoPath: normalizedPaths[i] }))
+    await buildConcatVideoCopy(normalizedShots, outputPath)
+  } catch (err) {
+    // 标准化后再 copy 仍失败，回退到 filter_complex（兜底）
+    logTaskProgress('EpisodeMixer', 'filter-complex-final-fallback', {
+      reason: err instanceof Error ? err.message : 'unknown',
+      shots: shots.length,
+    })
+    await buildConcatVideoFilterComplex(shots, outputPath, dimensions)
+  } finally {
+    for (const p of normalizedPaths) {
+      try { fs.unlinkSync(p) } catch {}
+    }
+  }
+}
+
+async function buildConcatVideoFilterComplex(
+  shots: Shot[],
+  outputPath: string,
+  dimensions: { width: number; height: number },
+): Promise<void> {
   return new Promise((resolve, reject) => {
     let cmd = ffmpeg()
     for (const s of shots) {
@@ -149,7 +185,7 @@ async function buildConcatVideo(shots: Shot[], outputPath: string): Promise<void
       .complexFilter(filters)
       .outputOptions([
         '-map', '[outv]',
-        ...getVideoEncoderOptions(),
+        ...getVideoEncoderOptions(dimensions),
         '-an',
         '-movflags', '+faststart',
       ])
@@ -198,7 +234,7 @@ async function buildNarrationMix(shots: Shot[], totalDuration: number, outputPat
       ffmpeg()
         .input('anullsrc=r=48000:cl=stereo')
         .inputOptions(['-f', 'lavfi'])
-        .outputOptions(['-t', String(totalDuration), '-c:a', 'aac', '-b:a', '192k'])
+        .outputOptions(['-t', String(totalDuration), '-c:a', 'aac', '-b:a', '128k'])
         .output(outputPath)
         .on('end', () => resolve())
         .on('error', (err) => reject(err))
@@ -302,7 +338,7 @@ async function buildNarrationMix(shots: Shot[], totalDuration: number, outputPat
 
     cmd
       .complexFilter(filters)
-      .outputOptions(['-map', '[final_narration]', '-c:a', 'aac', '-ar', '48000', '-b:a', '192k'])
+      .outputOptions(['-map', '[final_narration]', '-c:a', 'aac', '-ar', '48000', '-b:a', '128k'])
       .output(outputPath)
       .on('end', () => resolve())
       .on('error', (err) => reject(err))
@@ -334,7 +370,7 @@ async function prepareBgmCue(
         ...(audioFilters.length > 0 ? ['-af', audioFilters.join(',')] : []),
         '-c:a', 'aac',
         '-ar', '48000',
-        '-b:a', '192k',
+        '-b:a', '128k',
       ])
       .output(outputPath)
       .on('end', () => resolve())
@@ -385,7 +421,7 @@ async function buildBgmMix(
       ffmpeg()
         .input('anullsrc=r=48000:cl=stereo')
         .inputOptions(['-f', 'lavfi'])
-        .outputOptions(['-t', String(totalDuration), '-c:a', 'aac', '-b:a', '192k'])
+        .outputOptions(['-t', String(totalDuration), '-c:a', 'aac', '-b:a', '128k'])
         .output(outputPath)
         .on('end', () => resolve())
         .on('error', (err) => reject(err))
@@ -466,7 +502,7 @@ async function buildBgmMix(
 
     cmd
       .complexFilter(filters)
-      .outputOptions(['-map', '[bgm_final]', '-c:a', 'aac', '-ar', '48000', '-b:a', '192k'])
+      .outputOptions(['-map', '[bgm_final]', '-c:a', 'aac', '-ar', '48000', '-b:a', '128k'])
       .output(outputPath)
       .on('end', () => resolve())
       .on('error', (err) => reject(err))
@@ -484,7 +520,7 @@ async function buildSilentAudio(duration: number, outputPath: string): Promise<v
         '-t', String(Math.max(0.1, duration)),
         '-c:a', 'aac',
         '-ar', '48000',
-        '-b:a', '192k',
+        '-b:a', '128k',
       ])
       .output(outputPath)
       .on('end', () => resolve())
@@ -636,7 +672,7 @@ export async function mixEpisode(
 
   try {
     // 3. 拼接正文视频。
-    await buildConcatVideo(mainShots, mainConcatPath)
+    await buildConcatVideo(mainShots, mainConcatPath, { width: targetWidth, height: targetHeight })
 
     // 4. 正文 BGM：基于正文镜头做情绪幕布规划，不受片头/前情提要干扰。
     let bgmCues: BgmCue[] = []
@@ -694,7 +730,7 @@ export async function mixEpisode(
           '-map', '0:v',
           '-c:a', 'aac',
           '-ar', '48000',
-          '-b:a', '192k',
+          '-b:a', '128k',
           '-movflags', '+faststart',
           '-filter_complex', filterComplex,
           '-map', '[aout]',

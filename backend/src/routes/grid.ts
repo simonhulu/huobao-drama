@@ -1,11 +1,13 @@
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNotNull } from 'drizzle-orm'
 import fs from 'fs'
+import path from 'path'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/image-generation.js'
 import { aspectRatioToSize } from '../services/adapters/aspect-ratio-to-size.js'
 import { splitGridImage } from '../services/grid-split.js'
+import { findProjectFinalArtifact } from '../services/render-artifacts.js'
 import { buildConsistencySeed, buildConsistencySuffix, buildGridConsistencyInput } from '../services/image-seed.js'
 import { createAgent } from '../agents/index.js'
 import { styleToPromptPhrase } from '../services/visual-style.js'
@@ -641,7 +643,7 @@ app.post('/episode/:episodeId/generate', async (c) => {
 
   const body = await c.req.json().catch(() => ({} as any))
   const force = Boolean((body as any).force)
-  const review = (body as any).review !== false
+  const review = (body as any).review === true
   const useReferenceImages = (body as any).useReferenceImages !== false
   const onlyIds = Array.isArray((body as any).onlyStoryboardIds)
     ? (body as any).onlyStoryboardIds.map(Number).filter((n: number) => Number.isFinite(n) && n > 0)
@@ -663,6 +665,61 @@ app.post('/episode/:episodeId/generate', async (c) => {
       only_storyboard_ids: onlyIds,
       use_reference_images: useReferenceImages,
     },
+  })
+  return success(c, { task_id: task.id })
+})
+
+// POST /grid/episode/:episodeId/design —— 仅设计连续性（相机轨道+锚点），持久化 design_json，不生图
+app.post('/episode/:episodeId/design', async (c) => {
+  const episodeId = Number(c.req.param('episodeId'))
+  if (!Number.isFinite(episodeId) || episodeId <= 0) return badRequest(c, 'invalid episodeId')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const body = await c.req.json().catch(() => ({} as any))
+  const onlySequenceIds = Array.isArray((body as any).onlySequenceIds)
+    ? (body as any).onlySequenceIds.map(Number).filter((n: number) => Number.isFinite(n) && n > 0)
+    : undefined
+  const onlyIds = Array.isArray((body as any).onlyStoryboardIds)
+    ? (body as any).onlyStoryboardIds.map(Number).filter((n: number) => Number.isFinite(n) && n > 0)
+    : undefined
+
+  const task = createTask({
+    type: 'grid.episode_design',
+    dramaId: ep.dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: `grid.episode_design:${episodeId}:${Date.now()}`,
+    payload: { episode_id: episodeId, only_sequence_ids: onlySequenceIds, only_storyboard_ids: onlyIds },
+  })
+  return success(c, { task_id: task.id })
+})
+
+// POST /grid/episode/:episodeId/opening —— 开场视频：独立 storyboard 设计 + t2v 生成，写回 introVideoUrl（片头前置）
+app.post('/episode/:episodeId/opening', async (c) => {
+  const episodeId = Number(c.req.param('episodeId'))
+  if (!Number.isFinite(episodeId) || episodeId <= 0) return badRequest(c, 'invalid episodeId')
+
+  const [ep] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!ep) return badRequest(c, 'Episode not found')
+
+  const body = await c.req.json().catch(() => ({} as any))
+  const force = Boolean((body as any).force)
+  const durationSec = Number((body as any).durationSec)
+  const resolution = typeof (body as any).resolution === 'string' ? (body as any).resolution : undefined
+
+  const task = createTask({
+    type: 'grid.episode_opening',
+    dramaId: ep.dramaId,
+    episodeId,
+    scopeType: 'episode',
+    scopeId: episodeId,
+    idempotencyKey: force
+      ? `grid.episode_opening:${episodeId}:force:${Date.now()}`
+      : `grid.episode_opening:${episodeId}`,
+    payload: { episode_id: episodeId, force, duration_sec: Number.isFinite(durationSec) ? durationSec : undefined, resolution },
   })
   return success(c, { task_id: task.id })
 })
@@ -770,11 +827,18 @@ app.post('/episode/:episodeId/videos', async (c) => {
   return success(c, { task_id: task.id })
 })
 
-// GET /grid/videos/assets —— 视频素材库浏览（按标签过滤）
+// GET /grid/videos/assets —— 视频素材库浏览（按标签/归属过滤）
 app.get('/videos/assets', async (c) => {
   const era = c.req.query('era')
+  const episodeId = c.req.query('episode_id') ? Number(c.req.query('episode_id')) : null
+  const dramaId = c.req.query('drama_id') ? Number(c.req.query('drama_id')) : null
   const rows = db.select().from(schema.videoAssets).all()
-    .filter((r) => !era || String(r.era || '') === era)
+    .filter((r) => {
+      if (era && String(r.era || '') !== era) return false
+      if (episodeId && r.episodeId !== episodeId) return false
+      if (dramaId && r.dramaId !== dramaId) return false
+      return true
+    })
     .map((r) => ({
       id: r.id,
       src: r.localPath,
@@ -786,6 +850,9 @@ app.get('/videos/assets', async (c) => {
       resolution: r.resolution,
       status: r.status,
       use_count: r.useCount,
+      episode_id: r.episodeId,
+      drama_id: r.dramaId,
+      storyboard_id: r.storyboardId,
       prompt: r.prompt,
       design: r.designJson ? JSON.parse(r.designJson) : null,
       refs: r.refsJson ? JSON.parse(r.refsJson) : null,
@@ -824,6 +891,31 @@ app.get('/productions', async (c) => {
   const dramaMap = new Map(dramas.map((d) => [d.id, d]))
   const storyboards = db.select().from(schema.storyboards).all()
 
+  // v8 叙事层级统计：episode -> { panelsTotal, panelsCompleted, planKind }
+  const narrativePlans = db.select().from(schema.narrativePlans).all()
+  const planByEpisode = new Map(narrativePlans.map((p) => [`${p.episodeId}:${p.kind}`, p]))
+
+  // 排除已删除的 Remotion 项目对应的 episode
+  const deletedProjectEpisodeIds = new Set(
+    db.select({ episodeId: schema.remotionProjects.sourceEpisodeId })
+      .from(schema.remotionProjects)
+      .where(isNotNull(schema.remotionProjects.deletedAt))
+      .all()
+      .map((r) => r.episodeId)
+      .filter((id): id is number => id !== null),
+  )
+  const panelRows = db.select({
+    planId: schema.storyboardPanels.planId,
+    genStatus: schema.storyboardPanels.genStatus,
+  }).from(schema.storyboardPanels).all()
+  const panelStatsByPlan = new Map<number, { total: number; completed: number }>()
+  for (const row of panelRows) {
+    const stats = panelStatsByPlan.get(row.planId) ?? { total: 0, completed: 0 }
+    stats.total += 1
+    if (row.genStatus === 'completed') stats.completed += 1
+    panelStatsByPlan.set(row.planId, stats)
+  }
+
   const byEpisode = new Map<number, typeof storyboards>()
   for (const sb of storyboards) {
     const list = byEpisode.get(sb.episodeId) ?? []
@@ -831,8 +923,13 @@ app.get('/productions', async (c) => {
     byEpisode.set(sb.episodeId, list)
   }
 
+  const includeTest = c.req.query('include_test') === '1' || c.req.query('include_test') === 'true'
+  const isTestDrama = (title: string | null | undefined) => (title ?? '').startsWith('Recap Test')
+
   const items = episodes
     .filter((ep) => (byEpisode.get(ep.id)?.length ?? 0) > 0)
+    .filter((ep) => !deletedProjectEpisodeIds.has(ep.id))
+    .filter((ep) => includeTest || !isTestDrama(dramaMap.get(ep.dramaId)?.title))
     .map((ep) => {
       const shots = byEpisode.get(ep.id) ?? []
       let cellsReady = 0
@@ -851,11 +948,56 @@ app.get('/productions', async (c) => {
           }
         } catch { /* ignore */ }
       }
-      const renderAbs = getAbsolutePath(`remotion/grid-story-ep${ep.id}.mp4`)
-      const hasRender = fs.existsSync(renderAbs)
+      // 扫描所有 grid-story-ep{id}*.mp4 产物（含 -final / -full / -pilot 等后缀），
+      // 取最新文件作为当前成片，避免固定文件名导致已渲染状态丢失。
+      const renderDir = getAbsolutePath('remotion')
+      const renderPrefix = `grid-story-ep${ep.id}`
+      let hasRender = false
       let renderAt: string | null = null
-      if (hasRender) {
-        try { renderAt = fs.statSync(renderAbs).mtime.toISOString() } catch { /* ignore */ }
+      let renderUrl: string | null = null
+      if (fs.existsSync(renderDir)) {
+        const candidates = fs.readdirSync(renderDir)
+          .filter((f) => f.startsWith(renderPrefix) && f.endsWith('.mp4'))
+          .map((f) => {
+            const abs = path.join(renderDir, f)
+            try {
+              const st = fs.statSync(abs)
+              return { name: f, mtime: st.mtime.toISOString(), url: `/static/remotion/${f}` }
+            } catch {
+              return null
+            }
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null)
+          .sort((a, b) => b.mtime.localeCompare(a.mtime))
+        const latest = candidates[0]
+        if (latest) {
+          hasRender = true
+          renderAt = latest.mtime
+          renderUrl = latest.url
+        }
+      }
+      const fullPlan = planByEpisode.get(`${ep.id}:full`)
+      // 叙事故事板路径的成片：project-{pid}-*delivery*.mp4（如 project-8-full-director-...-delivery.mp4）
+      let projectArtifact: ReturnType<typeof findProjectFinalArtifact> = null
+      if (!hasRender && fullPlan?.remotionProjectId) {
+        projectArtifact = findProjectFinalArtifact(fullPlan.remotionProjectId)
+        if (projectArtifact) {
+          hasRender = true
+          renderUrl = projectArtifact.url
+          renderAt = projectArtifact.mtime
+        }
+      }
+      // history-comic 路径的成片：管线发布时权威回写 episodes.video_url
+      // （static/remotion/history-comic-*.mp4）。文件名不以 project-{pid}- 或
+      // grid-story-ep{id} 开头，上面两路都不认识它，这里以 video_url 为判据兜底。
+      if (!hasRender && ep.videoUrl && ep.videoUrl.startsWith('static/remotion/')) {
+        const deliveryPath = getAbsolutePath(ep.videoUrl)
+        if (fs.existsSync(deliveryPath)) {
+          const st = fs.statSync(deliveryPath)
+          hasRender = true
+          renderUrl = `/static/remotion/${path.basename(ep.videoUrl)}`
+          renderAt = st.mtime.toISOString()
+        }
       }
       let status = 'pending'
       if (hasRender) {
@@ -865,10 +1007,12 @@ app.get('/productions', async (c) => {
       } else if (cellsReady > 0) {
         status = 'working'
       }
+      const narrativeStats = fullPlan ? panelStatsByPlan.get(fullPlan.id) : null
       return {
         episode_id: ep.id,
         drama_id: ep.dramaId,
         drama_title: dramaMap.get(ep.dramaId)?.title ?? '',
+        drama_style: dramaMap.get(ep.dramaId)?.style ?? '',
         account_id: dramaMap.get(ep.dramaId)?.mediaAccountId ?? null,
         account_name: accountMap.get(dramaMap.get(ep.dramaId)?.mediaAccountId ?? -1)?.name ?? null,
         episode_number: ep.episodeNumber,
@@ -877,14 +1021,18 @@ app.get('/productions', async (c) => {
         cells_ready: cellsReady,
         review_passed: reviewTotal ? reviewPassed : null,
         review_total: reviewTotal || null,
+        narrative_panels_total: narrativeStats?.total ?? null,
+        narrative_panels_completed: narrativeStats?.completed ?? null,
+        narrative_plan_id: fullPlan?.id ?? null,
         has_render: hasRender,
-        render_url: hasRender ? `/static/remotion/grid-story-ep${ep.id}.mp4` : null,
+        render_url: renderUrl,
         render_at: renderAt,
+        created_at: ep.createdAt,
         updated_at: ep.updatedAt,
         status,
       }
     })
-    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
 
   const queryAccountId = c.req.query('account_id')
   const queryDramaId = c.req.query('drama_id')

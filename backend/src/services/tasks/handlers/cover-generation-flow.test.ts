@@ -75,8 +75,8 @@ test('legacy prompt-only episodes use the composed cover pipeline', async () => 
 
   assert.equal(imageCalls.length, 2)
   assert.deepEqual(imageCalls.map(call => [call.imageType, call.frameType, call.size]), [
-    ['cover_base', '4:3', '1920x1080'],
-    ['cover_base', '3:4', '1080x1920'],
+    ['cover_base', '4:3', '1024x1024'],
+    ['cover_base', '3:4', '1024x1024'],
   ])
   assert.equal(composeCalls.length, 1)
   assert.equal(composeCalls[0].design.main_title, '谁在承担代价')
@@ -211,4 +211,81 @@ test('copy-only cover designs keep user text while automatic flow supplies the i
   assert.equal(composeCalls[0].design.sub_title, '自定义副标题')
   assert.equal(composeCalls[0].design.kicker, '自定义栏目')
   assert.equal(composeCalls[0].design.ai_prompt, 'automatic cinematic base, highly detailed, no text, no watermark')
+})
+
+test('history factory covers require a user title and bypass AI copy generation', async () => {
+  const ts = now()
+  const dramaId = Number(db.insert(schema.dramas).values({
+    title: 'History Factory Cover Drama',
+    style: 'period_crime_35mm',
+    status: 'draft',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const missingTitleEpisodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 1,
+    title: '用户确认的正片标题',
+    metadata: JSON.stringify({ historyFactory: 'remotion-history-factory' }),
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  let enhanceCalls = 0
+  const composeCalls: any[] = []
+  const handler = createCoverGenerateHandler({
+    createImageGenerationRecord: (() => 1) as any,
+    executeImageGeneration: (async () => ({
+      image_generation_id: 1,
+      local_path: 'static/images/history-cover-base.png',
+      image_url: null,
+    })) as any,
+    enhanceCoverPrompt: (async () => {
+      enhanceCalls += 1
+      throw new Error('history factory must not call the AI copy enhancer')
+    }) as any,
+    composeCoverImages: (async (input: any) => {
+      composeCalls.push(input)
+      return {
+        cover4x3Url: 'static/covers/history-4x3.png',
+        cover3x4Url: 'static/covers/history-3x4.png',
+      }
+    }) as any,
+  })
+
+  const context = (episodeId: number, coverDesign?: Record<string, unknown>) => ({
+    taskId: 4,
+    payload: { episode_id: episodeId, cover_design: coverDesign },
+    signal: new AbortController().signal,
+    attempts: 0,
+    progress: () => {},
+    event: () => {},
+    isCancelRequested: () => false,
+  }) as any
+
+  await assert.rejects(
+    () => handler.run(context(missingTitleEpisodeId)),
+    /cover_design\.main_title/u,
+  )
+
+  const userTitleEpisodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 2,
+    title: '另一个用户确认的正片标题',
+    metadata: JSON.stringify({ historyFactory: 'remotion-history-factory' }),
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  await handler.run(context(userTitleEpisodeId, {
+    main_title: '用户指定封面标题',
+    user_provided_title: true,
+    sub_title: '副标题也由用户决定',
+    ai_prompt: 'cinematic historical scene, highly detailed, no text, no watermark',
+  }))
+
+  assert.equal(enhanceCalls, 0)
+  assert.equal(composeCalls.at(-1).design.main_title, '用户指定封面标题')
+  const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, userTitleEpisodeId)).all()
+  assert.equal(JSON.parse(episode.coverDesignJson || '{}').main_title, '用户指定封面标题')
 })

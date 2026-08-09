@@ -1,0 +1,344 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Polish Video Script Production Run",
+  "type": "object",
+  "required": [
+    "mode",
+    "information_gap_contract",
+    "audience_contract",
+    "narrator_persona",
+    "genre",
+    "truth_promise",
+    "retention",
+    "author_route",
+    "beats"
+  ],
+  "properties": {
+    "information_gap_contract": {
+      "type": "object",
+      "required": ["creator_owned", "viewer_owned", "intentional_omissions", "closure_budget"],
+      "properties": {
+        "creator_owned": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["beat_opened", "withheld_answer", "payoff_beat"]
+          }
+        },
+        "viewer_owned": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["beat_id", "concrete_material_given", "answer_left_to_viewer", "expected_response"]
+          }
+        },
+        "intentional_omissions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["omitted", "reason"]
+          }
+        },
+        "closure_budget": {
+          "type": "object",
+          "required": ["paragraph_summaries", "explanatory_tails", "final_answers"],
+          "properties": {
+            "paragraph_summaries": {"type": "integer", "minimum": 0},
+            "explanatory_tails": {"type": "integer", "minimum": 0},
+            "final_answers": {"const": 1}
+          }
+        }
+      }
+    },
+    "metrics_contract": {
+      "type": "object",
+      "required": [
+        "target_platform",
+        "target_duration_seconds",
+        "target_3s_retention",
+        "target_5s_completion",
+        "target_overall_completion",
+        "primary_metric"
+      ],
+      "properties": {
+        "target_platform": { "type": "string", "minLength": 1 },
+        "target_duration_seconds": { "type": "integer", "minimum": 15 },
+        "target_3s_retention": { "type": "number", "minimum": 0, "maximum": 1 },
+        "target_5s_completion": { "type": "number", "minimum": 0, "maximum": 1 },
+        "target_overall_completion": { "type": "number", "minimum": 0, "maximum": 1 },
+        "primary_metric": { "enum": ["3s_retention", "5s_completion", "overall_completion"] },
+        "target_comment_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "comment_strategy": { "enum": ["resonance", "confrontation", "expression", "relation", "none"] }
+      }
+    },
+    "mode": {
+      "enum": ["generate", "polish", "transplant"]
+    },
+    "mode_resolution": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["generate", "polish", "transplant"] },
+        "source_ownership": { "enum": ["external", "self"] },
+        "rationale": { "type": "string", "minLength": 1 },
+        "user_declared": { "type": "boolean" },
+        "self_owned_evidence": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "waiver_reason": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "transplant": {
+      "type": "object",
+      "properties": {
+        "shell_repair_reason": { "type": "string", "minLength": 1 },
+        "opening_repair_reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "audience_contract": {
+      "type": "object",
+      "required": [
+        "primary_human_switches",
+        "story_paradox",
+        "viewer_pursuit",
+        "payoff_experience",
+        "source_boundary_role"
+      ],
+      "properties": {
+        "primary_human_switches": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "secondary_human_switches": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "story_paradox": { "type": "string", "minLength": 1 },
+        "viewer_pursuit": { "type": "string", "minLength": 1 },
+        "payoff_experience": { "type": "string", "minLength": 1 },
+        "source_boundary_role": { "enum": ["guard", "engine"] },
+        "comment_trigger": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "type": { "enum": ["resonance", "confrontation", "expression", "relation"] },
+            "expected_comment": { "type": "string", "minLength": 1 },
+            "target_beat": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "narrator_persona": {
+      "type": "object",
+      "required": [
+        "id",
+        "stance",
+        "stance_fact_ids",
+        "stance_reveal_beat",
+        "false_moral_frame",
+        "rebuttal",
+        "moral_geometry",
+        "situation_restore",
+        "temperature_arc"
+      ],
+      "properties": {
+        "id": { "const": "rural-middle-storyteller-v1" },
+        "stance": { "type": "string", "minLength": 1 },
+        "stance_fact_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "stance_reveal_beat": { "type": "string", "minLength": 1 },
+        "false_moral_frame": { "type": "string", "minLength": 1 },
+        "rebuttal": { "type": "string", "minLength": 1 },
+        "moral_geometry": {
+          "type": "object",
+          "required": ["anger_target", "compassion_target", "silent_party"]
+        },
+        "situation_restore": {
+          "type": "object",
+          "required": ["information_gap", "time_pressure", "cost_of_refusal", "environmental_pull"]
+        },
+        "temperature_arc": { "type": "array", "minItems": 3 }
+      }
+    },
+    "genre": {
+      "type": "object",
+      "required": ["primary"],
+      "properties": {
+        "primary": { "type": "string", "minLength": 1 },
+        "secondary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "truth_promise": {
+      "type": "object",
+      "required": [
+        "question_type",
+        "one_sentence_promise",
+        "question_engine",
+        "answer",
+        "viewer_stake",
+        "source_claims",
+        "detail_map"
+      ],
+      "properties": {
+        "question_type": {
+          "enum": ["motive", "mechanism", "chronology", "investigation", "judgment"]
+        },
+        "one_sentence_promise": { "type": "string", "minLength": 1 },
+        "question_engine": {
+          "type": "object",
+          "required": ["text", "answerable_by"],
+          "properties": {
+            "text": { "type": "string", "minLength": 1 },
+            "answerable_by": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+          }
+        },
+        "answer": {
+          "type": "object",
+          "required": ["text", "status", "claim_ids"],
+          "properties": {
+            "text": { "type": "string", "minLength": 1 },
+            "status": { "enum": ["source_supported", "bounded_inference", "unresolved"] },
+            "claim_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+          }
+        },
+        "viewer_stake": {
+          "type": "object",
+          "required": ["person_at_risk", "concrete_loss", "why_it_cannot_be_shrugged_off"]
+        },
+        "source_claims": { "type": "array", "minItems": 1 },
+        "detail_map": {
+          "type": "object",
+          "required": ["slow_scenes", "compressed_fact_ids", "discard_list"],
+          "properties": {
+            "slow_scenes": { "type": "array", "minItems": 2, "maxItems": 4 },
+            "compressed_fact_ids": { "type": "array" },
+            "discard_list": { "type": "array", "minItems": 1 }
+          }
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "required": [
+        "structure_shell",
+        "open_loop",
+        "open_loop_id",
+        "opening",
+        "stake",
+        "payoff_fact_id",
+        "middle_turns",
+        "ending",
+        "rhetorical_budget"
+      ],
+      "properties": {
+        "open_loop_id": { "type": "string", "minLength": 1 },
+        "opening": {
+          "type": "object",
+          "required": [
+            "first_image_or_action",
+            "known_after_opening",
+            "withheld_until",
+            "forbidden_information_order",
+            "opening_mode",
+            "action_status",
+            "reader_must_know",
+            "bridge_to_next_beat"
+          ],
+          "properties": {
+            "opening_mode": {
+              "enum": ["result_then_rewind", "scene_return", "direct_cause", "collision"]
+            },
+            "action_status": {
+              "enum": ["result_shown", "action_interrupted", "no_action"]
+            },
+            "reader_must_know": {
+              "type": "array",
+              "minItems": 3,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "bridge_to_next_beat": { "type": "string", "minLength": 1 },
+            "script_required_patterns": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "opening_conflict_check": {
+              "type": "object",
+              "properties": {
+                "conflict_present": { "type": "boolean" },
+                "conflict_quote": { "type": "string", "minLength": 1 },
+                "recognizable_within_seconds": { "type": "number", "minimum": 1, "maximum": 10 }
+              }
+            },
+            "selected_text": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "author_route": {
+      "type": "object",
+      "required": ["reasoning_module", "voice_palette"]
+    },
+    "beats": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["reader_relay"],
+        "properties": {
+          "comment_moment": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "type": { "enum": ["resonance", "confrontation", "expression", "relation"] },
+              "trigger_line": { "type": "string", "minLength": 1 }
+            }
+          },
+          "transplant": {
+            "type": "object",
+            "properties": {
+              "original_act_id": { "type": "string", "minLength": 1 },
+              "inherited": {
+                "type": "object",
+                "properties": {
+                  "function": { "type": "string", "minLength": 1 },
+                  "temperature": { "type": "string", "minLength": 1 },
+                  "hook_mechanism": { "type": "string", "minLength": 1 }
+                }
+              },
+              "repair": { "type": "string" }
+            }
+          },
+          "reader_relay": {
+            "type": "object",
+            "description": "The chain's substance is question_in / resolution / question_out. The ids are derived (a carry keeps the incoming id, an answer opens the next); supply them only to assert the chain, or as the terminal RESOLVED sentinel. facts_known_before, fact_ids_disclosed_here, and bridge_to_next are optional.",
+            "required": [
+              "question_in",
+              "resolution",
+              "question_out"
+            ],
+            "properties": {
+              "question_in_id": { "type": "string", "minLength": 1 },
+              "question_in": { "type": "string", "minLength": 1 },
+              "facts_known_before": { "type": "array", "minItems": 1 },
+              "fact_ids_disclosed_here": { "type": "array" },
+              "resolution": { "enum": ["answer", "carry"] },
+              "question_out_id": { "type": "string", "minLength": 1 },
+              "question_out": { "type": "string", "minLength": 1 },
+              "bridge_to_next": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "audits": {
+      "type": "array"
+    }
+  },
+  "additionalProperties": true
+}

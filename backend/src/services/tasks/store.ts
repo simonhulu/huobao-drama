@@ -184,9 +184,9 @@ function appendTaskEventWithClient(
   return normalizeEvent(row)
 }
 
-function findActiveTask(type: string, idempotencyKey?: string | null) {
+function findActiveTaskWithClient(client: TransactionClient | typeof db, type: string, idempotencyKey?: string | null) {
   if (!idempotencyKey) return null
-  const rows = db.select().from(schema.creationTasks)
+  const rows = client.select().from(schema.creationTasks)
     .where(and(
       eq(schema.creationTasks.type, type),
       eq(schema.creationTasks.idempotencyKey, idempotencyKey),
@@ -196,9 +196,21 @@ function findActiveTask(type: string, idempotencyKey?: string | null) {
   return active ? normalizeTask(active) : null
 }
 
-function findActiveTaskForExclusiveEpisode(type: string, episodeId?: number | null) {
+export function getActiveTaskByIdempotency(
+  type: string,
+  idempotencyKey?: string | null,
+  client: TransactionClient | typeof db = db,
+): CreationTask | null {
+  return findActiveTaskWithClient(client, type, idempotencyKey)
+}
+
+function findActiveTaskForExclusiveEpisodeWithClient(
+  client: TransactionClient | typeof db,
+  type: string,
+  episodeId?: number | null,
+) {
   if (type !== 'dharma.episode_render' || episodeId == null) return null
-  const rows = db.select().from(schema.creationTasks)
+  const rows = client.select().from(schema.creationTasks)
     .where(and(
       eq(schema.creationTasks.type, type),
       eq(schema.creationTasks.episodeId, episodeId),
@@ -208,15 +220,18 @@ function findActiveTaskForExclusiveEpisode(type: string, episodeId?: number | nu
   return active ? normalizeTask(active) : null
 }
 
-export function createTask(input: CreateTaskInput): CreationTask {
-  const existing = findActiveTask(input.type, input.idempotencyKey)
-  if (existing) return existing
+export function createTaskInTransaction(
+  client: TransactionClient | typeof db,
+  input: CreateTaskInput,
+): { task: CreationTask; created: boolean } {
+  const existing = findActiveTaskWithClient(client, input.type, input.idempotencyKey)
+  if (existing) return { task: existing, created: false }
 
   const ts = now()
   const scheduledAt = input.scheduledAt ?? null
   let result: { lastInsertRowid: number | bigint }
   try {
-    result = db.insert(schema.creationTasks).values({
+    result = client.insert(schema.creationTasks).values({
       type: input.type,
       status: 'queued',
       dramaId: input.dramaId ?? null,
@@ -241,19 +256,24 @@ export function createTask(input: CreateTaskInput): CreationTask {
       updatedAt: ts,
     }).run()
   } catch (error) {
-    // The database owns the cross-process race. A Dharma episode permits one
-    // active render regardless of preview/full payload; callers compare that
-    // existing task's payload and return either it or a 409.
-    const raced = findActiveTask(input.type, input.idempotencyKey)
-      ?? findActiveTaskForExclusiveEpisode(input.type, input.episodeId)
-    if (raced) return raced
+    const raced = findActiveTaskWithClient(client, input.type, input.idempotencyKey)
+      ?? findActiveTaskForExclusiveEpisodeWithClient(client, input.type, input.episodeId)
+    if (raced) return { task: raced, created: false }
     throw error
   }
 
-  const task = getTask(Number(result.lastInsertRowid))
+  const task = getTaskWithClient(client, Number(result.lastInsertRowid))
   if (!task) throw new Error('Task insert failed')
-  appendTaskEvent(task.id, 'created', { status: task.status, type: task.type })
-  taskEventBus.notifyTaskChanged(task, 'created')
+  appendTaskEventWithClient(client, task.id, 'created', { status: task.status, type: task.type })
+  return { task, created: true }
+}
+
+export function createTask(input: CreateTaskInput): CreationTask {
+  const result = db.transaction((tx) => createTaskInTransaction(tx, input))
+  const { task, created } = result
+  if (created) {
+    taskEventBus.notifyTaskChanged(task, 'created')
+  }
   return task
 }
 

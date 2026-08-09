@@ -831,7 +831,7 @@ async function requestStructuredToolResult<T extends z.ZodTypeAny>(input: {
         function: { name: input.toolName },
       },
     }),
-  }, { timeoutMs: 180_000, maxAttempts: 2 })
+  }, { timeoutMs: 180_000, maxAttempts: 2, lane: 'text-agent' })
 
   const data = await response.json()
   return parseStructuredToolArguments(data, input.toolName, input.schema, input.label)

@@ -35,6 +35,7 @@ test('normalizes Pexels videos defensively and prefers 16:9 720p downloads', () 
         video_files: [
           { width: 540, height: 960, link: 'https://cdn.example/portrait.mp4' },
           { width: 1280, height: 720, link: 'https://cdn.example/landscape.mp4' },
+          { width: 3840, height: 2160, link: 'https://cdn.example/4k.mp4' },
         ],
       },
       { id: 456, duration: 2, video_files: [{ width: 1280, height: 720, link: 'https://cdn.example/short.mp4' }] },
@@ -57,6 +58,34 @@ test('normalizes Pexels videos defensively and prefers 16:9 720p downloads', () 
       query: 'ocean',
     },
   ])
+})
+
+test('downloads manifest entries with bounded parallelism', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'stock-videos-parallel-'))
+  const manifestPath = path.join(tempDir, 'manifest.json')
+  const dest = path.join(tempDir, 'stock')
+  await fs.writeFile(manifestPath, JSON.stringify({
+    results: [
+      { provider: 'pexels', videoId: 'a', downloadUrl: 'https://cdn.example/a.mp4' },
+      { provider: 'pexels', videoId: 'b', downloadUrl: 'https://cdn.example/b.mp4' },
+      { provider: 'pexels', videoId: 'c', downloadUrl: 'https://cdn.example/c.mp4' },
+    ],
+  }))
+
+  let active = 0
+  let maxActive = 0
+  const fetchImpl = async () => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    active -= 1
+    return new Response(Buffer.from('video-bytes'), { status: 200 })
+  }
+
+  const result = await downloadFromManifest({ manifestPath, dest, concurrency: 3, fetchImpl })
+  assert.equal(result.downloaded, 3)
+  assert.equal(result.concurrency, 3)
+  assert.ok(maxActive > 1)
 })
 
 test('normalizes Pixabay videos with stable manifest schema', () => {

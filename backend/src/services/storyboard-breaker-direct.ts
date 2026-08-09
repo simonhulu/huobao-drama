@@ -44,14 +44,18 @@ const SAVE_STORYBOARDS_SCHEMA = {
               scene_id: { type: ['number', 'null'] },
               character_ids: { type: 'array', items: { type: 'number' } },
             },
-            // Keep the tool contract as strict as the storyboard prompt. If
-            // these fields are optional, a model can legally save a title and
-            // an image prompt with no event, actor, scene, action, or result.
-            // That is how generic scene plates enter the production graph.
+            // Keep the core storyboard contract strict, but make the auxiliary
+            // audio fields (bgm_prompt / sound_effect) optional. The comic path
+            // mixes episode-level BGM only; per-shot bgm_prompt is never
+            // consumed, and a strict schema makes the model truncate the whole
+            // JSON and fail the save with zero storyboards. The direct_script
+            // execute path still hard-validates action / description / result /
+            // image_prompt / video_prompt / scene_id / character_ids, which is
+            // the real protection against generic scene plates.
             required: [
               'shot_number', 'title', 'shot_type', 'angle', 'movement',
               'location', 'time', 'action', 'dialogue', 'description', 'result',
-              'atmosphere', 'image_prompt', 'video_prompt', 'bgm_prompt',
+              'atmosphere', 'image_prompt', 'video_prompt',
               'sound_effect', 'duration', 'scene_id', 'character_ids',
             ],
           },
@@ -180,7 +184,14 @@ export async function runStoryboardBreakerDirect(
         try {
           planArgs = JSON.parse(planCall.function.arguments)
         } catch (err: any) {
-          throw new Error(`Failed to parse save_director_plan arguments: ${err.message}`)
+          logTaskWarn('StoryboardBreakerDirect', 'director-plan-parse-failed', { episodeId, dramaId, error: err?.message })
+          // 导演规划 JSON 解析失败不阻断分镜落库——追加提示让模型继续调用 save_storyboards。
+          messages.push(
+            { role: 'assistant', content: responseMessage.content || '', tool_calls: toolCalls },
+            { role: 'tool', tool_call_id: planCall.id, content: JSON.stringify({ saved: false, error: err?.message, message: '导演规划参数解析失败，已跳过；请直接调用 save_storyboards 保存分镜。' }) },
+          )
+          if (saveCall) continue // 模型本轮同时给了 save_storyboards，继续正常处理
+          continue // 没有 save_storyboards，追加指令再试一轮
         }
         // 模型常给出 {plan:{...}} 或缺 schemaVersion 的规划——归一化后再校验。
         const rawPlan = planArgs?.director_plan ?? planArgs?.plan ?? planArgs

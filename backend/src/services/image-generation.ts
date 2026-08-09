@@ -113,7 +113,7 @@ const IMAGE_POLL_RESPONSE_TIMEOUT_MS = Math.max(5_000, Number(process.env.IMAGE_
 const EGAKI_IMAGE_CONCURRENCY = Math.max(1, Number(process.env.EGAKI_IMAGE_CONCURRENCY || 2))
 const EGAKI_IMAGE_INTERVAL_MS = Math.max(1, Number(process.env.EGAKI_IMAGE_INTERVAL_MS || 60_000))
 const EGAKI_IMAGE_INTERVAL_CAP = Math.max(1, Number(process.env.EGAKI_IMAGE_INTERVAL_CAP || 4))
-const PCORE_IMAGE_CONCURRENCY = Math.max(1, Number(process.env.PCORE_IMAGE_CONCURRENCY || 4))
+const PCORE_IMAGE_CONCURRENCY = Math.max(1, Number(process.env.PCORE_IMAGE_CONCURRENCY || 400))
 
 const imageGenerationLimiter = new ImageGenerationLimiter(
   IMAGE_GENERATION_CONCURRENCY,
@@ -409,7 +409,7 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
         method,
         headers,
         body: JSON.stringify(body),
-      }, { timeoutMs: 600_000 }),
+      }, { timeoutMs: 600_000, lane: 'image-generate' }),
     )
 
     if (!resp.ok) {
@@ -621,7 +621,7 @@ async function pollImageTask(id: number, config: AIConfig, taskId: string, signa
         method,
         headers,
         signal,
-      }, { timeoutMs: responseTimeoutMs, maxAttempts: 1 })
+      }, { timeoutMs: responseTimeoutMs, maxAttempts: 1, lane: 'image-generate' })
       if (!resp.ok) continue
       const result = await readProviderJsonWithinDeadline(resp, responseTimeoutMs, signal)
 

@@ -83,3 +83,13 @@ test('returns null for ordinary screenplay text', () => {
   })
   assert.equal(design, null)
 })
+
+test('strict history factory extraction rejects designs without an explicit main title', () => {
+  const design = extractCoverDesign({
+    ai_prompt: 'cinematic historical scene, highly detailed, no text, no watermark',
+  }, {
+    episodeTitle: '不能拿来当封面标题',
+    requireExplicitMainTitle: true,
+  })
+  assert.equal(design, null)
+})

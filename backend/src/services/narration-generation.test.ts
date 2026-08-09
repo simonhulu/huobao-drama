@@ -12,9 +12,32 @@ const { db, schema } = await import('../db/index.js')
 const { now } = await import('../utils/response.js')
 const {
   resolveStoryboardNarrationTextForTTS,
+  mapOrderedNarrationFragments,
   restoreOriginalTextNarrations,
   restoreVerbatimNarrations,
 } = await import('./narration-generation.js')
+
+test('ordered narration fragments cover the source exactly once', () => {
+  assert.deepEqual(
+    mapOrderedNarrationFragments('第一句。第二句，后半句。', ['第一句。', '第二句，', '后半句。']),
+    [
+      { index: 0, start: 0, end: 4 },
+      { index: 1, start: 4, end: 8 },
+      { index: 2, start: 8, end: 12 },
+    ],
+  )
+})
+
+test('ordered narration fragments reject repeated and missing speech', () => {
+  assert.throws(
+    () => mapOrderedNarrationFragments('卫青受辱。犯人看相。', ['卫青受辱。', '卫青受辱。']),
+    /missing, repeated, or out of order/,
+  )
+  assert.throws(
+    () => mapOrderedNarrationFragments('卫青受辱。犯人看相。', ['卫青受辱。']),
+    /do not cover the complete narration source/,
+  )
+})
 
 function seedDirectScriptEpisode() {
   const ts = now()

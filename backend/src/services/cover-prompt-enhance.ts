@@ -88,7 +88,7 @@ export async function enhanceCoverPrompt(input: CoverPromptEnhanceInput): Promis
       max_tokens: 2000,
       response_format: { type: 'json_object' },
     }),
-  }, { timeoutMs: 120_000, maxAttempts: 2 })
+  }, { timeoutMs: 120_000, maxAttempts: 2, lane: 'text-agent' })
 
   const data = await response.json()
   const content = data?.choices?.[0]?.message?.content

@@ -11,8 +11,9 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = path.resolve(import.meta.dirname, '../..')
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const args = process.argv.slice(2)
 const command = args[0] || 'enqueue'
 
@@ -56,6 +57,13 @@ function parseAssetTypes() {
     .split(',')
     .map((item) => item.trim())
     .filter((item) => item === 'ai_image' || item === 'character'))
+}
+
+function parseAssetKeys() {
+  return new Set(String(value('--asset-keys', ''))
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean))
 }
 
 function promptText(asset) {
@@ -122,9 +130,17 @@ async function writeStage(projectId, snapshot, statusOverride = null) {
 
 function selectedAssets(snapshot) {
   const types = parseAssetTypes()
+  const assetKeys = parseAssetKeys()
   const retry = hasFlag('--retry')
+  const completedReuseKeys = new Set(
+    [...latestAssetsByReuseKey(snapshot).entries()]
+      .filter(([, group]) => group.some((asset) => asset.status === 'completed' && asset.localPath))
+      .map(([reuseKey]) => reuseKey),
+  )
   const assets = latestAssets(snapshot)
     .filter((asset) => types.has(asset.assetType))
+    .filter((asset) => assetKeys.size === 0 || assetKeys.has(asset.assetKey))
+    .filter((asset) => !completedReuseKeys.has(reuseKeyFor(asset)))
     .filter((asset) => {
       if (asset.status === 'planned') return true
       if (retry && ['failed', 'canceled'].includes(asset.status)) return true
@@ -179,6 +195,7 @@ async function propagateReuse(projectId, snapshot) {
         body: JSON.stringify({
           shotId: asset.shotId,
           assetKey: asset.assetKey,
+          version: asset.version || 1,
           assetType: asset.assetType,
           provider: source.provider || 'local-reuse',
           status: 'completed',
@@ -201,6 +218,7 @@ async function propagateReuse(projectId, snapshot) {
 
 async function enqueue(projectId, snapshot) {
   const selected = selectedAssets(snapshot)
+  const providerOverride = value('--provider')
   if (hasFlag('--dry-run')) {
     const all = latestAssets(snapshot).filter((asset) => ['ai_image', 'character'].includes(asset.assetType))
     const groups = latestAssetsByReuseKey(snapshot)
@@ -242,7 +260,7 @@ async function enqueue(projectId, snapshot) {
         asset_key: asset.assetKey,
         asset_type: asset.assetType,
         prompt,
-        provider: asset.provider || undefined,
+        provider: providerOverride || asset.provider || undefined,
         config_id: value('--config-id') ? Number(value('--config-id')) : undefined,
         size: value('--size'),
         style: value('--style'),

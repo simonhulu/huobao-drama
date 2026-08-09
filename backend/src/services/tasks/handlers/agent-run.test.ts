@@ -85,8 +85,9 @@ test('agent.run handler is non-resumable because agent tool side effects are not
     createAgent: () => null,
   })
 
+  // 租约过期不自动重领（标 stale）；显式失败允许一次自动重试（LLM 非确定性失败成本低）
   assert.equal(handler.resumable, false)
-  assert.equal(handler.maxAttempts, 1)
+  assert.equal(handler.maxAttempts, 2)
 })
 
 test('expired running agent.run task is marked stale on recovery', () => {

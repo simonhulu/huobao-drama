@@ -24,7 +24,10 @@ export function buildTimeline(shots: EditorialShot[], fps = 30): TimelineItem[] 
   let cursor = 0;
   return shots.map((shot, index) => {
     const startFrame = cursor;
-    const transitionClass = shot.transitionIn?.class;
+    // An omitted incoming transition is the recipe's conservative hard cut.
+    // Treating it as a default dissolve creates an untracked overlap and
+    // makes telemetry intervals disagree with the locked recipe timeline.
+    const transitionClass = shot.transitionIn?.class ?? "hard_cut";
     const directBoundary = transitionClass === "hard_cut"
       || transitionClass === "ambiguous"
       || transitionClass === "no_local_delta"

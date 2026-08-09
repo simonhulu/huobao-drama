@@ -89,6 +89,9 @@ export type GridStoryShot = {
   audio: string;
   cells: GridStoryCell[];
   durationInFrames: number;
+  /** v8 绝对帧位（相对渲染 0 帧）。存在时按它挂载，不再累计堆叠，
+   *  单镜缺图被跳过也不会压缩后续镜头的时间轴。 */
+  startFrame?: number;
   /** Grok 默认整镜播放；素材库可声明 cutaway，在静态垫图上短切后返回。 */
   video?: {
     src: string;
@@ -101,6 +104,7 @@ export type GridStoryShot = {
     focusY?: number;
     grade?: "neutral" | "period_warm" | "documentary_muted" | "night_muted";
     transitionFrames?: number;
+    muted?: boolean;
   };
   /** 分句字幕：按音频时间轴切换；缺省时整段常驻 */
   subtitles?: Array<{ text: string; startSec: number; endSec: number }>;
@@ -109,6 +113,10 @@ export type GridStoryShot = {
 export type GridStoryPreviewProps = {
   shots: GridStoryShot[];
   durationInFrames?: number;
+  /** 整集唯一 narration 主音轨（v8 时间线契约：一集一个 master，不逐镜切片） */
+  audio?: string;
+  /** 子集渲染时主音轨的裁剪起点（帧）：首个镜头的绝对帧位，全片渲染为 0 */
+  audioStartFrame?: number;
 };
 
 function clampInterp(frame: number, input: [number, number], output: [number, number]): number {
@@ -438,7 +446,7 @@ function VideoLayer({
   return (
     <Video
       src={staticFile(video.src)}
-      muted
+      volume={0.7}
       trimBefore={video.sourceStartFrame}
       style={{
         position: "absolute",
@@ -647,23 +655,27 @@ function Shot({ shot, index, total }: { shot: GridStoryShot; index: number; tota
       <TextureOverlay />
       <ShotTitle index={index} total={total} title={shot.title} />
       <SubtitleBar text={shot.narration} subtitles={shot.subtitles} />
-      <Audio src={staticFile(shot.audio)} />
     </AbsoluteFill>
   );
 }
 
-export const GridStoryPreview: React.FC<GridStoryPreviewProps> = ({ shots }) => {
-  let from = 0;
+export const GridStoryPreview: React.FC<GridStoryPreviewProps> = ({ shots, audio, audioStartFrame }) => {
+  if (!audio) {
+    throw new Error('GridStoryPreview requires a master narration audio URL');
+  }
+  let fallbackFrom = 0;
   return (
     <AbsoluteFill style={{ backgroundColor: "#14100c" }}>
+      <Audio src={staticFile(audio)} startFrom={audioStartFrame ?? 0} />
       {shots.map((shot, i) => {
-        const seq = (
-          <Sequence key={i} from={from} durationInFrames={shot.durationInFrames}>
+        // v8 绝对帧位优先；旧 props 无 startFrame 时回退为累计堆叠。
+        const seqFrom = typeof shot.startFrame === "number" ? Math.max(0, Math.round(shot.startFrame)) : fallbackFrom;
+        fallbackFrom = seqFrom + shot.durationInFrames;
+        return (
+          <Sequence key={i} from={seqFrom} durationInFrames={shot.durationInFrames}>
             <Shot shot={shot} index={i} total={shots.length} />
           </Sequence>
         );
-        from += shot.durationInFrames;
-        return seq;
       })}
     </AbsoluteFill>
   );

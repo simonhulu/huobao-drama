@@ -4,13 +4,15 @@ import { db, schema } from '../db/index.js'
 import { now } from '../utils/response.js'
 import { createImageGenerationRecord } from './image-generation.js'
 import { refreshRemotionShotStatus, syncRemotionAssetForImageGeneration } from './remotion-asset-sync.js'
-import { planRemotionShots, type PlannerStockAsset, type PlannerStoryboard } from './remotion-planner.js'
+import { planRemotionShots, type PlannedAsset, type PlannerStockAsset, type PlannerStoryboard } from './remotion-planner.js'
 import { estimateSourceDurationSeconds } from './episode-splitter.js'
 import { createTask, getTask } from './tasks/store.js'
+import { mapOrderedNarrationFragments } from './narration-generation.js'
 import type { CreationTask, CreationTaskStatus, TransactionClient } from './tasks/types.js'
 import { validateRemotionStageOutput } from './remotion-contract.js'
 import { getMediaAccountRow, parseJsonRecord, POSITIONING_SCHEMA_VERSION } from './media-accounts.js'
 import { REMOTION_SHOT_RHYTHM } from './remotion-segmentation.js'
+import { DEFAULT_HISTORY_VISUAL_STYLE, resolveHistoryVisualStyle } from './history-visual-style.js'
 
 export { refreshRemotionShotStatus, syncRemotionAssetForImageGeneration }
 
@@ -239,6 +241,17 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {}
+}
+
+function visualStyleForRemotionSource(source: RemotionSourceSnapshot): string {
+  const project = record(source.positioning?.project)
+  const episode = record(source.positioning?.episode)
+  const selected = project.style_id
+    || project.style
+    || episode.style_id
+    || episode.style
+  const requested = typeof selected === 'string' && selected.trim() ? selected.trim() : DEFAULT_HISTORY_VISUAL_STYLE
+  return resolveHistoryVisualStyle(requested).id
 }
 
 function hash(value: unknown): string {
@@ -566,6 +579,12 @@ function buildEpisodeSnapshot(
       aspectRatio: episode.aspectRatio,
       narrationVoiceId: episode.narrationVoiceId,
       narrationSpeed: episode.narrationSpeed,
+      workflowType: episode.workflowType,
+      narrationTimeline: episode.preTtsAudioUrl && episode.preTtsTitlesJson ? {
+        audioUrl: episode.preTtsAudioUrl,
+        titles: parse<unknown[]>(episode.preTtsTitlesJson, []),
+        timingSource: 'minimax-titles',
+      } : null,
       creativeBrief: parseJsonRecord(episode.creativeBriefJson),
       directorPlan: parseJsonRecord(episode.directorPlanJson),
     },
@@ -691,8 +710,53 @@ export function createRemotionProjectFromEpisode(
   episodeId: number,
   options: RemotionProjectCreateOptions = {},
 ) {
+  const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!episode) throw new Error(`Episode ${episodeId} not found`)
+  if (episode.workflowType === 'direct_script' && (!episode.preTtsAudioUrl || !episode.preTtsTitlesJson)) {
+    throw new Error(`Episode ${episodeId} requires pre-TTS audio and MiniMax titles before Remotion project creation`)
+  }
   const snapshot = buildEpisodeSnapshot(episodeId, options)
+  if (episode.workflowType === 'direct_script') {
+    const source = String(episode.scriptContent || episode.content || '')
+    const fragments = snapshot.storyboards.map((storyboard) => String(storyboard.narration || storyboard.description || ''))
+    try {
+      mapOrderedNarrationFragments(source, fragments)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Episode ${episodeId} storyboard narration does not exactly cover the pre-TTS source: ${message}`)
+    }
+  }
   return createRemotionProjectFromSnapshot(snapshot, options, { episodeId })
+}
+
+export function ensureRemotionProjectForEpisode(
+  episodeId: number,
+  options: RemotionProjectCreateOptions = {},
+): { projectId: number | null; created: boolean; reason?: string } {
+  const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  if (!episode) return { projectId: null, created: false, reason: 'episode_not_found' }
+  if (episode.workflowType !== 'direct_script') return { projectId: null, created: false, reason: 'not_direct_script' }
+  if (!episode.preTtsAudioUrl || !episode.preTtsTitlesJson) {
+    return { projectId: null, created: false, reason: 'missing_pre_tts' }
+  }
+
+  const existing = db.select().from(schema.remotionProjects)
+    .where(eq(schema.remotionProjects.sourceEpisodeId, episodeId))
+    .all()[0]
+  if (existing) return { projectId: existing.id, created: false }
+
+  try {
+    const snapshot = createRemotionProjectFromEpisode(episodeId, {
+      ...options,
+      mediaAccountId: options.mediaAccountId ?? episode.dramaId
+        ? db.select().from(schema.dramas).where(eq(schema.dramas.id, episode.dramaId)).all()[0]?.mediaAccountId ?? undefined
+        : undefined,
+    })
+    return { projectId: snapshot?.project.id ?? null, created: true }
+  } catch (err: any) {
+    console.error(`[ensureRemotionProjectForEpisode] failed for episode ${episodeId}:`, err.message)
+    return { projectId: null, created: false, reason: err.message }
+  }
 }
 
 export function createRemotionProjectFromScript(
@@ -1166,6 +1230,20 @@ function archiveRemotionPlanRows(
   })
 }
 
+function planAssetVersion(projectId: number, asset: PlannedAsset): number {
+  const current = getLatestAssetRow(projectId, asset.assetKey)
+  if (!current) return 1
+
+  const currentPrompt = current.promptJson
+  const plannedPrompt = asset.prompt === undefined ? null : stringify(asset.prompt)
+  const plannedLocalPath = asset.localPath ?? null
+  const plannedProvider = asset.provider ?? null
+  const changed = currentPrompt !== plannedPrompt
+    || current.localPath !== plannedLocalPath
+    || current.provider !== plannedProvider
+  return changed ? (current.version ?? 1) + 1 : current.version ?? 1
+}
+
 function plannerStoryboard(value: Record<string, unknown>): PlannerStoryboard {
   return value as PlannerStoryboard
 }
@@ -1269,6 +1347,7 @@ export function planRemotionProject(
     storyboards.map(plannerStoryboard),
     existingShots,
     stockCatalog,
+    { visualStyle: visualStyleForRemotionSource(source) },
   )
   if (!plan.shots.length) throw new Error('Remotion planner produced no shots')
 
@@ -1306,6 +1385,7 @@ export function planRemotionProject(
       width: asset.width,
       height: asset.height,
       durationMs: asset.durationMs,
+      version: planAssetVersion(projectId, asset),
       license: asset.license,
       metadata: asset.metadata,
     })
@@ -1403,7 +1483,11 @@ export function planRemotionProject(
   recordRemotionStageRun({
     projectId,
     stage: 'asset_plan',
-    input: { sourceHash, shotPlanHash: hash(plan.shots) },
+    input: {
+      sourceHash,
+      shotPlanHash: hash(plan.shots),
+      visualStyle: visualStyleForRemotionSource(source),
+    },
     output: factoryEnvelope('asset_plan', {
       assets: plan.assets.map((asset) => ({
         assetKey: asset.assetKey,

@@ -12,6 +12,53 @@ const { db, schema } = await import('../db/index.js')
 const { now } = await import('../utils/response.js')
 const { default: route } = await import('./episodes.js')
 
+test('Dharma narration speed defaults to 0.85 in storage and remains adjustable', async () => {
+  const ts = now()
+  const dharmaDramaId = Number(db.insert(schema.dramas).values({
+    title: 'Dharma Speed Drama',
+    genre: 'dharma',
+    status: 'draft',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const storedDefaultId = Number(db.insert(schema.episodes).values({
+    dramaId: dharmaDramaId,
+    episodeNumber: 1,
+    title: 'Stored Default',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const [storedDefault] = db.select().from(schema.episodes).where(eq(schema.episodes.id, storedDefaultId)).all()
+  assert.equal(storedDefault?.narrationSpeed, 0.85)
+
+  const createResponse = await route.request('/', {
+    method: 'POST',
+    body: JSON.stringify({ drama_id: dharmaDramaId, title: 'Adjustable Episode' }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  assert.equal(createResponse.status, 200)
+  const created = await createResponse.json() as { data: { id: number } }
+
+  const updateResponse = await route.request(`/${created.data.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ narration_speed: 1.1 }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  assert.equal(updateResponse.status, 200)
+  let [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, created.data.id)).all()
+  assert.equal(episode?.narrationSpeed, 1.1)
+
+  const invalidUpdateResponse = await route.request(`/${created.data.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ narration_speed: 9 }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  assert.equal(invalidUpdateResponse.status, 200)
+  ;[episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, created.data.id)).all()
+  assert.equal(episode?.narrationSpeed, 0.85)
+})
+
 test('POST /episodes stores cover_prompt and auto-schedules cover generation', async () => {
   const ts = now()
   const dramaId = Number(db.insert(schema.dramas).values({
@@ -100,6 +147,33 @@ test('POST /episodes/:id/generate-covers auto-designs when prompt is empty', asy
   assert.ok(json.data.task_id)
 })
 
+test('history factory cover generation rejects missing user-provided title', async () => {
+  const ts = now()
+  const dramaId = Number(db.insert(schema.dramas).values({
+    title: 'History Cover Contract Drama',
+    status: 'draft',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const episodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 1,
+    title: '用户确认的正片标题',
+    metadata: JSON.stringify({ historyFactory: 'remotion-history-factory' }),
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+
+  const res = await route.request(`/${episodeId}/generate-covers`, {
+    method: 'POST',
+    body: JSON.stringify({ prompt: 'cinematic historical scene' }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const json = await res.json()
+  assert.equal(res.status, 400)
+  assert.match(json.message, /cover_design\.main_title/u)
+})
+
 test('PUT /episodes/:id extracts a polish cover plan from script_content', async () => {
   const ts = now()
   const dramaId = Number(db.insert(schema.dramas).values({
@@ -146,4 +220,53 @@ test('PUT /episodes/:id extracts a polish cover plan from script_content', async
   const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
   assert.equal(JSON.parse(episode.coverDesignJson || '{}').main_title, '盛世是假象')
   assert.match(episode.coverPrompt || '', /cinematic palace and empty street/)
+})
+
+test('PUT /episodes/:id stores every publishing package field for platform publishing', async () => {
+  const ts = now()
+  const dramaId = Number(db.insert(schema.dramas).values({
+    title: 'Dharma Publishing Package Drama',
+    genre: 'dharma',
+    status: 'draft',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const episodeId = Number(db.insert(schema.episodes).values({
+    dramaId,
+    episodeNumber: 1,
+    title: '亲情边界测试',
+    createdAt: ts,
+    updatedAt: ts,
+  }).run().lastInsertRowid)
+  const publishingPackage = {
+    schema_version: 'dharma-publishing-package/v1',
+    title: '亲情边界测试',
+    opening_hook: '把你熬垮的孝顺，已经不只是孝顺了。',
+    cliffhanger: '承认做不到，才知道如何重新安排照护。',
+    creative_brief: { stance: '责任不应以自我消失为证明。' },
+    cover_design: {
+      main_title: '孝顺不是服从',
+      sub_title: '可以报恩',
+      ai_prompt: 'cinematic family care scene, no text',
+    },
+    extension: { source: 'dharma-video-script' },
+  }
+
+  const response = await route.request(`/${episodeId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ publishing_package: publishingPackage }),
+    headers: { 'Content-Type': 'application/json' },
+  })
+  assert.equal(response.status, 200)
+  const body = await response.json() as any
+  assert.equal(body.data.publishing_package_saved, true)
+
+  const [episode] = db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId)).all()
+  assert.equal(episode?.openingHook, publishingPackage.opening_hook)
+  assert.equal(episode?.cliffhanger, publishingPackage.cliffhanger)
+  assert.deepEqual(JSON.parse(episode?.creativeBriefJson || '{}'), publishingPackage.creative_brief)
+  assert.deepEqual(JSON.parse(episode?.coverDesignJson || '{}'), publishingPackage.cover_design)
+  const metadata = JSON.parse(episode?.metadata || '{}')
+  assert.deepEqual(metadata.dharmaPublishing.package, publishingPackage)
+  assert.ok(metadata.dharmaPublishing.package_sha256)
 })

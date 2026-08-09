@@ -247,7 +247,7 @@ const form = ref({
   title: '',
   total_episodes: 0,
   genre: 'generic',
-  style: 'cinematic',
+  style: 'cold_ink_spatial',
   media_account_id: null,
   project_positioning: {
     thesis: '',
@@ -302,10 +302,11 @@ const genreSelectOptions = computed(() => genres.map(g => ({ label: genreLabels[
 
 // 视觉风格：精选适合连续分镜的高频风格；旧风格仍由后端兼容
 const styles = [
-  'historical_systems', 'period_crime_35mm', 'institutional_tableau',
+  'cold_eastern_epic', 'cold_ink_spatial', 'historical_systems', 'period_crime_35mm', 'institutional_tableau',
   'republican_shanghai', 'showa_nostalgia', 'northwest_epic', 'korean_crime',
   'studio_wuxia', 'location_kungfu', 'ink_wuxia', 'old_color_wuxia',
   'guofeng_editorial', 'night_flash_snapshot', 'commercial_teal_orange',
+  'dragon_rider_cover', 'volcanic_forge_blacksmith',
   'cinematic', 'documentary', 'chinese_gongbi', 'wuxia', 'eastern_fantasy',
   'anime', 'watercolor', 'cyberpunk',
 ]
@@ -326,6 +327,8 @@ const styleLabels = {
   wong_kar_wai: '王家卫',
   documentary: '纪录片',
   vintage_film: '复古胶片',
+  cold_eastern_epic: '冷调东方史诗',
+  cold_ink_spatial: '冷墨史诗·三维空间二维绘',
   historical_systems: '现实系统史诗',
   period_crime_35mm: '复古犯罪凝视',
   institutional_tableau: '制度剧场',
@@ -340,6 +343,8 @@ const styleLabels = {
   guofeng_editorial: '古风暗场时尚',
   night_flash_snapshot: '夜街直闪快照',
   commercial_teal_orange: '现代青橙商业',
+  dragon_rider_cover: '赤龙骑士·史诗封面',
+  volcanic_forge_blacksmith: '熔岩锻造·铁匠史诗',
   // 艺术绘画
   oil_painting: '油画',
   pastel: '色粉画',
@@ -395,7 +400,7 @@ const styleSelectOptions = computed(() => styles.map(s => ({ label: styleLabels[
 // 题材 → 推荐视觉风格（两者独立，不再混在一起）
 const genreStyleRecommendations = {
   generic: 'cinematic',
-  history: 'historical_systems',
+  history: 'cold_ink_spatial',
   scifi: 'cyberpunk',
   mythology: 'eastern_fantasy',
   space: 'cinematic',
@@ -403,7 +408,7 @@ const genreStyleRecommendations = {
   ancient: 'chinese_gongbi',
   wasteland: 'cinematic',
 }
-const recommendedStyle = computed(() => genreStyleRecommendations[form.value.genre] || 'cinematic')
+const recommendedStyle = computed(() => genreStyleRecommendations[form.value.genre] || 'cold_ink_spatial')
 const isRecommendedStyle = computed(() => form.value.style === recommendedStyle.value)
 const mediaAccountOptions = computed(() => mediaAccounts.value.map(account => ({
   label: account.name,

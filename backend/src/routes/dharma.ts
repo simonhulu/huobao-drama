@@ -10,8 +10,9 @@
 import { Hono, type Context } from 'hono'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { and, eq, isNull } from 'drizzle-orm'
-import { db, schema } from '../db/index.js'
-import { success, badRequest, notFound, now } from '../utils/response.js'
+import { db, runImmediateTransaction, schema } from '../db/index.js'
+import { success, badRequest, created, notFound, now } from '../utils/response.js'
+import { parseMarkdownScriptDocument } from '../utils/tts-text.js'
 import { createTask, getTask, listTasks, reconcileDharmaCommitClaim } from '../services/tasks/store.js'
 import {
   createDharmaRenderPayload,
@@ -97,8 +98,237 @@ import {
   type DharmaImageMove,
 } from '../services/dharma-image-style.js'
 import { parseAIConfigModels } from '../services/ai.js'
+import { DEFAULT_DHARMA_NARRATION_SPEED } from '../services/narration-defaults.js'
+import {
+  dharmaPublishingPackageFingerprint,
+  normalizeDharmaPublishingPackage,
+} from '../services/dharma-publishing-package.js'
 
 const app = new Hono()
+
+class DharmaFactoryIntakeConflict extends Error {}
+
+const MIN_DHARMA_NARRATION_SPEED = 0.8
+const MAX_DHARMA_NARRATION_SPEED = 2.5
+
+function parseDharmaNarrationSpeed(value: unknown): number | null {
+  if (value === undefined) return DEFAULT_DHARMA_NARRATION_SPEED
+  const speed = Number(value)
+  if (!Number.isFinite(speed) || speed < MIN_DHARMA_NARRATION_SPEED || speed > MAX_DHARMA_NARRATION_SPEED) {
+    return null
+  }
+  return Math.round(speed * 100) / 100
+}
+
+function dharmaFactoryIntakeFingerprint(input: {
+  title: string
+  scriptSha256: string
+  mediaAccountId: number
+  imageConfigId: number
+  narrationVoiceId: string
+  bgmAudioUrl: string
+  narrationSpeed: number
+  publishingPackageSha256?: string
+}) {
+  return createHash('sha256').update(JSON.stringify(input)).digest('hex')
+}
+
+app.post('/factory/intake', async (c) => {
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>))
+  const runToken = typeof body.run_token === 'string' ? body.run_token.trim() : ''
+  const title = typeof body.title === 'string' ? body.title.trim() : ''
+  const rawScriptContent = typeof body.script_content === 'string' ? body.script_content : ''
+  const scriptDocument = parseMarkdownScriptDocument(rawScriptContent)
+  const scriptContent = scriptDocument.body
+  const suppliedSourceScriptSha256 = typeof body.script_source_sha256 === 'string'
+    ? body.script_source_sha256.trim().toLowerCase()
+    : ''
+  const suppliedScriptMetadata = body.script_metadata && typeof body.script_metadata === 'object'
+    ? Object.fromEntries(Object.entries(body.script_metadata as Record<string, unknown>).map(([key, value]) => [key, String(value)]))
+    : {}
+  const scriptMetadata = Object.keys(suppliedScriptMetadata).length ? suppliedScriptMetadata : scriptDocument.metadata
+  const suppliedScriptSha256 = typeof body.script_sha256 === 'string' ? body.script_sha256.trim().toLowerCase() : ''
+  const mediaAccountId = Number(body.media_account_id)
+  const imageConfigId = Number(body.image_config_id)
+  const narrationVoiceId = typeof body.narration_voice_id === 'string' ? body.narration_voice_id.trim() : ''
+  const narrationSpeed = parseDharmaNarrationSpeed(body.narration_speed)
+  const bgmAudioUrl = typeof body.bgm_audio_url === 'string' ? body.bgm_audio_url.trim() : ''
+  let publishingPackage: ReturnType<typeof normalizeDharmaPublishingPackage> | null = null
+  if (body.publishing_package !== undefined) {
+    try {
+      publishingPackage = normalizeDharmaPublishingPackage(body.publishing_package, { expectedTitle: title })
+    } catch (error) {
+      return badRequest(c, error instanceof Error ? error.message : String(error))
+    }
+  }
+  const publishingPackageSha256 = publishingPackage
+    ? dharmaPublishingPackageFingerprint(publishingPackage)
+    : ''
+  const suppliedPublishingPackageSha256 = typeof body.publishing_package_sha256 === 'string'
+    ? body.publishing_package_sha256.trim().toLowerCase()
+    : ''
+  if (suppliedPublishingPackageSha256 && suppliedPublishingPackageSha256 !== publishingPackageSha256) {
+    return badRequest(c, 'publishing_package_sha256 does not match publishing_package')
+  }
+
+  if (!/^dharma-comic-run:[a-f0-9]{20}$/u.test(runToken)) return badRequest(c, 'invalid run_token')
+  if (!title || !scriptContent.trim()) return badRequest(c, 'title and script_content are required')
+  const actualScriptSha256 = createHash('sha256').update(scriptContent).digest('hex')
+  const rawScriptSha256 = createHash('sha256').update(rawScriptContent).digest('hex')
+  // A runner may send the already-separated body together with the hash of the
+  // original Markdown file. Only validate against raw bytes when this request
+  // actually contains front matter; body-only requests cannot reveal the
+  // original file bytes to the intake endpoint.
+  if (suppliedSourceScriptSha256 && scriptDocument.hasFrontMatter && suppliedSourceScriptSha256 !== rawScriptSha256) {
+    return badRequest(c, 'script_source_sha256 does not match script_content')
+  }
+  if (suppliedScriptSha256 !== actualScriptSha256 && suppliedScriptSha256 !== rawScriptSha256) {
+    return badRequest(c, 'script_sha256 does not match script_content or its front matter-free body')
+  }
+  if (!Number.isSafeInteger(mediaAccountId) || mediaAccountId <= 0) return badRequest(c, 'invalid media_account_id')
+  if (!Number.isSafeInteger(imageConfigId) || imageConfigId <= 0) return badRequest(c, 'invalid image_config_id')
+  if (narrationSpeed === null) return badRequest(c, 'narration_speed must be between 0.8 and 2.5')
+  if (!narrationVoiceId || !bgmAudioUrl) return badRequest(c, 'narration_voice_id and bgm_audio_url are required')
+
+  const requestSha256 = dharmaFactoryIntakeFingerprint({
+    title,
+    scriptSha256: actualScriptSha256,
+    mediaAccountId,
+    imageConfigId,
+    narrationVoiceId,
+    bgmAudioUrl,
+    narrationSpeed,
+    publishingPackageSha256,
+  })
+
+  try {
+    const result = runImmediateTransaction(() => {
+      const [receipt] = db.select().from(schema.dharmaFactoryIntakes)
+        .where(eq(schema.dharmaFactoryIntakes.runToken, runToken))
+        .all()
+      if (receipt) {
+        if (receipt.requestSha256 !== requestSha256) {
+          throw new DharmaFactoryIntakeConflict('run token already belongs to different input')
+        }
+        const [drama] = db.select().from(schema.dramas)
+          .where(and(eq(schema.dramas.id, receipt.dramaId), isNull(schema.dramas.deletedAt)))
+          .all()
+        const [episode] = db.select().from(schema.episodes)
+          .where(and(eq(schema.episodes.id, receipt.episodeId), isNull(schema.episodes.deletedAt)))
+          .all()
+        if (!drama || !episode || episode.dramaId !== drama.id) {
+          throw new Error('factory intake receipt points to missing production records')
+        }
+        return { dramaId: drama.id, episode, reused: true }
+      }
+
+      const [mediaAccount] = db.select().from(schema.mediaAccounts)
+        .where(and(eq(schema.mediaAccounts.id, mediaAccountId), isNull(schema.mediaAccounts.deletedAt)))
+        .all()
+      if (!mediaAccount) throw new Error('media account not found')
+      const [imageConfig] = db.select().from(schema.aiServiceConfigs)
+        .where(eq(schema.aiServiceConfigs.id, imageConfigId))
+        .all()
+      if (!imageConfig || !imageConfig.isActive || imageConfig.serviceType !== 'image') {
+        throw new Error('active image config not found')
+      }
+      if (!parseAIConfigModels(imageConfig.model).includes('gpt-image-2')) {
+        throw new Error('image config does not allow gpt-image-2')
+      }
+
+      const ts = now()
+      const episodeMetadata: Record<string, unknown> = {
+        contract: 'comic-progressive-five-v1',
+        runToken,
+        scriptSha256: actualScriptSha256,
+        sourceScriptSha256: suppliedSourceScriptSha256 || rawScriptSha256,
+        scriptMetadata,
+      }
+      if (publishingPackage) {
+        episodeMetadata.dharmaPublishing = {
+          schema_version: publishingPackage.schema_version,
+          package_sha256: publishingPackageSha256,
+          package: publishingPackage,
+        }
+      }
+      const dramaInsert = db.insert(schema.dramas).values({
+        mediaAccountId,
+        title,
+        genre: 'dharma',
+        style: 'retro-anime-1980s',
+        workflowType: 'direct_script',
+        totalEpisodes: 1,
+        metadata: runToken,
+        status: 'draft',
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      const dramaId = Number(dramaInsert.lastInsertRowid)
+      const episodeInsert = db.insert(schema.episodes).values({
+        dramaId,
+        episodeNumber: 1,
+        title,
+        scriptContent,
+        content: scriptContent,
+        metadata: JSON.stringify(episodeMetadata),
+        openingHook: publishingPackage?.opening_hook ?? null,
+        cliffhanger: publishingPackage?.cliffhanger ?? null,
+        creativeBriefJson: publishingPackage ? JSON.stringify(publishingPackage.creative_brief) : null,
+        coverPrompt: publishingPackage?.cover_design.ai_prompt ?? null,
+        coverDesignJson: publishingPackage ? JSON.stringify(publishingPackage.cover_design) : null,
+        imageConfigId,
+        aspectRatio: '16:9',
+        renderMode: 'image_story',
+        autoMode: false,
+        enableAiRewrite: false,
+        workflowType: 'direct_script',
+        narrationMode: 'verbatim',
+        dialogueMode: 'narration_only',
+        narrationVoiceId,
+        narrationSpeed,
+        bgmAudioUrl,
+        status: 'draft',
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      const episodeId = Number(episodeInsert.lastInsertRowid)
+      db.insert(schema.dharmaFactoryIntakes).values({
+        runToken,
+        requestSha256,
+        dramaId,
+        episodeId,
+        createdAt: ts,
+        updatedAt: ts,
+      }).run()
+      const [episode] = db.select().from(schema.episodes)
+        .where(eq(schema.episodes.id, episodeId))
+        .all()
+      if (!episode) throw new Error('factory episode insert failed')
+      return { dramaId, episode, reused: false }
+    })
+
+    const payload = {
+      drama_id: result.dramaId,
+      episode: {
+        id: result.episode.id,
+        episode_number: result.episode.episodeNumber,
+        title: result.episode.title,
+      },
+      reused: result.reused,
+      run_token: runToken,
+      request_sha256: requestSha256,
+      publishing_package: publishingPackage
+        ? { schema_version: publishingPackage.schema_version, sha256: publishingPackageSha256 }
+        : null,
+    }
+    return result.reused ? success(c, payload) : created(c, payload)
+  } catch (error) {
+    if (error instanceof DharmaFactoryIntakeConflict) {
+      return c.json({ code: 409, message: error.message }, 409)
+    }
+    return badRequest(c, error instanceof Error ? error.message : String(error))
+  }
+})
 
 interface FootageAssignment {
   storyboardId: number
@@ -880,6 +1110,7 @@ app.get('/episode/:episodeId/footage', async (c) => {
     episode_id: episodeId,
     drama_id: ep.dramaId,
     image_style: resolveDharmaImageStyle(drama?.style).id,
+    narration_speed: ep.narrationSpeed ?? DEFAULT_DHARMA_NARRATION_SPEED,
     bgm_audio_url: ep.bgmAudioUrl ?? null,
     pre_tts_ready: Boolean(ep.preTtsAudioUrl && ep.preTtsTitlesJson),
     video_url: ep.videoUrl ?? null,

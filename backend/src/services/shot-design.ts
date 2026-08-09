@@ -108,7 +108,7 @@ async function textLlmJson(systemPrompt: string, userPrompt: string, temperature
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llm.apiKey}` },
       body: JSON.stringify(attempt === 1 ? body : { ...body, response_format: undefined }),
-    }).catch(() => null as any)
+    }, { lane: 'text-agent' }).catch(() => null as any)
     if (!res || !res.ok) return null
     const json = await res.json().catch(() => null)
     const content = String(json?.choices?.[0]?.message?.content || '')

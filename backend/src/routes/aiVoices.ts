@@ -5,12 +5,26 @@
  * POST /api/v1/ai-voices/design   - 使用 MiniMax Voice Design 生成音色
  */
 import { Hono } from 'hono'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, notInArray } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
+import { generateTTS } from '../services/tts-generation.js'
 
 type MiniMaxVoiceType = 'system' | 'voice_generation' | 'voice_cloning'
+
+const bundledSystemVoices = [
+  {
+    voiceId: 'Chinese_deep_voiced_male_nv1',
+    voiceName: '深沉男声（Deep-voiced Male）',
+    description: ['低沉、厚重、成熟', '适合历史旁白、纪实讲述和稳重男性角色'],
+  },
+  {
+    voiceId: 'Chinese_gravelly_storyteller_nv1',
+    voiceName: '沙哑故事讲述者（Gravelly Storyteller）',
+    description: ['沙哑、沧桑、讲述感强', '适合历史故事、悬疑叙事和粗粝男性角色'],
+  },
+] as const
 
 const app = new Hono()
 
@@ -32,6 +46,27 @@ app.get('/', async (c) => {
   }))
 
   return success(c, parsed)
+})
+
+// POST /ai-voices/preview - 生成一段短试听音频
+app.post('/preview', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>
+  const voiceId = String(body.voice_id || '').trim()
+  if (!voiceId) return badRequest(c, 'voice_id is required')
+
+  const text = String(body.text || '这是一段音色试听。声音清晰，节奏自然，适合历史故事与人物讲述。').trim().slice(0, 200)
+  if (!text) return badRequest(c, 'text is required')
+
+  try {
+    const result = await generateTTS({
+      text,
+      voice: voiceId,
+      configId: body.config_id == null ? undefined : Number(body.config_id),
+    })
+    return success(c, { audio_url: result, voice_id: voiceId })
+  } catch (error: any) {
+    return badRequest(c, error?.message || '音色试听生成失败')
+  }
 })
 
 // POST /ai-voices/design
@@ -164,6 +199,7 @@ app.post('/sync', async (c) => {
   db.delete(schema.aiVoices).where(and(
     eq(schema.aiVoices.provider, 'minimax'),
     eq(schema.aiVoices.voiceType, 'system'),
+    notInArray(schema.aiVoices.voiceId, bundledSystemVoices.map(voice => voice.voiceId)),
   )).run()
 
   const ts = now()

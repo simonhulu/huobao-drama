@@ -69,7 +69,7 @@ export function attachDialogHandler(page) {
 }
 
 export async function connectBrowser() {
-  const browser = await puppeteer.connect({ browserURL: CDP_URL, defaultViewport: null })
+  const browser = await puppeteer.connect({ browserURL: CDP_URL, defaultViewport: null, protocolTimeout: 300_000 })
   // 全局给所有现存 + 未来 page 挂 beforeunload 处理，根治 "Leave site?" 卡导航。
   try {
     for (const p of await browser.pages()) attachDialogHandler(p)
@@ -90,10 +90,12 @@ export async function getUploadPage(browser, { goto = true } = {}) {
   if (!page) page = await browser.newPage()
   attachDialogHandler(page)
   if (goto && !page.url().includes('/content/upload') && !page.url().includes('/content/post')) {
-    await page.goto(UPLOAD_URL, { waitUntil: 'networkidle2', timeout: 60_000 })
+    // domcontentloaded 比 networkidle2 快得多——抖音创作者是 SPA，关键 DOM 在
+    // 首屏 JS 执行后就绪，不需要等所有第三方资源（分析/广告）停止请求。
+    await page.goto(UPLOAD_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   }
   await page.setViewport({ width: 1440, height: 900 })
-  page.setDefaultTimeout(60_000)
+  page.setDefaultTimeout(300_000)
   page.setDefaultNavigationTimeout(60_000)
   return page
 }

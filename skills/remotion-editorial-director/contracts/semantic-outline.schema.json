@@ -39,7 +39,29 @@
         "claimIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}},
         "emphasis": {"type": "number", "minimum": 0, "maximum": 1},
         "uncertainty": {"type": "number", "minimum": 0, "maximum": 1},
-        "assetRequirements": {"type": "array", "uniqueItems": true, "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}}
+        "assetRequirements": {"type": "array", "uniqueItems": true, "items": {"$ref": "editorial://schema/common/v1#/$defs/stableId"}},
+        "editorialHint": {"$ref": "#/$defs/editorialHint"}
+      }
+    },
+    "editorialHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {"enum": ["hook", "establishing", "mechanism", "comparison", "reversal", "crisis", "resolution"]},
+        "visualIntent": {"type": "string", "minLength": 1, "maxLength": 240},
+        "emphasis": {"type": "number", "minimum": 0, "maximum": 1},
+        "focus": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "properties": {
+            "x": {"type": "number", "minimum": 0, "maximum": 1},
+            "y": {"type": "number", "minimum": 0, "maximum": 1}
+          }
+        },
+        "typographyVariant": {"enum": ["impact", "stamp", "whisper"]},
+        "transitionEnergy": {"enum": ["low", "medium", "high"]},
+        "soundIntent": {"enum": ["none", "whoosh", "impact", "low_boom"]}
       }
     },
     "entity": {

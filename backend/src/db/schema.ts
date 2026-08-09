@@ -44,6 +44,7 @@ export const dramas = sqliteTable('dramas', {
   tags: text('tags'),
   hook: text('hook'),
   metadata: text('metadata'),
+  publishSyncJson: text('publish_sync_json'),
   projectPositioningJson: text('project_positioning_json'),
   introTemplateId: text('intro_template_id'),
   createdAt: text('created_at').notNull(),
@@ -83,7 +84,7 @@ export const episodes = sqliteTable('episodes', {
   enableAiRewrite: integer('enable_ai_rewrite', { mode: 'boolean' }).default(true),
   workflowType: text('workflow_type').default('story_rewrite'),
   narrationVoiceId: text('narration_voice_id'),
-  narrationSpeed: real('narration_speed').default(1.0),
+  narrationSpeed: real('narration_speed').default(0.85),
   subtitleEnabled: integer('subtitle_enabled', { mode: 'boolean' }).default(true),
   subtitleFont: text('subtitle_font').default('PingFang SC'),
   subtitleColor: text('subtitle_color').default('#FFFFFF'),
@@ -126,6 +127,15 @@ export const episodes = sqliteTable('episodes', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   deletedAt: text('deleted_at'),
+})
+
+export const dharmaFactoryIntakes = sqliteTable('dharma_factory_intakes', {
+  runToken: text('run_token').primaryKey(),
+  requestSha256: text('request_sha256').notNull(),
+  dramaId: integer('drama_id').notNull(),
+  episodeId: integer('episode_id').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 })
 
 export const characters = sqliteTable('characters', {

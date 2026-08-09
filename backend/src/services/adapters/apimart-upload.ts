@@ -94,7 +94,7 @@ export async function uploadAPIMartImage(
         'Authorization': `Bearer ${config.apiKey}`,
       },
       body: form as unknown as BodyInit,
-    }, { timeoutMs: 120_000, maxAttempts: 2 })
+    }, { timeoutMs: 120_000, maxAttempts: 2, lane: 'image-generate' })
 
     if (!resp.ok) {
       const responseText = await resp.text()

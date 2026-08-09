@@ -17,9 +17,31 @@ export interface HistoryVisualStyleProfile {
   avoid: string[]
 }
 
-export const DEFAULT_HISTORY_VISUAL_STYLE = 'historical_systems'
+export const DEFAULT_HISTORY_VISUAL_STYLE = 'cold_ink_spatial'
 
 export const HISTORY_VISUAL_STYLE_PROFILES: Record<string, HistoryVisualStyleProfile> = {
+  cold_eastern_epic: {
+    id: 'cold_eastern_epic',
+    label: '冷调东方史诗',
+    suitedFor: '战争、权谋、王朝更替、宫城攻防与历史转折',
+    capture: 'Illustration & 3D hybrid；以电影级三维空间、建筑体积、雾气和材质建立可信尺度，再以东方手绘动画的墨线、平涂色块和木版画颗粒统一画面表面',
+    composition: '宏大但单一焦点的16:9横构图；用前景人物或城墙建立压迫尺度，中景放置决定性行动，远景用宫城、山脉、军阵或烽火完成历史规模；采用对角线和大面积冷色留白，不做信息堆叠',
+    palette: '冷青、铅灰、靛蓝和墨绿为主，暗朱红或橙金只用于烽火、王旗、印章和不可逆结果；低饱和、高对比，避免固定青橙商业调色',
+    lighting: '以冷月光、阴天雪光或火光等场景来源明确的主光塑造体积；火光提供局部暖色反射，人物关键动作处于可读中间调，背景压低但保留建筑层次',
+    texture: '厚重黑色木刻墨线、手绘动画背景、平涂阴影块、干刷笔触、纸张颗粒与轻微印刷错位；石墙、雪、金属和木材保留克制的三维材质响应',
+    avoid: ['照片级人物皮肤', '光滑塑料CG', '游戏概念图式过度细节', '纯二维平面插画', '通用动漫脸', '无来源体积光', '文字、Logo与水印'],
+  },
+  cold_ink_spatial: {
+    id: 'cold_ink_spatial',
+    label: '冷墨史诗·三维空间二维绘',
+    suitedFor: '王朝覆灭、政变现场、战争关键帧、权力对峙与高冲击开场',
+    capture: '3D建立空间、光影、景深、建筑体积和真实材质；2D处理角色造型、粗墨轮廓、剪影、阴影块面、平涂色彩和颗粒质感，角色必须像手绘动画人物嵌入可信三维场景',
+    composition: '强烈前中后景：前景用二维角色或巨大剪影制造压迫，中景承载燃烧城门、拔刀、密令或旗帜更替等可见事件，远景用宫殿、山脉和冷月拉开空间；夸张建筑透视、明确视线引导、一个主视觉焦点',
+    palette: '青灰、墨绿、深靛蓝构成冷环境，暗红旗帜与橙金火光作为少量视觉爆点；色块简洁、轮廓醒目，缩小后仍能读出动作和结果',
+    lighting: '三维光影负责体积可信度：冷月光或雪光作为环境光，火光作为局部暖主光，湿地和金属产生受控反射；不使用无来源的霓虹、轮廓光或HDR光晕',
+    texture: '粗重略带手绘抖动的黑色墨线、硬边赛璐璐式阴影、干刷、纸张颗粒和轻微印刷错位；拒绝照片质感、过度磨皮和光滑游戏渲染',
+    avoid: ['把3D模型直接当成最终角色', '纯平面水墨插画', '平淡静态风景', '普通阅兵式群像', '元素堆满画面', '参考图文字或水印', '商业青橙滤镜'],
+  },
   historical_systems: {
     id: 'historical_systems',
     label: '现实系统史诗',
@@ -174,6 +196,72 @@ export const HISTORY_VISUAL_STYLE_PROFILES: Record<string, HistoryVisualStylePro
     texture: '高动态范围数字摄影、细微水平光晕与锐利主体细节',
     avoid: ['全画面橙青平均分配', '无来源轮廓光', '塑料皮肤', '所有历史题材通用化', 'HDR白边', '霓虹堆叠'],
   },
+  london_autumn_cinematic_illustration: {
+    id: 'london_autumn_cinematic_illustration',
+    label: '伦敦秋日电影感插画',
+    suitedFor: '城市旅行、人物漫游、秋日关系与温暖回忆段落',
+    capture: '写实城市建筑与二次元人物造型融合的电影感插画；人物比例自然，背景建筑保留清楚的地标识别度',
+    composition: '3:4竖构图或中近景人物构图，人物置于河岸步道一侧，泰晤士河、桥梁与地标建筑形成清晰远景层次，前景以落叶提供空间纵深',
+    palette: '琥珀、蜂蜜、焦糖橙与奶油白为主，棕色皮革和低饱和蓝灰建筑作为承托色',
+    lighting: '黄金时刻低角度暖色逆光，人物边缘有柔和轮廓光，轻微镜头光晕但不遮挡面部和建筑细节',
+    texture: '细致手绘背景、柔和动画边缘、空气透视、微妙纸张与画笔质感；头发和落叶表现轻微风动',
+    avoid: ['纯照片质感', '过度夸张动漫脸', '地标建筑变形', '过强光晕', '旅游海报文字', '水印与Logo'],
+  },
+  warm_children_watercolor_storybook: {
+    id: 'warm_children_watercolor_storybook',
+    label: '温暖手绘儿童绘本',
+    suitedFor: '亲情、成长、陪伴、童年回忆与柔和寓言',
+    capture: '现代儿童绘本插画机制，圆润角色、大头小身比例和克制的面部表情；数字水彩与可见笔触混合',
+    composition: '1:1或宽松横构图，人物关系优先，背景简化为少量可识别环境线索，主体周围保留呼吸感和绘本留白',
+    palette: '灰尘蓝、暖土色、米白和低饱和柔粉组成柔和色谱，避免高纯度商业卡通色',
+    lighting: '均匀柔和的漫射光，人物面部保持温暖可读，阴影轻且边缘柔软，不使用戏剧性硬光',
+    texture: '纹理数字水彩、软笔刷边缘、纸张纤维和局部叠色；衣物、篮子和自然物保持可触摸的手绘材质',
+    avoid: ['写实摄影皮肤', '尖锐硬边', '复杂拥挤背景', '恐怖或悲伤夸张表情', '品牌文字', '水印与Logo'],
+  },
+  japanese_cel_animation_twilight: {
+    id: 'japanese_cel_animation_twilight',
+    label: '冷峻日式赛璐珞漫画',
+    suitedFor: '城市孤独、黄昏对峙、调查、回忆与克制的情绪转折',
+    capture: '写实比例的日式动画赛璐珞画面，强黑色轮廓、平涂色块和少量选择性阴影，背景细节接近城市观察',
+    composition: '1:1侧面肖像或平视中景，人物偏置于画面一侧，店铺、车辆、电线杆和街灯形成可读的日本城市背景',
+    palette: '蓝灰、铅灰和深靛蓝的黄昏冷调，室内灯与路灯用少量暖黄色作为强对比点',
+    lighting: '冷环境天光配局部暖色实景灯，明暗边界清楚，人物轮廓与眼神保持可读，不使用无来源霓虹光',
+    texture: '粗而干净的黑色线稿、平面赛璐珞阴影、轻微印刷颗粒与手绘背景纹理',
+    avoid: ['3D渲染质感', '渐变过度的数码插画', '现代霓虹赛博朋克', '通用萌系脸', '文字与水印', '过饱和色彩'],
+  },
+  stylized_3d_explorer_character: {
+    id: 'stylized_3d_explorer_character',
+    label: '3D皮克斯式角色渲染',
+    suitedFor: '角色介绍、奇幻探索、亲子冒险、品牌角色与道具特写',
+    capture: '高完成度3D动画角色渲染，略夸张但可信的比例，玩具般轮廓与真实材质并存；不依赖具体创作者名称',
+    composition: '9:16侧面全身或三分之二身构图，角色与灯笼、手杖、背包形成清楚的动作三角，纯色背景保持主体轮廓完整',
+    palette: '深青色纯色背景配暖土色服装，灯笼橙光作为唯一高亮焦点，材质色彩有明确冷暖对比',
+    lighting: '暖灯笼作为主光源，配柔和工作室补光和软阴影；皮肤、羊毛、灯笼金属与编织物分别呈现不同光泽',
+    texture: '高细节羊毛、灯芯绒、皮革、木材和编织纹理，皮肤有自然次表面散射，边缘干净但不塑料',
+    avoid: ['扁平二维插画', '照片级真人脸', '复杂环境背景', '过度油亮塑料材质', '文字与水印', '多余装饰元素'],
+  },
+  american_comic_graffiti_propaganda: {
+    id: 'american_comic_graffiti_propaganda',
+    label: '美式硬核漫画涂鸦',
+    suitedFor: '政治讽喻、冲突、公共议题、强情绪开场与街头文化表达',
+    capture: '多格美式漫画页面与街头涂鸦纹理结合，粗黑墨线、交叉排线、喷溅、半色调网点和手写气泡共同构成视觉语言',
+    composition: '9:16多格分镜，低机位、动态斜线和局部特写交替，使用清楚的阅读顺序；每格只承担一个动作或情绪焦点',
+    palette: '高对比红、白、蓝与厚重黑影，旗帜或图形元素做磨损处理，避免整页平均铺满颜色',
+    lighting: '戏剧性硬光与强阴影服务动作方向，局部高光强调手指、脸部和城市轮廓，不使用柔和商业布光',
+    texture: '粗黑墨线、交叉排线、墨水飞溅、半色调网点、旧纸磨损和喷漆覆盖层',
+    avoid: ['真实政治人物肖像替代设计', '可读的误导性政治口号', '整齐商业漫画排版', '低对比柔和色彩', '文字水印', '无阅读顺序的元素堆叠'],
+  },
+  y2k_film_bedroom_snapshot: {
+    id: 'y2k_film_bedroom_snapshot',
+    label: 'Y2K卧室胶片快照',
+    suitedFor: '青春、深夜学习、私人回忆、互联网早期与亲密生活片段',
+    capture: '2000年代卧室的35mm胶片或早期CCD数码相机快照，空间有真实生活痕迹，姿态自然而非商业摆拍',
+    composition: '2:3竖构图，近距离轻广角抓拍，人物回头或停下动作，CRT显示器、书桌、台灯、床铺和海报组成可读的卧室层次',
+    palette: '褪暖米色、木色、暗棕与屏幕冷蓝交织，钨丝灯形成局部橙色温度，整体低饱和而不灰暗',
+    lighting: '昏暗环境中的暖钨丝台灯与CRT屏幕光混合，脸部有不完美但真实的局部照明，背景保留阴影细节',
+    texture: '35mm颗粒、早期数码噪点、柔焦、轻微运动模糊和暗部色偏；保留CCD或低感光度相机的不完美',
+    avoid: ['现代无菌极简卧室', '棚拍商业光', '过度清晰数码画质', '霓虹赛博朋克', '可读屏幕代码或品牌文字', '水印与Logo'],
+  },
 }
 
 const STYLE_ALIASES: Record<string, string> = {
@@ -194,11 +282,12 @@ const STYLE_ALIASES: Record<string, string> = {
 }
 
 export function resolveHistoryVisualStyle(style: string | null | undefined): HistoryVisualStyleProfile {
-  const normalized = (style || '').trim().toLowerCase()
+  const raw = (style || '').trim().toLowerCase()
+  const normalized = raw.replace(/-/g, '_')
   if (HISTORY_VISUAL_STYLE_PROFILES[normalized]) return HISTORY_VISUAL_STYLE_PROFILES[normalized]
   if (STYLE_ALIASES[normalized]) return HISTORY_VISUAL_STYLE_PROFILES[STYLE_ALIASES[normalized]]
 
-  const requestedId = normalized.replace(/^custom:/, '')
+  const requestedId = raw.replace(/^custom:/, '')
   const requestedLabel = requestedId.replace(/[_-]+/g, ' ')
   return {
     id: `custom:${requestedId}`,
@@ -224,6 +313,19 @@ export function buildHistoryVisualStyleDirective(style: string | null | undefine
     `光线机制：${profile.lighting}`,
     `媒介响应：${profile.texture}`,
     `硬性排除：${profile.avoid.join('、')}`,
+  ].join('；')
+}
+
+/**
+ * 高权重紧凑风格指令：放在 prompt 最开头，用 3-4 句锁定核心风格机制。
+ * 生图模型对 prompt 前段遵循度最高，避免长指令被淹没。
+ */
+export function buildCompactStyleDirective(style: string | null | undefined): string {
+  const profile = resolveHistoryVisualStyle(style)
+  return [
+    `风格锁定：${profile.label}。${profile.capture}`,
+    `媒介质感：${profile.texture}`,
+    `绝对禁止：${profile.avoid.slice(0, 4).join('、')}`,
   ].join('；')
 }
 

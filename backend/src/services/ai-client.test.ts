@@ -173,3 +173,43 @@ test('aiFetch exposes circuit breaker state reset helper', () => {
   resetCircuitBreaker('nonexistent-provider')
   assert.ok(true)
 })
+
+test('circuit breaker is isolated per provider lane', async () => {
+  fetchResponses = [
+    new Response('timeout', { status: 524 }),
+    new Response('timeout', { status: 524 }),
+    new Response('timeout', { status: 524 }),
+    new Response('timeout', { status: 524 }),
+    new Response('timeout', { status: 524 }),
+  ]
+
+  // lane A（text-design）连续失败达到阈值，熔断器打开
+  for (let i = 0; i < 5; i++) {
+    await assert.rejects(
+      () => aiFetch('lane-provider', 'http://example.com/generate', {}, {
+        maxAttempts: 1,
+        circuitBreakerThreshold: 5,
+        baseDelayMs: 1,
+        lane: 'text-design',
+      }),
+      /524/,
+    )
+  }
+  await assert.rejects(
+    () => aiFetch('lane-provider', 'http://example.com/generate', {}, { maxAttempts: 1, lane: 'text-design' }),
+    /Circuit breaker/,
+  )
+  assert.equal(fetchCalls.length, 5)
+
+  // lane B（image-generate，同 provider）不受影响，正常发请求成功
+  fetchResponses.push(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+  const laneB = await aiFetch('lane-provider', 'http://example.com/generate', {}, { maxAttempts: 1, lane: 'image-generate' })
+  assert.equal(laneB.status, 200)
+
+  // 缺省（无 lane）保持 provider 级单键，同样不受 lane A 熔断影响
+  fetchResponses.push(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+  const noLane = await aiFetch('lane-provider', 'http://example.com/generate', {}, { maxAttempts: 1 })
+  assert.equal(noLane.status, 200)
+
+  assert.equal(fetchCalls.length, 7)
+})

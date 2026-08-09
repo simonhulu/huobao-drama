@@ -120,7 +120,7 @@ export async function designHooksForEpisodes(input: HookDesignInput): Promise<Ho
       max_tokens: 8000,
       response_format: { type: 'json_object' },
     })
-  }, { timeoutMs: 180_000, maxAttempts: 2 })
+  }, { timeoutMs: 180_000, maxAttempts: 2, lane: 'text-agent' })
 
   const data = await response.json()
   const content = data?.choices?.[0]?.message?.content

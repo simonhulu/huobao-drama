@@ -19,6 +19,21 @@ test('specialized styles resolve without leaking to another profile', () => {
   assert.equal(resolveHistoryVisualStyle('wes_anderson').id, 'institutional_tableau')
   assert.equal(resolveHistoryVisualStyle('wuxia').id, 'old_color_wuxia')
   assert.equal(resolveHistoryVisualStyle('night_flash_snapshot').id, 'night_flash_snapshot')
+  assert.equal(resolveHistoryVisualStyle('cold_eastern_epic').id, 'cold_eastern_epic')
+  assert.equal(resolveHistoryVisualStyle('cold_ink_spatial').id, 'cold_ink_spatial')
+})
+
+test('prompt library styles resolve to executable profiles', () => {
+  for (const style of [
+    'london_autumn_cinematic_illustration',
+    'warm_children_watercolor_storybook',
+    'japanese_cel_animation_twilight',
+    'stylized_3d_explorer_character',
+    'american_comic_graffiti_propaganda',
+    'y2k_film_bedroom_snapshot',
+  ]) {
+    assert.equal(resolveHistoryVisualStyle(style).id, style)
+  }
 })
 
 test('unknown styles remain explicit custom profiles', () => {

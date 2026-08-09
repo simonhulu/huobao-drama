@@ -709,7 +709,7 @@ function detectPresetFromSettings(settings) {
   return 'custom'
 }
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
-const providers = ['ali', 'apimart', 'chatfire', 'egaki-chatgpt', 'gemini', 'minimax', 'openai', 'openrouter', 'rightcode', 'siliconflow', 'vidu', 'volcengine']
+const providers = ['ali', 'apimart', 'chatfire', 'egaki-chatgpt', 'gemini', 'gpt-image2', 'minimax', 'openai', 'openrouter', 'pcore', 'qwen3-tts', 'rightcode', 'siliconflow', 'vidu', 'volcengine']
 const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
 const serviceMeta = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
@@ -724,6 +724,7 @@ const providerPresets = {
     openai: { label: 'OpenAI 推荐', baseUrl: 'https://api.openai.com', models: ['gpt-4.1-mini'] },
   },
   image: {
+    'gpt-image2': { label: 'pcore GPT-Image-2', baseUrl: 'https://pcore.ai', models: ['gpt-image-2', 'gpt-image-2-1k', 'gpt-image-2-2k', 'gpt-image-2-4k'] },
     rightcode: { label: 'RightCode GPT-Image-2', baseUrl: 'https://www.right.codes/draw', models: ['gpt-image-2'] },
     apimart: { label: 'APIMart GPT-Image-2', baseUrl: 'https://api.apimart.ai', models: ['gpt-image-2'] },
     'egaki-chatgpt': { label: 'Egaki ChatGPT', baseUrl: 'local-egaki', models: ['gpt-image-2'] },
@@ -739,6 +740,7 @@ const providerPresets = {
   },
   audio: {
     minimax: { label: '火宝音频', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'] },
+    'qwen3-tts': { label: 'Qwen3-TTS 本地（免费）', baseUrl: 'http://127.0.0.1:5987', models: ['VoiceDesign-1.7B-8bit'] },
     siliconflow: { label: 'SiliconFlow 解说音频', baseUrl: 'https://api.siliconflow.com', models: ['FunAudioLLM/CosyVoice2-0.5B'] },
   },
 }
@@ -749,6 +751,8 @@ const huobaoPresetCards = [
   { serviceType: 'audio', label: '音频', provider: 'minimax', baseUrl: 'https://api.chatfire.site/minimax', model: 'speech-2.8-hd', priority: 97 },
 ]
 const endpointPrefixes = {
+  'gpt-image2': '/v1',
+  pcore: '/v1',
   rightcode: '/v1/images/generations',
   apimart: '/v1',
   'egaki-chatgpt': '',

@@ -16,6 +16,7 @@ export const SFX_LIBRARY_ROOT = process.env.SFX_LIBRARY_PATH || path.join(DATA_R
 const DOWNLOAD_DIR = path.join(SFX_LIBRARY_ROOT, 'downloads')
 const EXTRACT_DIR = path.join(SFX_LIBRARY_ROOT, 'library')
 const MAPPING_FILE = path.join(SFX_LIBRARY_ROOT, 'sfx-mapping.json')
+const METADATA_FILE = path.join(SFX_LIBRARY_ROOT, 'sfx-metadata.json')
 
 const AUDIO_EXTENSIONS = new Set(['.wav', '.ogg', '.mp3', '.m4a', '.flac'])
 
@@ -42,7 +43,56 @@ export interface SfxMapping {
     pack: string
     relativePath: string
     keywords: string[]
+    title?: string
+    source?: string
+    sourceUrl?: string
+    license?: string
+    attribution?: string
+    roles?: string[]
   }>
+}
+
+export interface SfxMetadataEntry {
+  title?: string
+  source?: string
+  sourceUrl?: string
+  license?: string
+  attribution?: string
+  tags?: string[]
+  /** Semantic production roles prevent a broad keyword match from substituting a different sound action. */
+  roles?: string[]
+}
+
+type SfxMetadataIndex = Record<string, SfxMetadataEntry>
+
+function loadSfxMetadata(): SfxMetadataIndex {
+  if (!fs.existsSync(METADATA_FILE)) return {}
+  try {
+    return JSON.parse(fs.readFileSync(METADATA_FILE, 'utf8')) as SfxMetadataIndex
+  } catch {
+    return {}
+  }
+}
+
+function saveSfxMetadata(metadata: SfxMetadataIndex) {
+  ensureDirs()
+  fs.writeFileSync(METADATA_FILE, JSON.stringify(metadata, null, 2))
+}
+
+export function recordSfxMetadata(relativePath: string, entry: SfxMetadataEntry) {
+  const normalized = relativePath.replace(/^\/+/, '').replace(/^sfx\//, '').replace(/\\/g, '/')
+  if (!normalized.startsWith('library/') || normalized.includes('\0')) {
+    throw new Error('Invalid sfx metadata path')
+  }
+  const metadata = loadSfxMetadata()
+  metadata[normalized] = {
+    ...metadata[normalized],
+    ...entry,
+    tags: [...new Set([...(metadata[normalized]?.tags ?? []), ...(entry.tags ?? [])])],
+    roles: [...new Set([...(metadata[normalized]?.roles ?? []), ...(entry.roles ?? [])])],
+  }
+  saveSfxMetadata(metadata)
+  return metadata[normalized]
 }
 
 function ensureDirs() {
@@ -107,6 +157,7 @@ export function extractPack(zipPath: string, packName: string): string {
 export function buildMapping(_packs?: SfxPack[]): SfxMapping {
   ensureDirs()
   const entries: SfxMapping['entries'] = []
+  const metadata = loadSfxMetadata()
 
   if (!fs.existsSync(EXTRACT_DIR)) {
     const emptyMapping: SfxMapping = {
@@ -136,10 +187,17 @@ export function buildMapping(_packs?: SfxPack[]): SfxMapping {
             if (fs.existsSync(mp3Sibling)) continue
           }
           const relativePath = path.relative(SFX_LIBRARY_ROOT, fullPath).replace(/\\/g, '/')
+          const details = metadata[relativePath] ?? {}
           entries.push({
             pack: packName,
             relativePath,
-            keywords: [...new Set([...filenameToKeywords(fullPath), ...packNameToKeywords(packName)])],
+            keywords: [...new Set([...filenameToKeywords(fullPath), ...packNameToKeywords(packName), ...(details.tags ?? [])])],
+            ...(details.title ? { title: details.title } : {}),
+            ...(details.source ? { source: details.source } : {}),
+            ...(details.sourceUrl ? { sourceUrl: details.sourceUrl } : {}),
+            ...(details.license ? { license: details.license } : {}),
+            ...(details.attribution ? { attribution: details.attribution } : {}),
+            ...(details.roles?.length ? { roles: details.roles } : {}),
           })
         }
       }
@@ -210,6 +268,11 @@ export function loadMapping(): SfxMapping | null {
   }
 }
 
+export function saveMapping(mapping: SfxMapping): void {
+  ensureDirs()
+  fs.writeFileSync(MAPPING_FILE, JSON.stringify(mapping, null, 2))
+}
+
 function getAbsolutePath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) return relativePath
   return path.join(SFX_LIBRARY_ROOT, relativePath)
@@ -267,6 +330,11 @@ export function deleteSfxAsset(relativeOrUrl: string): {
   }
 
   fs.unlinkSync(resolved.absPath)
+  const metadata = loadSfxMetadata()
+  if (metadata[resolved.relativePath]) {
+    delete metadata[resolved.relativePath]
+    saveSfxMetadata(metadata)
+  }
   const mapping = buildMapping()
   return {
     deleted: true,
@@ -294,9 +362,7 @@ const SCENE_CATEGORIES: Array<{ sceneKeywords: string[]; sfxKeywords: string[] }
  */
 /**
  * 中文音效描述 -> 英文文件名关键词。
- * 只保留本地 SFX 库中确实存在的素材方向（door/wood、cloth、footstep、
- * glass/paper/book 等），避免把不存在的概念（fire/horse/sword/water）
- * 映射后反而拉来不相关的文件。
+ * 只映射本地 SFX 库中有明确可复用素材的方向，避免拉来不相关文件。
  */
 const SFX_TRANSLATIONS: Record<string, string[]> = {
   纸: ['paper', 'page', 'scroll', 'book'],
@@ -327,6 +393,18 @@ const SFX_TRANSLATIONS: Record<string, string[]> = {
   龙袍: ['cloth'],
   帷幔: ['cloth', 'fabric'],
   布: ['cloth', 'fabric'],
+  马: ['horse', 'hoof', 'gallop'],
+  马蹄: ['horse', 'hoof', 'gallop'],
+  骑兵: ['horse', 'hoof', 'gallop'],
+  奔马: ['horse', 'hoof', 'gallop'],
+  剑: ['sword', 'blade', 'metal', 'clash'],
+  刀剑: ['sword', 'blade', 'metal', 'clash'],
+  兵器: ['weapon', 'sword', 'metal', 'clash'],
+  弓: ['bow', 'string', 'twang'],
+  弓弦: ['bow', 'string', 'twang'],
+  箭: ['arrow', 'bow', 'impact'],
+  风: ['wind', 'breeze', 'ambient'],
+  寒风: ['wind', 'cold', 'ambient'],
 }
 
 function expandChineseTokens(tokens: string[]): string[] {
@@ -355,6 +433,17 @@ interface ScoredEntry {
   score: number
 }
 
+/**
+ * 授权白名单：reference-only 包（如 chinaz 来源素材）不可商用、只供人工参考，
+ * 永远不参与任何自动匹配（findSfxFile/findSfxFiles/findAmbientFile 共用打分入口）。
+ */
+const REFERENCE_ONLY_PATTERN = /reference-only/i
+
+export function isReferenceOnlySfx(entry: SfxMapping['entries'][number]): boolean {
+  return REFERENCE_ONLY_PATTERN.test(String((entry as { pack?: string }).pack ?? ''))
+    || REFERENCE_ONLY_PATTERN.test(String(entry.relativePath ?? ''))
+}
+
 function scoreSfxEntries(description: string, mapping: SfxMapping): ScoredEntry[] {
   const tokens = tokenize(description)
   if (tokens.length === 0) return []
@@ -381,6 +470,7 @@ function scoreSfxEntries(description: string, mapping: SfxMapping): ScoredEntry[
   const scored: ScoredEntry[] = []
 
   for (const entry of mapping.entries) {
+    if (isReferenceOnlySfx(entry)) continue
     const fileKws = entry.keywords
     let score = 0
 
@@ -484,6 +574,7 @@ export function findAmbientFile(description: string | null | undefined): string 
   let best: { entry: SfxMapping['entries'][number]; score: number } | null = null
 
   for (const entry of mapping.entries) {
+    if (isReferenceOnlySfx(entry)) continue
     const fileKws = entry.keywords
     let score = 0
     for (const kw of categorySfxKeywords) {

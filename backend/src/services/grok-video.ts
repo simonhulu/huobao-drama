@@ -17,10 +17,10 @@ import { buildEgakiChildEnv } from './egaki-chatgpt-image.js'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '../../..')
 const EGAKI_BIN = path.join(repoRoot, 'backend/node_modules/.bin/egaki')
-const VIDEO_DIR = path.join(repoRoot, 'data/static/videos')
+export const VIDEO_DIR = path.join(repoRoot, 'data/static/videos')
 
-const DEFAULT_T2V_MODEL = 'grok-imagine-video'
-const DEFAULT_I2V_MODEL = 'grok-imagine-video-1.5'
+export const DEFAULT_T2V_MODEL = 'grok-imagine-video'
+export const DEFAULT_I2V_MODEL = 'grok-imagine-video-1.5'
 const MIN_GROK_DURATION_SEC = 6
 const MAX_GROK_DURATION_SEC = 10
 const GENERATE_TIMEOUT_MS = 10 * 60_000 // egaki 官方建议自动化调用至少 5 分钟
@@ -147,7 +147,7 @@ export function parseStoryboardGrid(raw: string | null | undefined): {
   }
 }
 
-async function runEgakiVideo(opts: {
+export async function runEgakiVideo(opts: {
   model: string
   prompt: string
   output: string

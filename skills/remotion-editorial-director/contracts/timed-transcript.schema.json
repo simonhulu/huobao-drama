@@ -23,7 +23,29 @@
         "spanId": {"$ref": "editorial://schema/common/v1#/$defs/stableId"},
         "startSeconds": {"type": "number", "minimum": 0},
         "endSeconds": {"type": "number", "exclusiveMinimum": 0},
-        "text": {"type": "string", "minLength": 1, "maxLength": 10000}
+        "text": {"type": "string", "minLength": 1, "maxLength": 10000},
+        "editorialHint": {"$ref": "#/$defs/editorialHint"}
+      }
+    },
+    "editorialHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {"enum": ["hook", "establishing", "mechanism", "comparison", "reversal", "crisis", "resolution"]},
+        "visualIntent": {"type": "string", "minLength": 1, "maxLength": 240},
+        "emphasis": {"type": "number", "minimum": 0, "maximum": 1},
+        "focus": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "properties": {
+            "x": {"type": "number", "minimum": 0, "maximum": 1},
+            "y": {"type": "number", "minimum": 0, "maximum": 1}
+          }
+        },
+        "typographyVariant": {"enum": ["impact", "stamp", "whisper"]},
+        "transitionEnergy": {"enum": ["low", "medium", "high"]},
+        "soundIntent": {"enum": ["none", "whoosh", "impact", "low_boom"]}
       }
     }
   }

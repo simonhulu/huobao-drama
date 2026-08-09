@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "books": [
+    {
+      "id": "chinese-fiction-description-dictionary",
+      "title": "中国小说描写辞典",
+      "author": "殷海国",
+      "source_format": "pdf",
+      "source_filename": "中国小说描写辞典 (殷海国) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+      "source_sha256": "2bd47a3eafb011bc96dfc566527689090d8f28c26aa7587ec1574bc675ee6b1e",
+      "source_bytes": 27313790,
+      "markdown": "chinese-fiction-description-dictionary/book.md",
+      "coverage": "chinese-fiction-description-dictionary/coverage.json",
+      "status": "converted_with_review_items"
+    },
+    {
+      "id": "copywriting-fundamentals",
+      "title": "文案的基本修养",
+      "author": "东东枪",
+      "source_format": "epub",
+      "source_filename": "文案的基本修养（99篇小文深入浅出、条分缕析，一本书讲透广告创意与文案之道） (东东枪) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "source_sha256": "03c23e98115e51d92033a636329b4fd567e676139667d3bcef4cdbadd7fd6cf5",
+      "source_bytes": 2396389,
+      "markdown": "copywriting-fundamentals/book.md",
+      "coverage": "copywriting-fundamentals/coverage.json",
+      "status": "converted"
+    },
+    {
+      "id": "miaozan-copywriting",
+      "title": "秒赞",
+      "author": "林桂枝",
+      "source_format": "epub",
+      "source_filename": "秒赞.epub",
+      "source_sha256": "f52e6e0de34865ce1394efc6341cfe7886afb5ab66e6a5b6ef7c0df44c68a2a8",
+      "source_bytes": 1416647,
+      "markdown": "miaozan-copywriting/book.md",
+      "coverage": "miaozan-copywriting/coverage.json",
+      "status": "converted"
+    },
+    {
+      "id": "southern-weekend-commentary-writing",
+      "title": "南周评论写作课：怎样表达一个观点",
+      "author": "南方周末编",
+      "source_format": "epub",
+      "source_filename": "南周评论写作课：怎样表达一个观点 (南方周末 编) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "source_sha256": "5a556e09efb962c903dc913363cdf40d7a4241007ab338ad00753838bf115546",
+      "source_bytes": 1125618,
+      "markdown": "southern-weekend-commentary-writing/book.md",
+      "coverage": "southern-weekend-commentary-writing/coverage.json",
+      "status": "converted"
+    }
+  ]
+}

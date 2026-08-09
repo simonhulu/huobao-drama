@@ -28,6 +28,8 @@ export interface CoverGeneratePayload {
   coverDesign?: CoverDesign
 }
 
+export const HISTORY_FACTORY_ID = 'remotion-history-factory'
+
 interface CoverGenerateDeps {
   executeImageGeneration?: typeof executeImageGeneration
   createImageGenerationRecord?: typeof createImageGenerationRecord
@@ -47,6 +49,35 @@ function parseStoredCoverDesign(json: string | null | undefined): CoverDesign | 
   return null
 }
 
+function parseEpisodeMetadata(value: string | null | undefined): Record<string, unknown> {
+  if (!value) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+export function isHistoryFactoryEpisode(
+  episode: Pick<typeof schema.episodes.$inferSelect, 'metadata'>,
+): boolean {
+  const metadata = parseEpisodeMetadata(episode.metadata)
+  return metadata.historyFactory === HISTORY_FACTORY_ID
+    || metadata.history_factory === HISTORY_FACTORY_ID
+}
+
+function explicitMainTitle(design: CoverDesign | null | undefined): string {
+  return typeof design?.main_title === 'string' ? design.main_title.trim() : ''
+}
+
+function hasUserProvidedTitle(design: CoverDesign | null | undefined): boolean {
+  const marked = design as (CoverDesign & { user_provided_title?: boolean }) | null | undefined
+  return Boolean(explicitMainTitle(design) && marked?.user_provided_title === true)
+}
+
 function withPrompt(design: CoverDesign | null, prompt?: string): CoverDesign | null {
   if (!design) return null
   const aiPrompt = design.ai_prompt?.trim() || prompt?.trim()
@@ -63,6 +94,34 @@ function buildDefaultCoverPrompt(episode: typeof schema.episodes.$inferSelect): 
     `围绕本集主题“${title}”呈现一个明确的人物处境或核心冲突。`,
     '主体清晰，前中后景分明，保留左上或上方低细节区域，强光影对比，缩小后仍能看懂故事，高质感电影海报构图。',
   ].join(' ')
+}
+
+function buildUserTitleCoverDesign(params: {
+  coverDesign: CoverDesign
+  episode: typeof schema.episodes.$inferSelect
+  overridePrompt?: string
+  roughPrompt?: string
+}): CoverDesign {
+  const { coverDesign, episode, overridePrompt, roughPrompt } = params
+  const mainTitle = explicitMainTitle(coverDesign)
+  if (!mainTitle) {
+    throw new Error('历史工厂封面必须提供用户指定的 cover_design.main_title，禁止使用 episode.title 或 AI 标题')
+  }
+  const prompt = overridePrompt?.trim()
+    || coverDesign.ai_prompt?.trim()
+    || episode.coverPrompt?.trim()
+    || roughPrompt?.trim()
+    || buildDefaultCoverPrompt(episode)
+
+  // History factory covers deliberately bypass the AI copy enhancer. The image
+  // prompt may be filled from the user's prompt, but the rendered main title
+  // always comes from the explicit cover design supplied by the user.
+  return normalizeCoverDesign(
+    { ...coverDesign, main_title: mainTitle, ai_prompt: prompt },
+    '',
+    episode.episodeNumber,
+    prompt,
+  )
 }
 
 async function buildAutomaticCoverDesign(params: {
@@ -143,6 +202,32 @@ export function createCoverGenerateHandler(deps: CoverGenerateDeps = {}): TaskHa
       const requestedDesign = coverDesign ?? storedDesign
       const effectiveDesign = withPrompt(requestedDesign, episode.coverPrompt || undefined)
 
+      if (isHistoryFactoryEpisode(episode)) {
+        if (!requestedDesign || !hasUserProvidedTitle(requestedDesign)) {
+          throw new Error('历史工厂封面必须提供用户指定的 cover_design.main_title，禁止自动生成封面标题')
+        }
+        const design = buildUserTitleCoverDesign({
+          coverDesign: requestedDesign,
+          episode,
+          overridePrompt,
+          roughPrompt,
+        })
+        return await runComposedCoverFlow({
+          ctx,
+          episodeId,
+          episode,
+          drama,
+          coverDesign: design,
+          frameType,
+          configId: overrideConfigId ?? episode.imageConfigId ?? undefined,
+          execute,
+          createRecord,
+          compose,
+          composeOne,
+          enhancePrompt,
+        })
+      }
+
       if (effectiveDesign) {
         return await runComposedCoverFlow({
           ctx,
@@ -181,9 +266,11 @@ export function createCoverGenerateHandler(deps: CoverGenerateDeps = {}): TaskHa
 }
 
 function coverRatioToSize(ratio: '4:3' | '3:4') {
-  // APIMart gpt-image-2 实测只支持 16:9 / 9:16 / 1:1，
-  // 4:3 与 3:4 会被拒绝。先用相近的横竖屏尺寸生成，前端 CSS 按 4:3/3:4 裁剪。
-  return ratio === '4:3' ? '1920x1080' : '1080x1920'
+  // The active pcore 1K tier accepts square generation reliably. The cover
+  // composer performs the final 4:3 / 3:4 crop, so the base image does not
+  // need to be generated at either delivery ratio.
+  void ratio
+  return '1024x1024'
 }
 
 interface FlowCtx {
@@ -225,17 +312,49 @@ async function runComposedCoverFlow(
     style: drama?.style || undefined,
   }
 
+  // 单张底图超时 8 分钟——封面底图比正片简单，不需要 20 分钟全超时。
+  const COVER_BASE_TIMEOUT_MS = 480_000
+
   async function generateBase(ratio: '4:3' | '3:4') {
     const genId = createRecord({
       ...baseParams,
       size: coverRatioToSize(ratio),
       frameType: ratio,
     })
-    return await execute(genId, { configId, taskContext: ctx })
+    const genPromise = execute(genId, { configId, taskContext: ctx })
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(`封面 ${ratio} 底图生成超时 (${COVER_BASE_TIMEOUT_MS / 1000}s)`))
+      }, COVER_BASE_TIMEOUT_MS)
+    })
+    try {
+      return await Promise.race([genPromise, timeoutPromise])
+    } finally {
+      // A successful provider response must not keep the Node event loop alive
+      // for the full timeout budget (or leave one timer per cover attempt).
+      if (timeoutId) clearTimeout(timeoutId)
+    }
   }
 
-  const baseResults = await Promise.all(ratios.map(async ratio => ({ ratio, result: await generateBase(ratio) })))
-  if (baseResults.some(item => !item.result.local_path)) throw new Error('封面底图生成未完成')
+  // allSettled → 一张卡死不阻塞另一张；单 ratio 超时仍可交付另一张封面。
+  const baseSettled = await Promise.allSettled(ratios.map(async ratio => ({ ratio, result: await generateBase(ratio) })))
+  const baseResults: Array<{ ratio: '4:3' | '3:4'; result: Awaited<ReturnType<typeof execute>> }> = []
+  const failedRatios: string[] = []
+  for (const item of baseSettled) {
+    if (item.status === 'fulfilled') {
+      baseResults.push(item.value)
+    } else {
+      failedRatios.push(item.reason?.message || String(item.reason))
+    }
+  }
+
+  if (failedRatios.length === ratios.length) {
+    throw new Error(`封面底图全部失败: ${failedRatios.join('; ')}`)
+  }
+  if (failedRatios.length > 0) {
+    ctx.progress(`部分封面底图失败，将继续合成成功的那张: ${failedRatios.join('; ')}`)
+  }
 
   ctx.progress('合成文字与美术字', 1, frameType ? 2 : 3)
 
@@ -343,10 +462,15 @@ export function scheduleCoverGeneration(
   if (!episode) throw new Error(`Episode ${episodeId} not found`)
 
   const coverDesign = payload?.coverDesign
+  const storedDesign = parseStoredCoverDesign(episode.coverDesignJson)
+  const requestedDesign = coverDesign ?? storedDesign
+  if (isHistoryFactoryEpisode(episode) && !hasUserProvidedTitle(requestedDesign)) {
+    throw new Error('历史工厂封面必须先提供用户指定的 cover_design.main_title')
+  }
   const explicitPrompt = payload?.prompt?.trim()
   const roughPrompt = payload?.roughPrompt?.trim()
   const defaultPrompt = buildDefaultCoverPrompt(episode)
-  const hasPrompt = explicitPrompt || episode.coverPrompt || roughPrompt || coverDesign?.ai_prompt || episode.title || defaultPrompt
+  const hasPrompt = explicitPrompt || episode.coverPrompt || roughPrompt || requestedDesign?.ai_prompt || episode.title || defaultPrompt
   if (!hasPrompt) throw new Error('封面提示词为空')
 
   const frameType = payload?.frameType?.trim()

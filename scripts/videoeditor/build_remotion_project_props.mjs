@@ -10,6 +10,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { buildMagnatesProps as buildCanonicalMagnatesProps } from './magnates_props_core.mjs'
 
@@ -164,16 +165,50 @@ function readJsonFile(localPath) {
 }
 
 function timeAtTextPosition(titles, position) {
+  let textCursor = 0
   for (const rawTitle of Array.isArray(titles) ? titles : []) {
     const title = asRecord(rawTitle)
-    const textBegin = Number(title.text_begin)
-    const textEnd = Number(title.text_end)
+    const titleText = String(title.text || '')
+    const textBegin = textCursor
+    const textEnd = textBegin + titleText.length
     const timeBegin = Number(title.time_begin)
     const timeEnd = Number(title.time_end)
-    if (![textBegin, textEnd, timeBegin, timeEnd].every(Number.isFinite)) continue
+    textCursor = textEnd
+    if (!titleText || ![timeBegin, timeEnd].every(Number.isFinite)) continue
     if (position < textBegin || position > textEnd) continue
     const ratio = (position - textBegin) / Math.max(1, textEnd - textBegin)
     return timeBegin + (timeEnd - timeBegin) * ratio
+  }
+  return null
+}
+
+function whitespaceInsensitivePosition(source, needle, startPosition = 0) {
+  const sourceChars = [...String(source || '')]
+  const compactChars = []
+  const compactToSource = []
+  for (let index = 0; index < sourceChars.length; index += 1) {
+    if (/\s/.test(sourceChars[index])) continue
+    compactChars.push(sourceChars[index])
+    compactToSource.push(index)
+  }
+  const compactNeedle = [...String(needle || '')].filter((character) => !/\s/.test(character)).join('')
+  const compactStart = sourceChars.slice(0, startPosition).filter((character) => !/\s/.test(character)).length
+  const compactPosition = compactChars.join('').indexOf(compactNeedle, compactStart)
+  return compactPosition < 0 ? -1 : compactToSource[compactPosition]
+}
+
+function findNarrationPosition(source, narration, startPosition = 0) {
+  const exact = whitespaceInsensitivePosition(source, narration, startPosition)
+  if (exact >= 0) return { position: exact, matchedLength: String(narration).length }
+  const text = String(narration || '')
+  const minimum = Math.min(8, text.length)
+  for (let leading = 1; leading <= Math.min(12, text.length - minimum); leading += 1) {
+    const position = whitespaceInsensitivePosition(source, text.slice(leading), startPosition)
+    if (position >= 0) return { position, matchedLength: text.length - leading }
+  }
+  for (let trailing = 1; trailing <= Math.min(4, text.length - minimum); trailing += 1) {
+    const position = whitespaceInsensitivePosition(source, text.slice(0, -trailing), startPosition)
+    if (position >= 0) return { position, matchedLength: text.length - trailing }
   }
   return null
 }
@@ -211,6 +246,292 @@ function buildAudioTiming(sourceText, sourceShots, audioAsset) {
     })
   }
   return { durationMs, byShotNumber, titlesPath }
+}
+
+function comparisonText(value) {
+  return normalizeTtsText(value)
+    .normalize('NFKC')
+    .replace(/[\p{P}\p{S}\s]/gu, '')
+}
+
+function orderedShotAudioGroups(sourceShots) {
+  const groups = new Map()
+  for (const shot of sourceShots) {
+    const assets = Array.isArray(shot.assets) ? shot.assets : []
+    const audio = assets.find((asset) => asset.assetType === 'audio' && asset.status === 'completed' && staticUrl(asset.localPath))
+    if (!audio?.localPath) continue
+    const key = String(audio.localPath)
+    if (!groups.has(key)) groups.set(key, { audio, shots: [] })
+    groups.get(key).shots.push({ shot, narration: normalizeTtsText(shot.narration) })
+  }
+  return [...groups.values()]
+}
+
+function probeDurationMs(filePath) {
+  const result = spawnSync('ffprobe', [
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1',
+    filePath,
+  ], { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(`ffprobe failed for ${filePath}: ${result.stderr || 'unknown error'}`)
+  const durationMs = Number(result.stdout.trim()) * 1000
+  if (!Number.isFinite(durationMs) || durationMs <= 0) throw new Error(`ffprobe returned an invalid duration for ${filePath}`)
+  return durationMs
+}
+
+function assertTitleTimelineCoverage(titles, durationMs, label) {
+  const validEnds = titles
+    .map((title) => Number(asRecord(title).time_end))
+    .filter(Number.isFinite)
+  const maxEndMs = validEnds.length ? Math.max(...validEnds) : 0
+  const ratio = durationMs > 0 ? maxEndMs / durationMs : 0
+  if (ratio < 0.6 || ratio > 1.05) {
+    throw new Error(`${label} MiniMax titles cover ${(ratio * 100).toFixed(1)}% of the audio; refusing an unreliable narration timeline`)
+  }
+}
+
+function materializeNarrationMaster(projectId, groups) {
+  const listPath = path.resolve(root, `data/temp/remotion-project-${projectId}-narration-concat.txt`)
+  const outputRelative = `static/audio/remotion-project-${projectId}-narration-conformed.m4a`
+  const outputPath = path.resolve(root, 'data', outputRelative)
+  fs.mkdirSync(path.dirname(listPath), { recursive: true })
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+  const lines = groups.map(({ audio }) => {
+    const source = sourceFileFor(audio.localPath)
+    if (!source) throw new Error(`narration source is missing: ${audio.localPath}`)
+    return `file '${source.replace(/'/g, "'\\''")}'`
+  })
+  fs.writeFileSync(listPath, `${lines.join('\n')}\n`)
+  const result = spawnSync('ffmpeg', [
+    '-v', 'error',
+    '-f', 'concat',
+    '-safe', '0',
+    '-i', listPath,
+    '-vn',
+    '-c:a', 'aac',
+    '-ar', '48000',
+    '-ac', '2',
+    '-b:a', '192k',
+    '-movflags', '+faststart',
+    '-y', outputPath,
+  ], { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(`failed to conform narration master: ${result.stderr || 'unknown ffmpeg error'}`)
+  return { outputRelative, durationMs: probeDurationMs(outputPath) }
+}
+
+function finalizeNarrationPlan({
+  audioPath,
+  durationMs,
+  sourceShots,
+  byShotNumber,
+  captions,
+  sourceAudioCount,
+  conformedAudioCount,
+  excludedGroups,
+}) {
+  const orderedStarts = sourceShots
+    .map((shot) => ({ shot, timing: byShotNumber.get(Number(shot.shotNumber)) }))
+    .filter((entry) => entry.timing)
+  const totalFrames = Math.max(1, Math.round(durationMs / 1000 * fps))
+  const startFrames = orderedStarts.map((entry) => Math.max(0, Math.round(entry.timing.startMs / 1000 * fps)))
+  if (startFrames.length) startFrames[0] = 0
+  for (let index = 1; index < startFrames.length; index += 1) {
+    startFrames[index] = Math.max(startFrames[index], startFrames[index - 1] + 1)
+  }
+  if (startFrames.at(-1) >= totalFrames) {
+    throw new Error(`narration has ${orderedStarts.length} visual cuts but only ${totalFrames} renderable frames`)
+  }
+  for (let index = 0; index < orderedStarts.length; index += 1) {
+    const current = orderedStarts[index]
+    const startFrame = startFrames[index]
+    const endFrame = index + 1 < orderedStarts.length ? startFrames[index + 1] : totalFrames
+    byShotNumber.set(Number(current.shot.shotNumber), {
+      startMs: current.timing.startMs,
+      endMs: endFrame / fps * 1000,
+      durationMs: (endFrame - startFrame) / fps * 1000,
+      startFrame,
+      endFrame,
+      durationInFrames: endFrame - startFrame,
+    })
+  }
+
+  const captionTrack = captions
+    .map((caption) => ({
+      startFrame: Math.max(0, Math.floor(caption.startMs / 1000 * fps)),
+      endFrame: Math.min(totalFrames, Math.ceil(caption.endMs / 1000 * fps)),
+      text: caption.text,
+    }))
+    .filter((caption) => caption.endFrame > caption.startFrame)
+
+  return {
+    audioUrl: staticUrl(audioPath),
+    audioPath,
+    durationMs,
+    durationInFrames: totalFrames,
+    captions: captionTrack,
+    byShotNumber,
+    includedShotNumbers: new Set(orderedStarts.map((entry) => Number(entry.shot.shotNumber))),
+    sourceAudioCount,
+    conformedAudioCount,
+    excludedGroups,
+  }
+}
+
+function assertExactNarrationCoverage(sourceText, sourceShots, timelineText, label) {
+  const canonicalSource = comparisonText(sourceText)
+  const canonicalTimeline = comparisonText(timelineText)
+  const canonicalShots = comparisonText(sourceShots.map((shot) => shot.narration || '').join(''))
+
+  if (canonicalSource && canonicalTimeline !== canonicalSource) {
+    throw new Error(`${label} MiniMax titles do not exactly cover the source narration`)
+  }
+  if (canonicalShots !== canonicalTimeline) {
+    throw new Error(`${label} shot narrations do not exactly partition the MiniMax title timeline`)
+  }
+}
+
+function buildFrozenNarrationPlan(sourceText, sourceShots, timeline) {
+  const audioPath = cleanText(timeline.audioUrl)
+  const titles = Array.isArray(timeline.titles) ? timeline.titles : []
+  const audioFile = sourceFileFor(audioPath)
+  if (!audioPath || !audioFile || !titles.length) return null
+
+  const durationMs = probeDurationMs(audioFile)
+  assertTitleTimelineCoverage(titles, durationMs, audioPath)
+  const searchableText = titles.map((title) => String(asRecord(title).text || '')).join('')
+  assertExactNarrationCoverage(sourceText, sourceShots, searchableText, audioPath)
+  const byShotNumber = new Map()
+  let cursor = 0
+  for (const shot of sourceShots) {
+    const narration = normalizeTtsText(shot.narration)
+    const match = findNarrationPosition(searchableText, narration, cursor)
+    if (!match) throw new Error(`narration text for shot ${shot.shotNumber} was not found in frozen MiniMax titles`)
+    const startMs = timeAtTextPosition(titles, match.position)
+    if (startMs == null) throw new Error(`narration timestamp for shot ${shot.shotNumber} was not found in frozen MiniMax titles`)
+    byShotNumber.set(Number(shot.shotNumber), { startMs })
+    cursor = match.position + match.matchedLength
+  }
+  const captions = titles.flatMap((rawTitle) => {
+    const title = asRecord(rawTitle)
+    const startMs = Number(title.time_begin)
+    const endMs = Number(title.time_end)
+    const text = cleanText(title.text)
+    return text && Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs
+      ? [{ startMs, endMs, text }]
+      : []
+  })
+  return finalizeNarrationPlan({
+    audioPath,
+    durationMs,
+    sourceShots,
+    byShotNumber,
+    captions,
+    sourceAudioCount: 1,
+    conformedAudioCount: 1,
+    excludedGroups: [],
+  })
+}
+
+function buildContinuousNarrationPlan(sourceText, sourceShots, projectId) {
+  const rawGroups = orderedShotAudioGroups(sourceShots)
+  if (!rawGroups.length) return null
+
+  const canonical = comparisonText(sourceText)
+  let canonicalCursor = 0
+  let timelineCursorMs = 0
+  const groups = []
+  const excludedGroups = []
+  const byShotNumber = new Map()
+  const captions = []
+
+  for (const group of rawGroups) {
+    const metadata = assetMetadata(group.audio)
+    const titlesPath = metadata.titlesPath || `${group.audio.localPath}.titles.json`
+    const payload = readJsonFile(titlesPath)
+    const titles = Array.isArray(payload?.titles) ? payload.titles : []
+    const durationMs = numberOr(payload?.extra?.audio_length, numberOr(group.audio.durationMs, 0))
+    if (!titles.length || durationMs <= 0) {
+      throw new Error(`narration timing sidecar is missing or invalid: ${titlesPath}`)
+    }
+    assertTitleTimelineCoverage(titles, durationMs, titlesPath)
+
+    const searchableText = String(payload?.text || titles.map((title) => String(title.text || '')).join(''))
+    const groupText = comparisonText(payload?.text || searchableText || group.shots.map((entry) => entry.narration).join(''))
+    const canonicalPosition = canonical && groupText ? canonical.indexOf(groupText, canonicalCursor) : canonicalCursor
+    if (canonical && groupText && canonicalPosition < 0) {
+      const priorPosition = canonical.lastIndexOf(groupText, canonicalCursor)
+      if (priorPosition >= 0 && priorPosition + groupText.length <= canonicalCursor) {
+        excludedGroups.push({
+          localPath: group.audio.localPath,
+          shotNumbers: group.shots.map((entry) => Number(entry.shot.shotNumber)),
+          reason: 'narration text is already covered by the canonical source',
+        })
+        continue
+      }
+    } else if (canonicalPosition >= 0) {
+      canonicalCursor = canonicalPosition + groupText.length
+    }
+
+    let localCursor = 0
+    const starts = []
+    for (const entry of group.shots) {
+      if (!entry.narration) continue
+      const match = findNarrationPosition(searchableText, entry.narration, localCursor)
+      if (!match) {
+        throw new Error(`narration text for shot ${entry.shot.shotNumber} was not found in ${titlesPath}`)
+      }
+      const localStartMs = timeAtTextPosition(titles, match.position)
+      if (localStartMs == null) {
+        throw new Error(`narration timestamp for shot ${entry.shot.shotNumber} was not found in ${titlesPath}`)
+      }
+      starts.push({ shot: entry.shot, startMs: timelineCursorMs + localStartMs })
+      localCursor = match.position + match.matchedLength
+    }
+    if (starts.length !== group.shots.length) {
+      throw new Error(`narration timing is incomplete for ${group.audio.localPath}: ${starts.length}/${group.shots.length}`)
+    }
+    for (const rawTitle of titles) {
+      const title = asRecord(rawTitle)
+      const timeBegin = Number(title.time_begin)
+      const timeEnd = Number(title.time_end)
+      const textBegin = Number(title.text_begin)
+      const textEnd = Number(title.text_end)
+      const text = cleanText(
+        typeof title.text === 'string' && title.text.length > 0
+          ? title.text
+          : Number.isFinite(textBegin) && Number.isFinite(textEnd)
+            ? String(payload?.text || searchableText).slice(textBegin, textEnd)
+            : '',
+      )
+      if (!text || !Number.isFinite(timeBegin) || !Number.isFinite(timeEnd) || timeEnd <= timeBegin) continue
+      captions.push({
+        startMs: timelineCursorMs + Math.max(0, timeBegin),
+        endMs: timelineCursorMs + Math.min(durationMs, timeEnd),
+        text,
+      })
+    }
+    groups.push({ ...group, titlesPath, durationMs })
+    for (const start of starts) byShotNumber.set(Number(start.shot.shotNumber), { startMs: start.startMs })
+    timelineCursorMs += durationMs
+  }
+
+  if (!groups.length) throw new Error('all narration groups were rejected as redundant')
+  const includedShots = sourceShots.filter((shot) => byShotNumber.has(Number(shot.shotNumber)))
+  if (canonical && comparisonText(includedShots.map((shot) => shot.narration || '').join('')) !== canonical) {
+    throw new Error('legacy Remotion shot narrations do not exactly partition the canonical source')
+  }
+  const master = materializeNarrationMaster(projectId, groups)
+  return finalizeNarrationPlan({
+    audioPath: master.outputRelative,
+    durationMs: master.durationMs,
+    sourceShots,
+    byShotNumber,
+    captions,
+    sourceAudioCount: rawGroups.length,
+    conformedAudioCount: groups.length,
+    excludedGroups,
+  })
 }
 
 async function request(pathname) {
@@ -778,7 +1099,7 @@ function sourceStoryboardFor(snapshot, shot) {
 function buildShot(snapshot, shot, audioTiming) {
   const timed = audioTiming?.byShotNumber?.get(Number(shot.shotNumber))
   const durationMs = Math.max(1, numberOr(timed?.durationMs, numberOr(shot.durationMs, 1000)))
-  const durationInFrames = Math.max(1, Math.round(durationMs / 1000 * fps))
+  const durationInFrames = Math.max(1, numberOr(timed?.durationInFrames, Math.round(durationMs / 1000 * fps)))
   const visualPlan = asRecord(shot.visualPlan)
   const assets = Array.isArray(shot.assets) ? shot.assets : []
   const sourceStoryboard = sourceStoryboardFor(snapshot, shot)
@@ -805,7 +1126,7 @@ function buildShot(snapshot, shot, audioTiming) {
     shotType: String(shot.shotType || 'ai_plate'),
     imageUrl: plateUrl,
     fallbackImageUrl: legacyAsset,
-    audioUrl: staticUrl(sourceEvidence.audioUrl || sourceStoryboard.narrationAudioUrl || sourceStoryboard.audioUrl),
+    audioUrl: null,
     narration: shot.narration || sourceStoryboard.narration || '',
     graphic: '',
     visualMode: String(visualPlan.visualMode || (shot.shotType === 'map' ? 'map-video' : shot.shotType === 'stock' ? 'stock-broll' : 'ai-plate')),
@@ -816,7 +1137,9 @@ function buildShot(snapshot, shot, audioTiming) {
     map: normalizeMap(visualPlan.map),
     stockBroll,
     beats,
-    captionSegments: splitCaption(shot.narration || sourceStoryboard.narration || shot.dialogue || '', durationInFrames),
+    captionSegments: audioTiming
+      ? undefined
+      : splitCaption(shot.narration || sourceStoryboard.narration || shot.dialogue || '', durationInFrames),
     sourceEvidence,
     warnings,
   }
@@ -929,29 +1252,36 @@ async function main() {
     ? new Set(value('--shots').split(',').map((item) => Number(item.trim())).filter(Number.isInteger))
     : null
   const sourceShots = (snapshot.shots || []).sort((left, right) => Number(left.shotNumber) - Number(right.shotNumber))
-  const audioAsset = allAssets.find((asset) => asset.assetType === 'audio' && asset.status === 'completed' && staticUrl(asset.localPath))
-  const audioTiming = buildAudioTiming(sourceEpisode.scriptContent || sourceEpisode.content, sourceShots, audioAsset)
-  const shots = sourceShots
-    .filter((shot) => !selected || selected.has(Number(shot.shotNumber)))
-    .map((shot) => buildShot(snapshot, shot, audioTiming))
-  const temporalCount = shots.filter((shot) => isTemporalVisualPlan(asRecord(shot.visualPlan))).length
-  const fullTemporal = shots.length > 0 && temporalCount === shots.length
-  if (temporalCount > 0 && !fullTemporal) {
+  const sourceTemporalCount = sourceShots.filter((shot) => isTemporalVisualPlan(asRecord(shot.visualPlan))).length
+  if (sourceTemporalCount > 0 && sourceTemporalCount !== sourceShots.length) {
     throw new Error('temporal-2grid and legacy layered shots cannot be mixed in one Remotion props file; migrate the remaining shots first')
   }
+  const audioAsset = allAssets.find((asset) => asset.assetType === 'audio' && asset.status === 'completed' && staticUrl(asset.localPath))
+  const audioTiming = buildAudioTiming(sourceEpisode.scriptContent || sourceEpisode.content, sourceShots, audioAsset)
+  const frozenTimeline = asRecord(sourceEpisode.narrationTimeline)
+  const narrationPlan = sourceTemporalCount === 0
+    ? buildFrozenNarrationPlan(sourceEpisode.scriptContent || sourceEpisode.content, sourceShots, frozenTimeline)
+      || buildContinuousNarrationPlan(sourceEpisode.scriptContent || sourceEpisode.content, sourceShots, projectId)
+    : null
+  const renderSourceShots = narrationPlan
+    ? sourceShots.filter((shot) => narrationPlan.includedShotNumbers.has(Number(shot.shotNumber)))
+    : sourceShots
+  const shots = renderSourceShots
+    .filter((shot) => !selected || selected.has(Number(shot.shotNumber)))
+    .map((shot) => buildShot(snapshot, shot, narrationPlan))
+  const temporalCount = shots.filter((shot) => isTemporalVisualPlan(asRecord(shot.visualPlan))).length
+  const fullTemporal = shots.length > 0 && temporalCount === shots.length
   if (fullTemporal && (!audioAsset?.localPath || !staticUrl(audioAsset.localPath))) {
     throw new Error('temporal-2grid props require a completed narration audio asset; stop at the voice/audio gate')
   }
-  let durationInFrames = shots.reduce((sum, shot) => sum + shot.durationInFrames, 0)
   const fullEpisode = !selected
-  if (fullEpisode && audioTiming) {
-    durationInFrames = Math.max(1, Math.round(audioTiming.durationMs / 1000 * fps))
-    const frameDelta = durationInFrames - shots.reduce((sum, shot) => sum + shot.durationInFrames, 0)
-    if (shots.length && frameDelta !== 0) {
-      const last = shots[shots.length - 1]
-      last.durationInFrames = Math.max(1, last.durationInFrames + frameDelta)
-      last.duration = last.durationInFrames / fps
-      if (last.captionSegments?.length) last.captionSegments[last.captionSegments.length - 1].endFrame = last.durationInFrames
+  let durationInFrames = shots.reduce((sum, shot) => sum + shot.durationInFrames, 0)
+  if (fullEpisode && narrationPlan) {
+    if (narrationPlan.byShotNumber.size !== renderSourceShots.length) {
+      throw new Error(`legacy Remotion audio timing is incomplete: ${narrationPlan.byShotNumber.size}/${renderSourceShots.length} shots mapped`)
+    }
+    if (durationInFrames !== narrationPlan.durationInFrames) {
+      throw new Error(`legacy Remotion shot timeline ${durationInFrames} frames does not match narration master ${narrationPlan.durationInFrames} frames`)
     }
   }
   if (fullTemporal) {
@@ -1045,9 +1375,29 @@ async function main() {
     height: 720,
     durationInFrames,
     durationSeconds: durationInFrames / fps,
-    audioUrl: fullEpisode ? staticUrl(audioAsset?.localPath) : null,
-    audioAssetKey: fullEpisode ? audioAsset?.assetKey || null : null,
-    audioDurationMs: fullEpisode ? audioTiming?.durationMs || null : null,
+    audioUrl: fullEpisode ? narrationPlan?.audioUrl || null : null,
+    audioAssetKey: fullEpisode ? narrationPlan?.audioPath || null : null,
+    audioDurationMs: fullEpisode ? narrationPlan?.durationMs || null : null,
+    narrationConformance: narrationPlan ? {
+      sourceAudioCount: narrationPlan.sourceAudioCount,
+      conformedAudioCount: narrationPlan.conformedAudioCount,
+      excludedGroups: narrationPlan.excludedGroups,
+      mappedShotCount: narrationPlan.byShotNumber.size,
+    } : null,
+    captionTrack: fullEpisode && narrationPlan ? {
+      format: 'minimax-titles',
+      renderer: 'remotion-global-caption-track',
+      safeArea: 'bottom-center',
+      cueCount: narrationPlan.captions.length,
+      timingSource: 'tts-time-begin-end',
+      checks: [
+        {
+          name: 'cue_ranges',
+          passed: narrationPlan.captions.every((cue) => cue.startFrame >= 0 && cue.endFrame > cue.startFrame && cue.endFrame <= durationInFrames),
+        },
+      ],
+    } : null,
+    captions: fullEpisode ? narrationPlan?.captions || [] : [],
     sourceProjectUpdatedAt: snapshot.project?.updatedAt || null,
     shots,
   }

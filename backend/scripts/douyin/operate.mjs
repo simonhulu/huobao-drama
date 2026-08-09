@@ -6,7 +6,9 @@
  * --step: video | meta | cover | all（默认 all）。跑完 cover 停下不保存——天然人工确认点。
  */
 import fs from 'node:fs'
+import path from 'node:path'
 import {
+  PROJECT_ROOT,
   connectBrowser,
   getUploadPage,
   detectLoginPhase,
@@ -33,6 +35,11 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv)
   if (!args.manifest) fail('需要 --manifest <path>（先跑 prepare）', 2)
+  // 相对路径按 CWD → PROJECT_ROOT/data 顺序解析，兼容从项目根或 backend/ 调用
+  if (!path.isAbsolute(args.manifest) && !fs.existsSync(args.manifest)) {
+    const alt = path.join(PROJECT_ROOT, args.manifest)
+    if (fs.existsSync(alt)) args.manifest = alt
+  }
   if (!fs.existsSync(args.manifest)) fail(`manifest 不存在: ${args.manifest}`, 2)
   const m = JSON.parse(fs.readFileSync(args.manifest, 'utf8'))
   for (const [label, p] of [['视频', m.video_path], ['3:4封面', m.cover_3x4_path], ['4:3封面', m.cover_4x3_path]]) {

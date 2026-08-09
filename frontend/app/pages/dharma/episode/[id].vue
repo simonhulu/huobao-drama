@@ -107,6 +107,33 @@
             </div>
           </div>
 
+          <section class="narration-panel" aria-labelledby="narration-settings-title">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">旁白设置</p>
+                <h3 id="narration-settings-title">语速</h3>
+              </div>
+              <output class="speed-output" for="episode-narration-speed">{{ Number(narrationSpeedDraft).toFixed(2) }}x</output>
+            </div>
+            <div class="speed-control speed-control-detail">
+              <input
+                id="episode-narration-speed"
+                v-model.number="narrationSpeedDraft"
+                type="range"
+                min="0.8"
+              max="2.5"
+                step="0.05"
+                :disabled="speedSaving"
+                aria-label="旁白语速"
+              />
+              <button class="btn btn-primary" type="button" :disabled="speedSaving || !narrationSpeedDirty" @click="saveNarrationSpeed">
+                <LoaderCircle v-if="speedSaving" :size="14" class="spin" />
+                <span>{{ speedSaving ? '保存中' : '保存语速' }}</span>
+              </button>
+            </div>
+            <p class="hint">默认 0.85x。保存后会清除旧 TTS 依赖，下次生产必须重新生成旁白与字幕时间轴。</p>
+          </section>
+
           <section class="script-panel" aria-labelledby="script-title">
             <div class="panel-head">
               <div>
@@ -645,6 +672,9 @@ const loading = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const bgmSaving = ref(false)
+const narrationSpeedDraft = ref(0.85)
+const savedNarrationSpeed = ref(0.85)
+const speedSaving = ref(false)
 const musicLoading = ref(false)
 const musicUploading = ref(false)
 const musicUploadInput = ref(null)
@@ -700,6 +730,7 @@ const dharmaPhaseLabels = {
 }
 
 const finalVideoUrl = computed(() => footage.value?.video_url || '')
+const narrationSpeedDirty = computed(() => Math.abs(Number(narrationSpeedDraft.value) - Number(savedNarrationSpeed.value)) > 0.0001)
 const pilotReview = computed(() => footage.value?.pilot_review || null)
 const productionGate = computed(() => footage.value?.production_gate || null)
 const productionAdmission = computed(() => footage.value?.production_admission || { allowed: false })
@@ -981,6 +1012,11 @@ async function refresh() {
   error.value = ''
   try {
     footage.value = await dharmaAPI.footage(episodeId.value)
+    if (!narrationSpeedDirty.value) {
+      const currentSpeed = normalizeNarrationSpeed(footage.value?.narration_speed)
+      narrationSpeedDraft.value = currentSpeed
+      savedNarrationSpeed.value = currentSpeed
+    }
     if (typeof footage.value?.image_style === 'string') imageStyle.value = footage.value.image_style
     if (productionImageStyles.value.length && !productionImageStyles.value.some(style => style.id === imageStyle.value)) {
       imageStyle.value = defaultImageStyleId.value || productionImageStyles.value[0].id
@@ -992,6 +1028,30 @@ async function refresh() {
     error.value = err?.message || '加载制作数据失败'
   } finally {
     loading.value = false
+  }
+}
+
+function normalizeNarrationSpeed(value) {
+  const speed = Number(value)
+  return Number.isFinite(speed) && speed >= 0.8 && speed <= 2.5 ? Math.round(speed * 100) / 100 : 0.85
+}
+
+async function saveNarrationSpeed() {
+  const nextSpeed = normalizeNarrationSpeed(narrationSpeedDraft.value)
+  const previousSpeed = savedNarrationSpeed.value
+  narrationSpeedDraft.value = nextSpeed
+  speedSaving.value = true
+  error.value = ''
+  try {
+    await episodeAPI.update(episodeId.value, { narration_speed: nextSpeed })
+    savedNarrationSpeed.value = nextSpeed
+    footage.value = { ...footage.value, pre_tts_ready: false, video_url: null }
+    toast.success(`旁白语速已保存为 ${nextSpeed.toFixed(2)}x`)
+  } catch (err) {
+    narrationSpeedDraft.value = previousSpeed
+    error.value = err?.message || '旁白语速保存失败'
+  } finally {
+    speedSaving.value = false
   }
 }
 
@@ -1044,6 +1104,19 @@ async function selectImageStyle(styleId) {
 }
 
 async function loadTitle() {
+  try {
+    const episode = await episodeAPI.get(episodeId.value)
+    episodeTitle.value = String(episode?.title || '')
+    episodeScript.value = String(
+      episode?.content || episode?.script_content || episode?.scriptContent || episode?.cleaned_content || episode?.cleanedContent || '',
+    )
+    const currentSpeed = normalizeNarrationSpeed(episode?.narration_speed ?? episode?.narrationSpeed)
+    narrationSpeedDraft.value = currentSpeed
+    savedNarrationSpeed.value = currentSpeed
+    return
+  } catch {
+    // Fall back to the drama list when the episode endpoint is temporarily unavailable.
+  }
   try {
     const response = await dramaAPI.list()
     for (const drama of response.items || []) {
@@ -1522,7 +1595,7 @@ onUnmounted(() => {
 .status-label { color: var(--text-3); font-size: 11px; }
 .status-item strong { color: var(--text-0); font-size: 16px; line-height: 1.25; font-weight: 650; }
 .status-note { color: var(--text-3); font-size: 11px; line-height: 1.4; }
-.script-panel, .bgm-panel, .render-panel, .render-output { margin-top: 20px; padding: 18px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius); }
+.script-panel, .narration-panel, .bgm-panel, .render-panel, .render-output { margin-top: 20px; padding: 18px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius); }
 .panel-head, .modal-head, .output-head { justify-content: space-between; gap: 16px; }
 .panel-head h3, .output-head h3 { display: flex; align-items: center; gap: 7px; font-size: 14px; margin: 3px 0 0; }
 .panel-head > svg { color: var(--text-3); }
@@ -1581,6 +1654,10 @@ onUnmounted(() => {
 .metadata-select:focus { border-color: var(--border-focus, var(--accent)); outline: none; }
 .generation-metadata { margin: 16px 0; }
 .bgm-control-row { gap: 9px; }
+.speed-output { min-width: 58px; padding: 5px 8px; color: var(--text-0); text-align: center; background: var(--bg-base); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 12px; font-variant-numeric: tabular-nums; }
+.speed-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-top: 14px; }
+.speed-control input[type='range'] { width: 100%; accent-color: var(--accent); }
+.speed-control-detail .btn { min-width: 96px; }
 .bgm-select { min-width: 0; flex: 1; padding: 8px 10px; color: var(--text-0); background: var(--bg-base); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 13px; }
 .bgm-select:focus { border-color: var(--border-focus, var(--accent)); outline: none; }
 .upload-row { gap: 12px; margin-top: 14px; }

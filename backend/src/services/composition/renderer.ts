@@ -9,6 +9,7 @@ import ffmpeg from 'fluent-ffmpeg'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { execFileSync } from 'child_process'
 import type { AudioLayer, MotionPlan, RenderResult, StoryboardComposition, VideoLayer } from './types.js'
 import { getVideoEncoderOptions, getVideoDecodeOptions } from './video-encoder.js'
 
@@ -348,7 +349,7 @@ export async function renderStoryboardComposition(
     let cmd = ffmpeg(comp.video.filePath)
 
     if (comp.video.type === 'image') {
-      cmd = cmd.inputOptions(['-loop', '1'])
+      cmd = cmd.inputOptions(['-loop', '1', '-framerate', String(FPS)])
     } else {
       // macOS 用 VideoToolbox 硬解视频输入
       cmd = cmd.inputOptions(getVideoDecodeOptions())
@@ -356,9 +357,10 @@ export async function renderStoryboardComposition(
 
     const outputOptions = [
       '-t', String(comp.duration),
-      ...getVideoEncoderOptions(),
+      ...getVideoEncoderOptions({ width: comp.video.width, height: comp.video.height }),
       '-pix_fmt', 'yuv420p',
       '-r', String(FPS),
+      '-threads', '0',
     ]
 
     const videoFilter = buildVideoFilter(comp.video)
@@ -379,17 +381,26 @@ export async function renderStoryboardComposition(
       outputOptions.push('-c:a', 'aac')
       outputOptions.push('-ar', '48000')
       outputOptions.push('-ac', '2')
-      outputOptions.push('-b:a', '192k')
+      outputOptions.push('-b:a', '128k')
     } else {
       // 无音频时输出静音轨道，避免后续 concat 出问题
       const silentPath = path.resolve(__dirname, '../../../../data/static/audio/silent-10min.m4a')
+      if (!fs.existsSync(silentPath)) {
+        // 兜底：静态文件被误删时实时生成
+        fs.mkdirSync(path.dirname(silentPath), { recursive: true })
+        execFileSync('ffmpeg', [
+          '-y', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+          '-t', '600', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+          silentPath,
+        ])
+      }
       cmd = cmd.input(silentPath)
       outputOptions.push('-map', '0:v')
       outputOptions.push('-map', '1:a')
       outputOptions.push('-c:a', 'aac')
       outputOptions.push('-ar', '48000')
       outputOptions.push('-ac', '2')
-      outputOptions.push('-b:a', '192k')
+      outputOptions.push('-b:a', '128k')
       outputOptions.push('-shortest')
     }
 

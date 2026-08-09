@@ -12,6 +12,52 @@ const stockCatalog = [{
   duration: 18,
 }]
 
+test('planner injects one visual style contract into every generated image asset', () => {
+  const plan = planRemotionShots([
+    {
+      storyboardNumber: 1,
+      title: '猎场对峙',
+      location: '甘泉宫猎场',
+      time: '公元前118年，白天',
+      action: '霍去病在马上拉弓，李敢在前方坠马',
+      narration: '猎场上发生了决定性的一箭。',
+      duration: 5,
+    },
+    {
+      storyboardNumber: 2,
+      title: '卫青回望',
+      location: '长安府邸',
+      time: '汉代',
+      action: '卫青站在廊下回望宫门',
+      people: ['卫青'],
+      narration: '卫青选择把伤害压下去。',
+      duration: 5,
+    },
+  ], [], [], { visualStyle: 'cold-ink-spatial' })
+
+  const generated = plan.assets.filter((asset) => asset.prompt)
+  assert.ok(generated.length >= 2)
+  for (const asset of generated) {
+    const prompt = (asset.prompt as any).text
+    assert.match(prompt, /风格档案：冷墨史诗·三维空间二维绘（cold_ink_spatial）/)
+    assert.equal((asset.metadata as any).visualStyleId, 'cold_ink_spatial')
+  }
+})
+
+test('planner defaults historical image prompts to the canonical cold ink style', () => {
+  const plan = planRemotionShots([{
+    storyboardNumber: 1,
+    title: '默认风格测试',
+    action: '城门外燃起烽火',
+    narration: '烽火亮起。',
+    duration: 4,
+  }])
+  const asset = plan.assets.find((item) => item.prompt)
+  assert.ok(asset)
+  assert.match((asset?.prompt as any).text, /cold_ink_spatial/)
+  assert.equal((asset?.metadata as any).visualStyleId, 'cold_ink_spatial')
+})
+
 test('planner rejects modern stock footage for historical crowd scenes', () => {
   const plan = planRemotionShots([{
     storyboardNumber: 1,

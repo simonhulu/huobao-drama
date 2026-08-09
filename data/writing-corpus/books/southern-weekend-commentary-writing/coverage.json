@@ -1,0 +1,32 @@
+{
+  "id": "southern-weekend-commentary-writing",
+  "title": "南周评论写作课：怎样表达一个观点",
+  "author": "南方周末编",
+  "format": "epub",
+  "sha256": "5a556e09efb962c903dc913363cdf40d7a4241007ab338ad00753838bf115546",
+  "bytes": 1125618,
+  "source_units": 15,
+  "processed_units": 15,
+  "anomalous_units": 0,
+  "character_count": 164011,
+  "headings": 93,
+  "source_entries": [
+    "bok001.html",
+    "cov001.html",
+    "cov002.html",
+    "fow001.html",
+    "fow002.html",
+    "fow003.html",
+    "leg001.html",
+    "toc001.html",
+    "txt001.html",
+    "txt002.html",
+    "txt003.html",
+    "txt004.html",
+    "txt005.html",
+    "txt006.html",
+    "txt007.html"
+  ],
+  "missing_entries": [],
+  "status": "converted"
+}
