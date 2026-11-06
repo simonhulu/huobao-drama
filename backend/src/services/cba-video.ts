@@ -237,7 +237,7 @@ export class CbaVideoService {
     this.root = fs.realpathSync(this.root)
     this.stateFile = path.join(this.root, '.console.json')
     this.recover()
-    if (options.autoRecover !== false) queueMicrotask(() => this.scheduleRecovery())
+    if (process.env.TASK_WORKER_DISABLED !== '1' && options.autoRecover !== false) queueMicrotask(() => this.scheduleRecovery())
   }
   private now() { return new Date((this.options.now || Date.now)()).toISOString() }
   private state(): State {
@@ -1444,7 +1444,7 @@ export class CbaVideoService {
       && !(run.status === 'queued' && run.queueId && run.ownerPid === process.pid))
   }
   private scheduleRecovery() {
-    if (this.options.autoRecover === false || this.recoveryWork) return
+    if (process.env.TASK_WORKER_DISABLED === '1' || this.options.autoRecover === false || this.recoveryWork) return
     this.recover()
     const state = this.state()
     const recoverable = (item: CbaUpload) => !!item.payload && !this.uploadStoppedByUser(item, state) && (item.recoveryCount || 0) < 3

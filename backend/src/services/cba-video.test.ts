@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -57,6 +57,12 @@ function accounts(defaultAccountName = 'cba_first'): NonNullable<CbaVideoOptions
     get: accountName => ({ accountName, label: accountName === 'cba_first' ? '第一账号' : '第二账号', status: 'ready', message: 'ready' }),
   }
 }
+function setTaskWorkerDisabled(t: TestContext, value: string | undefined) {
+  const previous = process.env.TASK_WORKER_DISABLED
+  if (value === undefined) delete process.env.TASK_WORKER_DISABLED
+  else process.env.TASK_WORKER_DISABLED = value
+  t.after(() => { if (previous === undefined) delete process.env.TASK_WORKER_DISABLED; else process.env.TASK_WORKER_DISABLED = previous })
+}
 async function fixture(t: any, options: CbaVideoOptions = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cba-video-service-')))
   const directory = path.join(root, jobId); fs.mkdirSync(directory)
@@ -103,6 +109,56 @@ async function fixture(t: any, options: CbaVideoOptions = {}) {
   const reapprove = async () => { job.review.digest = editorialDigest(job); job.approval.digest = job.review.digest; job.outputs.inputDigest = await renderInputDigest(job); writeJob() }
   return { service, root, job, jobFile, writeJob, reapprove }
 }
+
+test('automatic CBA upload recovery respects TASK_WORKER_DISABLED when the constructor schedules startup', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cba-recovery-startup-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const cases: Array<[string | undefined, boolean | undefined, boolean]> = [
+    ['1', undefined, false], ['1', true, false], ['1', false, false],
+    ['0', undefined, true], ['0', true, true], ['0', false, false],
+    [undefined, undefined, true], [undefined, false, false],
+  ]
+  for (const [disabled, autoRecover, scheduled] of cases) await t.test(`worker=${disabled}, autoRecover=${autoRecover}`, sub => {
+    setTaskWorkerDisabled(sub, disabled)
+    const enqueue = sub.mock.method(globalThis, 'queueMicrotask', () => {})
+    new CbaVideoService({ root, autoRecover, runtime: runtime() })
+    assert.equal(enqueue.mock.callCount(), scheduled ? 1 : 0)
+  })
+})
+
+test('automatic CBA upload recovery respects TASK_WORKER_DISABLED after explicit uploads and before timed retries', async t => {
+  const cases: Array<[string | undefined, boolean | undefined, boolean]> = [
+    ['1', undefined, false], ['1', true, false], ['1', false, false],
+    ['0', undefined, true], ['0', true, true], ['0', false, false],
+    [undefined, undefined, true], [undefined, false, false],
+  ]
+  for (const [disabled, autoRecover, automatic] of cases) await t.test(`worker=${disabled}, autoRecover=${autoRecover}`, async sub => {
+    setTaskWorkerDisabled(sub, disabled)
+    let checks = 0
+    const { service, root } = await fixture(sub, { autoRecover, runtime: runtime({
+      inspectSocialUploadCheckpoint: async () => { checks++; return { action: 'busy', phase: 'locked', message: 'mock upload lock' } },
+      runSocialUpload: async () => { assert.fail('busy uploads must not dispatch') },
+      confirmSocialUpload: async () => { assert.fail('busy uploads must not save') },
+      resumeSocialUpload: async () => { assert.fail('busy uploads must not resume') },
+      reconcileSocialUpload: async () => { assert.fail('busy uploads must not reconcile') },
+    }) })
+    sub.mock.timers.enable({ apis: ['setTimeout'] })
+    await service.upload(jobId, { requestId: 'worker-disabled-upload', targets: ['baijiahao-video'] })
+    await service.waitForIdle()
+    assert.equal(checks, automatic ? 3 : 2, 'manual uploads still check both editions; only enabled recovery checks again')
+    assert.equal(service.overview().recoveryPending, automatic)
+    const stateFile = path.join(root, '.console.json'), beforeRetry = fs.readFileSync(stateFile, 'utf8')
+    const state = JSON.parse(beforeRetry)
+    assert.equal(state.uploads.length, 2)
+    assert.ok(state.uploads.every((upload: any) => upload.status === 'queued' && !upload.dispatched && !upload.recoveryCount))
+    process.env.TASK_WORKER_DISABLED = '1'
+    sub.mock.timers.tick(60_000)
+    await service.waitForIdle()
+    assert.equal(checks, automatic ? 3 : 2, 'a retry scheduled before workers were disabled must not check or upload')
+    assert.equal(service.overview().recoveryPending, false)
+    assert.equal(fs.readFileSync(stateFile, 'utf8'), beforeRetry)
+  })
+})
 
 test('production readiness shares an in-flight provider probe and refresh bypasses its cache', async t => {
   let resolve!: (value: { ready: boolean; message: string }) => void, calls = 0
@@ -344,6 +400,7 @@ test('a rendered queue item exposes its actual upload failure in the run and que
 })
 
 test('pending uploads recover between serial queue projects and do not block the next project on busy', async t => {
+  setTaskWorkerDisabled(t, '0')
   const events: string[] = [], checks = new Map<string, number>(), laterId = `${jobId}-later`
   let service: CbaVideoService
   const f = await fixture(t, { autoRecover: true,
@@ -371,6 +428,7 @@ test('pending uploads recover between serial queue projects and do not block the
 })
 
 test('shared upload lock defers without spending the recovery budget and a stopped queue cancels later recovery', async t => {
+  setTaskWorkerDisabled(t, '0')
   let checks = 0, projects = 0
   const laterId = `${jobId}-busy-tail`
   const f = await fixture(t, { autoRecover: true,
@@ -402,6 +460,7 @@ test('shared upload lock defers without spending the recovery budget and a stopp
 })
 
 test('stopping while a recovery checkpoint is in flight prevents upload and leaves the next project stopped', async t => {
+  setTaskWorkerDisabled(t, '0')
   let finishCheckpoint!: () => void, entered!: () => void, projects = 0
   const checkpointStarted = new Promise<void>(resolve => { entered = resolve })
   const checkpointWait = new Promise<void>(resolve => { finishCheckpoint = resolve })
@@ -2159,6 +2218,7 @@ test('explicit verified highlights pass delivery validation without pretending t
 })
 
 test('service restart reconciles original draft checkpoints without uploading or saving again', async t => {
+  setTaskWorkerDisabled(t, '0')
   let initialUploads = 0
   const { service, root } = await fixture(t, { runtime: runtime({
     runSocialUpload: async payload => { initialUploads++; return receipt(payload) },
@@ -2221,6 +2281,7 @@ test('service refuses a saved receipt with wrong account or missing platform dra
 })
 
 test('restart recovery schedules a later check during cooldown or while the original child survives', async t => {
+  setTaskWorkerDisabled(t, '0')
   for (const mode of ['cooldown', 'surviving-child']) await t.test(mode, async sub => {
     const { service, root } = await fixture(sub)
     await service.upload(jobId, { requestId: `before-timed-recovery-${mode}`, targets: ['baijiahao-video'] }); await service.waitForIdle()
@@ -2297,6 +2358,7 @@ test('same upload fingerprint gets a current-version record while preserving old
 })
 
 test('startup resumes queued undispatched uploads only while their current delivery still validates', async t => {
+  setTaskWorkerDisabled(t, '0')
   for (const mode of ['valid-delivery', 'damaged-delivery']) await t.test(mode, async sub => {
     const { service, root, job, writeJob } = await fixture(sub, { runtime: runtime({
       inspectSocialUploadCheckpoint: async () => ({ action: 'busy', phase: 'locked', message: '模拟派发前服务中断' }),
@@ -2341,6 +2403,7 @@ test('startup resumes queued undispatched uploads only while their current deliv
 })
 
 test('a stopped queued upload remains stopped after restart until an explicit upload reuses its original identity', async t => {
+  setTaskWorkerDisabled(t, '0')
   const { service, root } = await fixture(t, { runtime: runtime({
     inspectSocialUploadCheckpoint: async () => ({ action: 'busy', phase: 'locked', message: '模拟尚未派发' }),
     runSocialUpload: async () => { assert.fail('the queued fixture must not dispatch') },
