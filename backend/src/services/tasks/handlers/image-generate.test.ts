@@ -43,6 +43,8 @@ test('image.generate handler executes an existing image generation record', asyn
   assert.deepEqual(result, { image_generation_id: 7, local_path: 'static/images/a.png' })
   assert.equal(executed[0].generationId, 7)
   assert.equal(executed[0].options.configId, 3)
+  assert.equal(executed[0].options.allowSynchronousImage, false)
+  assert.equal(executed[0].options.singleSubmission, false)
   const events = listTaskEvents(task.id).map(event => event.eventType)
   assert.ok(events.includes('image.provider_task'))
 })
@@ -127,4 +129,56 @@ test('image.generate handler does not repair content policy failure twice for th
   )
 
   assert.equal(repaired, 0)
+})
+
+test('image.generate preserves explicit synchronous-image opt-in through a repaired prompt attempt', async () => {
+  const optionsSeen: any[] = []
+  const handler = createImageGenerateHandler({
+    executeImageGeneration: async (generationId, options) => {
+      optionsSeen.push(options)
+      if (optionsSeen.length === 1) throw new Error('Your request was rejected by the safety system.')
+      return { image_generation_id: generationId, local_path: 'static/images/sync.png' }
+    },
+    repairStoryboardImagePromptForGeneration: async () => ({ repairedPrompt: 'Repaired image prompt', model: 'test' }),
+  })
+  const task = createTask({ type: 'image.generate', payload: {
+    image_generation_id: 11, config_id: 3, allow_synchronous_image: true,
+  } })
+  await handler.run({
+    taskId: task.id, payload: task.payload, signal: new AbortController().signal, attempts: 1,
+    progress() {}, event(type, data) { appendTaskEvent(task.id, type, data) }, isCancelRequested() { return false },
+  })
+  assert.equal(optionsSeen.length, 2)
+  assert.ok(optionsSeen.every((options) => options.allowSynchronousImage === true && options.configId === 3))
+})
+
+test('single-submission image tasks propagate protection and never repair or resubmit after safety rejection', async () => {
+  const calls: any[] = []
+  let repairs = 0
+  const handler = createImageGenerateHandler({
+    executeImageGeneration: async (generationId, options) => {
+      calls.push({ generationId, options })
+      throw new Error('Your request was rejected by the safety system.')
+    },
+    repairStoryboardImagePromptForGeneration: async () => {
+      repairs++
+      return { repairedPrompt: 'Repaired image prompt', model: 'test' }
+    },
+  })
+  const task = createTask({ type: 'image.generate', payload: {
+    image_generation_id: 12, single_image_submission: true, allow_synchronous_image: true,
+  } })
+  const context = {
+    taskId: task.id, payload: task.payload, signal: new AbortController().signal, attempts: 1,
+    progress() {}, event(type: string, data: unknown) { appendTaskEvent(task.id, type, data) },
+    isCancelRequested() { return false },
+  }
+  await assert.rejects(handler.run(context), /safety system/)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].options.singleSubmission, true)
+  assert.equal(calls[0].options.allowSynchronousImage, true)
+  assert.equal(repairs, 0)
+  assert.ok(!listTaskEvents(task.id).some(event => event.eventType === 'image.prompt_repaired'))
+  await assert.rejects(handler.run({ ...context, attempts: 2 }), /already attempted/)
+  assert.equal(calls.length, 1)
 })

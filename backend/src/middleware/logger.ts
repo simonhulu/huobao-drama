@@ -32,7 +32,9 @@ export const requestLogger: MiddlewareHandler = async (c, next) => {
   // 打印请求
   const time = formatTime()
   let bodyInfo = ''
-  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+  if (/^\/api\/v1\/history-scripts\/(?:collection-settings\/)?czgts(?:\/|$)/.test(path)) {
+    bodyInfo = `\n  ${colors.dim}body: [private collection credentials]${colors.reset}`
+  } else if (['POST', 'PUT', 'PATCH'].includes(method)) {
     try {
       const clone = c.req.raw.clone()
       const text = await clone.text()

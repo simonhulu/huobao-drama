@@ -1,0 +1,33 @@
+{
+  "sourceId": 368,
+  "platform": "youtube",
+  "sourceVideoId": "VprFAzjTTuM",
+  "sourceUrl": "https://www.youtube.com/watch?v=VprFAzjTTuM",
+  "title": "秦朝亡了沒人救，漢朝亡了憑什麼還能再活兩百年？",
+  "authorName": "歷史大觀",
+  "status": "downloaded",
+  "videoPath": "/Users/zhangshijie/Documents/workspace/huobao-drama/data/storage/history-scripts/368/source.mp4",
+  "videoSha256": "cb8f5e5469dbae59cda62515e48fd447c2d7cb81a9966f4db513129a062f9207",
+  "videoBytes": 715744358,
+  "probe": {
+    "duration": 5082.383673,
+    "audioStreamIndex": 1,
+    "formatName": "mov,mp4,m4a,3gp,3g2,mj2"
+  },
+  "checkedAt": "2026-10-28T07:16:46.846Z",
+  "localVerification": {
+    "videoCodec": "h264",
+    "audioCodec": "aac",
+    "width": 1280,
+    "height": 720,
+    "sourceRangeResponse": {
+      "status": 206,
+      "contentRange": "bytes 0-2047/715744358",
+      "bytes": 2048,
+      "mp4Brand": "ftyp"
+    },
+    "sourceStatus": "downloaded",
+    "recreationStarted": false,
+    "productionStarted": false
+  }
+}

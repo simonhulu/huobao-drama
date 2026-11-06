@@ -62,6 +62,16 @@ temp/
 /.codex/*
 !/.codex/skills/
 /.codex/skills/*
+!/.codex/skills/history-map-animation/
+!/.codex/skills/history-map-animation/**
+!/.codex/skills/history-motion-video-factory/
+!/.codex/skills/history-motion-video-factory/**
+!/.codex/skills/remotion-history-factory/
+!/.codex/skills/remotion-history-factory/SKILL.md
+!/.codex/skills/remotion-history-factory/references/
+!/.codex/skills/remotion-history-factory/references/*.md
+!/.codex/skills/remotion-history-factory/agents/
+!/.codex/skills/remotion-history-factory/agents/openai.yaml
 !/.codex/skills/polish-video-script/
 !/.codex/skills/polish-video-script/**
 /.private/polish-video-script/
@@ -86,6 +96,8 @@ polished-zhangjuzheng-script*
 
 # Backend local databases
 backend/data.db
+backend/data.db-wal
+backend/data.db-shm
 backend/dev.db
 backend/src/db/*.db
 .worktrees/
@@ -103,3 +115,27 @@ backend/src/db/*.db
 # Keep the content work directories trackable even when a global gitignore
 # contains a broad `scripts` rule.
 !scripts/
+
+# External history-video publishing skill and generated local packages
+!/.codex/skills/history-video-publish/
+!/.codex/skills/history-video-publish/**
+data/history-video-publish/
+data/baijiahao-profile/
+data/publish-manifests/
+data/publish-state/wechat/
+
+# CBA production skill; recordings and generated job state stay local.
+!/.codex/skills/cba-video-factory/
+!/.codex/skills/cba-video-factory/**
+data/cba-video/
+
+# Private social-auto-upload checkpoints, screenshots and serial queue database.
+data/social-auto-upload/
+backend/scripts/social-auto-upload/__pycache__/
+
+# Generated validation artifacts and local runtime files
+/outputs/
+**/.impeccable/review/
+__pycache__/
+*.py[cod]
+/backend/pipe:1

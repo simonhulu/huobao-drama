@@ -13,12 +13,15 @@ const {
   createTask,
   getTask,
   listTaskEvents,
+  markTaskAttemptStartedWithLease,
   requestCancel,
   transitionTask,
 } = await import('./store.js')
 const { clearTaskHandlers, registerTaskHandler } = await import('./registry.js')
 const { runWorkerOnce, startTaskWorkerLoop } = await import('./worker.js')
+const { recoverExpiredRunningTasks } = await import('./recovery.js')
 const { db, schema } = await import('../../db/index.js')
+const { NonRetryableTaskError } = await import('./types.js')
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -72,6 +75,24 @@ test('runWorkerOnce leases a queued task and marks it succeeded', async () => {
   assert.equal(loaded?.result.ok, true)
   assert.equal(loaded?.leaseOwner, null)
   assert.equal(loaded?.progressMessage, 'halfway')
+})
+
+test('explicit nonretryable payload validation fails once despite remaining attempts', async () => {
+  clearTaskHandlers()
+  let calls = 0
+  registerTaskHandler('test.validation', {
+    resumable: true,
+    maxAttempts: 3,
+    run: async () => { calls++; throw new NonRetryableTaskError('稿件已更新，请刷新后继续', 'source_changed') },
+  })
+  const task = createTask({ type: 'test.validation', maxAttempts: 3 })
+  await runWorkerOnce({ workerId: 'validation-worker' })
+  const loaded = getTask(task.id)!
+  assert.equal(loaded.status, 'failed')
+  assert.equal(loaded.attempts, 1)
+  assert.equal(loaded.errorCode, 'source_changed')
+  assert.equal(await runWorkerOnce({ workerId: 'validation-worker' }), false)
+  assert.equal(calls, 1)
 })
 
 test('runWorkerOnce cancels queued task before executing handler', async () => {
@@ -532,6 +553,69 @@ test('runWorkerOnce stops retrying after maxAttempts is reached', async () => {
   assert.equal(loaded?.errorMessage, 'permanent failure')
 })
 
+test('single-submission image failures are terminal even when the handler and persisted task allow retries', async () => {
+  clearTaskHandlers()
+  let calls = 0
+  registerTaskHandler('image.generate', {
+    resumable: true, maxAttempts: 3,
+    async run() { calls++; throw new TypeError('fetch failed') },
+  })
+  const task = createTask({ type: 'image.generate', maxAttempts: 8,
+    payload: { single_image_submission: true } })
+  assert.equal(await runWorkerOnce({ workerId: 'single-image', taskIds: [task.id] }), true)
+  assert.equal(getTask(task.id)?.status, 'failed')
+  assert.equal(getTask(task.id)?.attempts, 1)
+  assert.equal(calls, 1)
+  assert.ok(!listTaskEvents(task.id).some(event => event.eventType === 'retry.scheduled'))
+  assert.equal(await runWorkerOnce({ workerId: 'single-image', taskIds: [task.id] }), false)
+  assert.equal(calls, 1)
+})
+
+test('recovered single-submission image tasks with an earlier persisted attempt never invoke the handler again', async () => {
+  clearTaskHandlers()
+  let calls = 0
+  registerTaskHandler('image.generate', {
+    resumable: true, maxAttempts: 3,
+    async run() { calls++; return { ok: true } },
+  })
+  const task = createTask({ type: 'image.generate', maxAttempts: 3,
+    payload: { single_image_submission: true } })
+  const claim = claimQueuedTask(task.id, { workerId: 'crashed-image', leaseMs: 60_000 })!
+  assert.ok(markTaskAttemptStartedWithLease(task.id, 'crashed-image', claim.leaseToken!))
+  recoverExpiredRunningTasks({ expiredBeforeMs: Date.now() + 60_001 })
+  assert.equal(getTask(task.id)?.status, 'queued')
+  assert.equal(await runWorkerOnce({ workerId: 'recovered-image', taskIds: [task.id] }), true)
+  assert.equal(calls, 0)
+  assert.equal(getTask(task.id)?.attempts, 1)
+  assert.equal(getTask(task.id)?.status, 'failed')
+  assert.equal(getTask(task.id)?.errorCode, 'image_submission_already_attempted')
+})
+
+test('ordinary image tasks retain queue retries when single-submission policy is absent or false', async () => {
+  for (const singleImageSubmission of [undefined, false]) {
+    clearTaskHandlers()
+    let calls = 0
+    registerTaskHandler('image.generate', {
+      resumable: true, maxAttempts: 3,
+      async run() {
+        calls++
+        if (calls === 1) throw new TypeError('fetch failed')
+        return { ok: true }
+      },
+    })
+    const task = createTask({ type: 'image.generate',
+      payload: { single_image_submission: singleImageSubmission } })
+    assert.equal(await runWorkerOnce({ workerId: 'ordinary-image', taskIds: [task.id] }), true)
+    const retried = getTask(task.id)!
+    assert.equal(retried.status, 'queued')
+    assert.ok(listTaskEvents(task.id).some(event => event.eventType === 'retry.scheduled'))
+    assert.equal(await runWorkerOnce({ workerId: 'ordinary-image', taskIds: [task.id],
+      nowMs: Date.parse(retried.scheduledAt!) + 1000 }), true)
+    assert.equal(calls, 2)
+    assert.equal(getTask(task.id)?.status, 'succeeded')
+  }
+})
+
 test('runWorkerOnce heartbeats while a handler is running', async () => {
   clearTaskHandlers()
   registerTaskHandler('test.heartbeat', {
@@ -650,4 +734,24 @@ test('runWorkerOnce respects types filter and skips non-matching tasks', async (
   assert.equal(getTask(allowedTask.id)?.status, 'succeeded')
   assert.equal(getTask(blockedTask.id)?.status, 'queued')
   assert.equal(getTask(blockedTask.id)?.leaseOwner, null)
+})
+
+test('runWorkerOnce restricts execution to explicit task IDs and never broadens an empty list', async () => {
+  clearTaskHandlers()
+  const type = 'test.worker-scoped-ids'
+  const executed: number[] = []
+  registerTaskHandler(type, {
+    resumable: true,
+    maxAttempts: 1,
+    run: async (ctx) => { executed.push(ctx.taskId); return { ok: true } },
+  })
+  const unrelated = createTask({ type, priority: 100 })
+  const target = createTask({ type, priority: 1 })
+  assert.equal(await runWorkerOnce({ workerId: 'scope-empty', taskIds: [] }), false)
+  assert.deepEqual(executed, [])
+  assert.equal(await runWorkerOnce({ workerId: 'scope-target', taskIds: [target.id] }), true)
+  assert.deepEqual(executed, [target.id])
+  assert.equal(getTask(target.id)?.status, 'succeeded')
+  assert.equal(getTask(unrelated.id)?.status, 'queued')
+  assert.equal(getTask(unrelated.id)?.leaseOwner, null)
 })

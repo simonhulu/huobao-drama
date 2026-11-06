@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-22T06:14:41.000Z",
+  "title": "Design System: History Production Workspace",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Studio Ink", "tonalRamp": ["#09090b", "#18181b", "#27272a", "#3f3f46", "#71717a", "#a1a1aa", "#e4e4e7", "#fafafa"] },
+      "selection": { "role": "secondary", "displayName": "Selection Blue", "tonalRamp": ["oklch(20% 0.08 263)", "oklch(30% 0.12 263)", "oklch(40% 0.16 263)", "oklch(50% 0.2 263)", "oklch(60% 0.2 263)", "oklch(72% 0.14 263)", "oklch(85% 0.07 263)", "oklch(95% 0.02 263)"] },
+      "blocker": { "role": "tertiary", "displayName": "Blocker Amber", "tonalRamp": ["oklch(20% 0.04 55)", "oklch(30% 0.06 55)", "oklch(40% 0.09 55)", "oklch(50% 0.12 55)", "oklch(60% 0.13 55)", "oklch(72% 0.1 55)", "oklch(85% 0.06 55)", "oklch(95% 0.02 55)"] },
+      "complete": { "role": "tertiary", "displayName": "Verified Green", "tonalRamp": ["oklch(20% 0.04 150)", "oklch(30% 0.06 150)", "oklch(40% 0.09 150)", "oklch(50% 0.12 150)", "oklch(60% 0.13 150)", "oklch(72% 0.1 150)", "oklch(85% 0.06 150)", "oklch(95% 0.02 150)"] },
+      "danger": { "role": "tertiary", "displayName": "Failure Red", "tonalRamp": ["oklch(20% 0.05 28)", "oklch(30% 0.08 28)", "oklch(40% 0.12 28)", "oklch(50% 0.16 28)", "oklch(60% 0.18 28)", "oklch(72% 0.12 28)", "oklch(85% 0.06 28)", "oklch(95% 0.02 28)"] },
+      "surface": { "role": "neutral", "displayName": "Working White", "tonalRamp": ["#09090b", "#18181b", "#27272a", "#3f3f46", "#71717a", "#a1a1aa", "#e4e4e7", "#fafafa"] }
+    },
+    "typographyMeta": {
+      "heading": { "displayName": "Workspace Identity", "purpose": "Compact page identity, not a hero." },
+      "manuscript": { "displayName": "Chinese Manuscript", "purpose": "Equal typography for original text and editable adaptation." }
+    },
+    "shadows": [{ "name": "overlay", "value": "0 10px 30px rgba(0,0,0,0.12)", "purpose": "Existing studio drawers and dialogs only." }],
+    "motion": [{ "name": "state-transition", "value": "160ms cubic-bezier(0.16, 1, 0.3, 1)", "purpose": "Brief state changes; loading rotation is disabled for reduced motion." }],
+    "breakpoints": [
+      { "name": "phone", "value": "640px" },
+      { "name": "library-reflow", "value": "760px" },
+      { "name": "collection-strip-compact", "value": "980px" },
+      { "name": "queue-reflow", "value": "1100px" },
+      { "name": "short-viewport", "value": "(max-height: 600px)" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Command", "kind": "button", "refersTo": "button-primary", "description": "The current production command.",
+      "html": "<button class=\"ds-primary\">启动采集</button>",
+      "css": ".ds-primary{background:var(--accent,#18181b);color:#fff;border:0;border-radius:6px;padding:7px 14px;min-height:40px;font:500 13px/1.5 system-ui;cursor:pointer;letter-spacing:0}.ds-primary:hover{background:#3f3f46}.ds-primary:focus-visible{outline:2px solid var(--border-focus,#18181b);outline-offset:3px}.ds-primary:active{background:#09090b}.ds-primary:disabled{opacity:.4;cursor:not-allowed}"
+    },
+    {
+      "name": "Secondary Command", "kind": "button", "refersTo": "queue-control", "description": "Compact commands beside production records.",
+      "html": "<button class=\"ds-control\">查看产物</button>",
+      "css": ".ds-control{min-height:32px;padding:5px 10px;background:var(--bg-0,#fff);color:#3f3f46;border:1px solid var(--border-strong,#d4d4d8);border-radius:5px;font:400 13px/20px system-ui;cursor:pointer;letter-spacing:0}.ds-control:hover{background:var(--bg-2,#f4f4f5);border-color:#a1a1aa}.ds-control:focus-visible{outline:2px solid var(--info,#2563eb);outline-offset:3px}.ds-control:active{background:#e4e4e7}"
+    },
+    {
+      "name": "Search", "kind": "input", "refersTo": "search", "description": "Bounded title and source lookup.",
+      "html": "<input class=\"ds-search\" type=\"search\" aria-label=\"搜索制作任务\" placeholder=\"搜索标题 / 稿件 ID / 任务 ID\">",
+      "css": ".ds-search{width:280px;max-width:100%;height:32px;padding:0 8px;border:1px solid var(--border-strong,#d4d4d8);border-radius:5px;background:var(--bg-0,#fff);color:var(--text-1,#27272a);font:400 12px/1.5 system-ui;caret-color:#2563eb;letter-spacing:0}.ds-search::placeholder{color:#71717a;opacity:1}.ds-search:hover{border-color:#a1a1aa}.ds-search:focus-visible{outline:2px solid var(--info,#2563eb);outline-offset:2px}"
+    },
+    {
+      "name": "Workspace Tabs", "kind": "nav", "description": "Underline navigation without remounting active work.",
+      "html": "<nav class=\"ds-tabs\" aria-label=\"历史脚本工作区\"><button aria-current=\"page\">视频制作</button><button>稿件库</button><button>采集任务</button></nav>",
+      "css": ".ds-tabs{display:flex;gap:24px;border-bottom:1px solid var(--border,#e4e4e7);font-family:system-ui}.ds-tabs button{min-height:46px;padding:0 3px;border:0;border-bottom:2px solid transparent;background:none;color:#71717a;font:500 13px system-ui;cursor:pointer;letter-spacing:0}.ds-tabs button[aria-current=page]{color:#09090b;border-bottom-color:#09090b}.ds-tabs button:hover{color:#09090b}.ds-tabs button:focus-visible{outline:2px solid var(--border-focus,#18181b);outline-offset:3px}"
+    },
+    {
+      "name": "Quota State", "kind": "chip", "description": "A text-labeled blocker, not a decorative metric.",
+      "html": "<span class=\"ds-quota\">等待标准额度</span>",
+      "css": ".ds-quota{display:inline-flex;padding:2px 6px;border-radius:4px;background:#fff7ed;color:#92400e;font:500 12px/1.5 system-ui;letter-spacing:0}"
+    },
+    {
+      "name": "Recurring Monitoring", "kind": "custom", "description": "Persistent monitoring, off by default and independent of automatic creation admission.",
+      "html": "<label class=\"ds-monitor\"><input type=\"checkbox\">循环监测</label>",
+      "css": ".ds-monitor{display:flex;align-items:center;gap:6px;min-height:32px;color:#52525b;font:400 12px/1.5 system-ui;cursor:pointer;letter-spacing:0}.ds-monitor input{width:15px;height:15px;margin:0;accent-color:#18181b}.ds-monitor:hover{color:#18181b}.ds-monitor input:focus-visible{outline:2px solid var(--info,#2563eb);outline-offset:3px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Content Production Desk",
+    "overview": "The history workspace is a quiet, light, utilitarian part of Huobao Studio. Compact typography, fine dividers and independently scrollable work areas give real content more space than controls. The existing studio identity and global navigation remain unchanged; this document governs `/history-scripts`, not every studio route.\n\nProduction, manuscript work and collection are distinct workspaces. Persistent selection connects them without replacing unsaved text or remounting source media. Visual confidence comes from precise state labels and durable results, not decorative summaries.",
+    "keyCharacteristics": ["Task-separated, content-first work areas.", "White and zinc surfaces with semantic blue, amber, green and red accents.", "Compact controls, readable Chinese manuscripts and visible keyboard focus.", "Actual source media, finished videos, covers and article previews."],
+    "rules": [{ "name": "The Evidence Rule", "body": "Color never substitutes for a state name or upgrades an uncertain platform observation into success.", "section": "colors" }],
+    "dos": ["Do use real saved content and correctly associated media as visual evidence.", "Do preserve unsaved text, revision conflicts, source provenance and independent task updates.", "Do distinguish a platform conversation, accepted production, export availability and a locally associated finished video.", "Do retain manual download and standard-mode quota decisions; expose blockers honestly.", "Do keep long titles, Chinese labels and working lists usable on phones and short screens."],
+    "donts": ["Don't stack every workflow on one page or place cards inside cards.", "Don't add decorative metrics, marketing heroes, gradients or illustration to this operational surface.", "Don't infer completion from a project link or an accepted local request.", "Don't add script-length gates or turn editorial suggestions into production blockers.", "Don't discard old outputs, silently overwrite drafts, bypass login verification or imply that cancellation reverses provider billing."]
+  }
+}

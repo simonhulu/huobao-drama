@@ -418,6 +418,7 @@ export function claimQueuedTask(
 }
 
 export function acquireNextQueuedTask(input: LeaseTaskInput): CreationTask | null {
+  if (input.taskIds?.length === 0) return null
   const nowMs = input.nowMs ?? Date.now()
   const isoNow = isoFromMs(nowMs)
 
@@ -427,6 +428,9 @@ export function acquireNextQueuedTask(input: LeaseTaskInput): CreationTask | nul
   ]
   if (input.types?.length) {
     conditions.push(inArray(schema.creationTasks.type, input.types))
+  }
+  if (input.taskIds) {
+    conditions.push(inArray(schema.creationTasks.id, input.taskIds))
   }
 
   const candidates = db.select().from(schema.creationTasks)

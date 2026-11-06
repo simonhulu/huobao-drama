@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBA 双视频工厂"
+  short_description: "推荐 CBA 比赛，核实新闻并匹配回放，经预览审核制作新闻解读与原声集锦"
+  default_prompt: "使用 $cba-video-factory 推荐最近值得制作的 CBA 比赛，供我选定后制作新闻版和集锦版。"

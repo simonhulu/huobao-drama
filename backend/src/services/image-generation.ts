@@ -207,12 +207,26 @@ export async function generateImage(params: GenerateImageParams): Promise<number
 export interface ExecuteImageGenerationOptions {
   configId?: number
   taskContext?: TaskContext<any>
+  allowSynchronousImage?: boolean
+  singleSubmission?: boolean
 }
 
 export interface ExecuteImageGenerationResult {
   image_generation_id: number
   local_path: string
   image_url?: string | null
+}
+
+/** Minimal persisted state used by long-running workflow recovery. */
+export function getImageGenerationState(id: number) {
+  const [record] = db.select({
+    status: schema.imageGenerations.status,
+    taskId: schema.imageGenerations.taskId,
+    localPath: schema.imageGenerations.localPath,
+    errorMsg: schema.imageGenerations.errorMsg,
+    lastErrorCode: schema.imageGenerations.lastErrorCode,
+  }).from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
+  return record || null
 }
 
 export async function executeImageGeneration(
@@ -241,7 +255,9 @@ export async function executeImageGeneration(
   }
 
   options.taskContext?.progress('Starting image generation', 0, 2)
-  await runWithProviderLifecycleLimit(config.provider, () => runImageGeneration(generationId, config, options.taskContext))
+  await runWithProviderLifecycleLimit(config.provider, () =>
+    runImageGeneration(generationId, config, options.taskContext,
+      options.allowSynchronousImage === true, options.singleSubmission === true))
   options.taskContext?.progress('Image generation finished', 2, 2)
 
   const [updated] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, generationId)).all()
@@ -255,7 +271,13 @@ export async function executeImageGeneration(
   }
 }
 
-async function runImageGeneration(id: number, config: AIConfig, taskContext?: TaskContext<any>): Promise<void> {
+async function runImageGeneration(
+  id: number,
+  config: AIConfig,
+  taskContext?: TaskContext<any>,
+  allowSynchronousImage = false,
+  singleSubmission = false,
+): Promise<void> {
   try {
     const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
     const record = rows[0]
@@ -275,9 +297,12 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
           signal: taskContext?.signal,
           timeoutMs: IMAGE_POLL_TIMEOUT_MS,
         })
-        db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, null))
+        db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, null), { behavior: 'immediate' })
         logTaskSuccess('ImageTask', 'egaki-chatgpt-saved', { id, provider: config.provider, taskId: record.taskId, localPath })
         return
+      }
+      if (singleSubmission) {
+        throw new Error('Single-submission image job is missing; inspect the existing provider submission before retrying')
       }
       logTaskWarn('ImageTask', 'egaki-chatgpt-local-job-missing-resubmit', {
         id,
@@ -333,7 +358,7 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
           timeoutMs: IMAGE_POLL_TIMEOUT_MS,
         })
       })
-      db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, null))
+      db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, null), { behavior: 'immediate' })
       logTaskSuccess('ImageTask', 'egaki-chatgpt-saved', { id, provider: config.provider, localPath })
       return
     }
@@ -409,7 +434,7 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
         method,
         headers,
         body: JSON.stringify(body),
-      }, { timeoutMs: 600_000, lane: 'image-generate' }),
+      }, { timeoutMs: 600_000, lane: 'image-generate', ...(singleSubmission ? { maxAttempts: 1 } : {}) }),
     )
 
     if (!resp.ok) {
@@ -434,7 +459,7 @@ async function runImageGeneration(id: number, config: AIConfig, taskContext?: Ta
       result,
     })
 
-    const { isAsync, taskId, imageUrl } = adapter.parseGenerateResponse(result)
+    const { isAsync, taskId, imageUrl } = adapter.parseGenerateResponse(result, { allowSynchronousImage })
 
     if (!isAsync && imageUrl) {
       logTaskProgress('ImageTask', 'sync-complete', { id, imageUrl })
@@ -710,14 +735,29 @@ export function failImageGenerationFromProvider(id: number, errorMessage: string
     .run()
 }
 
+/** Clear a stale provider task after the local poller timed out. */
+export function resetImageGenerationForRetry(id: number, errorMessage: string) {
+  db.update(schema.imageGenerations)
+    .set({
+      status: 'failed',
+      taskId: null,
+      errorMsg: errorMessage,
+      lastErrorCode: 'provider_timeout',
+      lastErrorDetail: errorMessage,
+      updatedAt: now(),
+    })
+    .where(eq(schema.imageGenerations.id, id))
+    .run()
+}
+
 async function handleImageComplete(id: number, provider: string, imageUrl: string) {
   const localPath = await downloadFile(imageUrl, 'images')
-  db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, imageUrl))
+  db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, imageUrl), { behavior: 'immediate' })
   logTaskSuccess('ImageTask', 'downloaded', { id, provider, localPath })
 }
 
 async function handleImageCompleteBase64(id: number, provider: string, base64Data: string, mimeType: string) {
   const localPath = await saveBase64Image(base64Data, mimeType, 'images')
-  db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, null))
+  db.transaction((tx) => syncRelatedImageTables(tx, id, localPath, null), { behavior: 'immediate' })
   logTaskSuccess('ImageTask', 'saved-base64', { id, provider, mimeType, localPath })
 }

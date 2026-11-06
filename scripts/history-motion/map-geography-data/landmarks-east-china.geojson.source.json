@@ -1,0 +1,21 @@
+{
+  "title": "Wikidata Chinese named mountain and sea anchors",
+  "url": "https://www.wikidata.org/w/api.php",
+  "license": "CC0",
+  "licenseUrl": "https://www.wikidata.org/wiki/Wikidata:Licensing",
+  "downloadedAt": "2026-10-28",
+  "sha256": "2096d8be9d407ca6b12566685a184abadc32f85a3ffa768ec1a9d3de7569e715",
+  "rawSources": [
+    {
+      "rawFile": "data/temp/history-map-atlas-1063/geography/named-landmarks-wikidata.json",
+      "sha256": "98d24355e44caecb4e8c481dfa1bd0920ef95811aa42c3ebcd3a5bacba3f9310"
+    },
+    {
+      "rawFile": "data/temp/history-map-atlas-1063/geography/mount-tai-entity.json",
+      "sha256": "70872d3ec5e1c33ffd470a80b8f7215176b8ffc59badaa6c53aa1e53238b4264",
+      "url": "https://www.wikidata.org/wiki/Special:EntityData/Q216059.json",
+      "revision": 2558190425
+    }
+  ],
+  "processing": "Use non-deprecated P625 coordinate and Chinese label; points name a mountain or sea, not precise terrain extent."
+}

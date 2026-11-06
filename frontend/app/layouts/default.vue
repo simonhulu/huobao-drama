@@ -29,17 +29,33 @@
           </svg>
           <span>素材库</span>
         </NuxtLink>
+        <NuxtLink to="/history-scripts" class="nav-link" title="历史脚本" :class="{ active: route.path.startsWith('/history-scripts') }">
+          <ScrollText :size="15" :stroke-width="1.8" />
+          <span>历史脚本</span>
+        </NuxtLink>
+        <NuxtLink to="/cba-video" class="nav-link" title="CBA视频工厂" :class="{ active: route.path.startsWith('/cba-video') }">
+          <RadioTower :size="15" :stroke-width="1.8" />
+          <span>CBA视频</span>
+        </NuxtLink>
+        <NuxtLink to="/nba-video" class="nav-link" title="NBA新闻视频" :class="{ active: route.path.startsWith('/nba-video') }">
+          <Newspaper :size="15" :stroke-width="1.8" />
+          <span>NBA视频</span>
+        </NuxtLink>
         <NuxtLink to="/remotion" class="nav-link" title="Remotion" :class="{ active: route.path.startsWith('/remotion') }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="4" width="18" height="16" rx="2"/><path d="m8 4 4 16M16 4l-4 16"/>
           </svg>
           <span>Remotion</span>
         </NuxtLink>
-        <NuxtLink to="/science-pop" class="nav-link" title="科普工厂" :class="{ active: route.path.startsWith('/science-pop') }">
+        <NuxtLink to="/science-pop" class="nav-link" title="冷知识科普" :class="{ active: route.path.startsWith('/science-pop') }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 12 2.1 10.5"/><path d="M12 12V2"/><circle cx="12" cy="12" r="3"/>
           </svg>
-          <span>科普工厂</span>
+          <span>冷知识科普</span>
+        </NuxtLink>
+        <NuxtLink to="/mystery-stories" class="nav-link" title="奇闻故事" :class="{ active: route.path.startsWith('/mystery-stories') }">
+          <BookOpen :size="15" :stroke-width="1.8" />
+          <span>奇闻故事</span>
         </NuxtLink>
         <NuxtLink to="/dharma" class="nav-link" title="佛学工厂" :class="{ active: route.path.startsWith('/dharma') }">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -68,11 +84,12 @@
     <main class="content">
       <slot />
     </main>
-    <GlobalTaskCenter />
+    <GlobalTaskCenter v-if="!route.path.startsWith('/history-scripts') && !route.path.startsWith('/cba-video') && !route.path.startsWith('/nba-video') && !route.path.startsWith('/science-pop') && !route.path.startsWith('/mystery-stories')" />
   </div>
 </template>
 
 <script setup>
+import { BookOpen, Newspaper, RadioTower, ScrollText } from 'lucide-vue-next'
 import brandLogo from '~/assets/huobao-logo.png'
 import GlobalTaskCenter from '~/components/GlobalTaskCenter.vue'
 
@@ -83,7 +100,7 @@ const showBrandImage = ref(true)
 <style scoped>
 .shell {
   display: flex; flex-direction: column;
-  height: 100vh; overflow: hidden;
+  height: 100dvh; overflow: hidden;
   background: var(--bg-base);
 }
 
@@ -148,6 +165,7 @@ const showBrandImage = ref(true)
   color: var(--text-2); text-decoration: none;
   transition: all 0.18s var(--ease-out);
   border: 1px solid transparent;
+  white-space: nowrap;
 }
 .nav-link:hover {
   background: var(--bg-hover); color: var(--text-0);
@@ -182,12 +200,18 @@ const showBrandImage = ref(true)
 /* Content */
 .content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 
+@media (min-width: 761px) and (max-width: 1100px) {
+  .header { padding: 0 16px; gap: 12px; }
+  .nav-link { padding-inline: 9px; }
+  .header-right { display: none; }
+}
+
 @media (max-width: 760px) {
   .header { height: 52px; padding: 0 14px; gap: 10px; }
   .brand { gap: 0; }
   .brand-text { display: none; }
-  .header-nav { min-width: 0; justify-content: center; gap: 2px; }
-  .nav-link { width: 38px; height: 36px; justify-content: center; padding: 0; gap: 0; }
+  .header-nav { min-width: 0; justify-content: flex-start; gap: 2px; overflow-x: auto; }
+  .nav-link { flex-shrink: 0; width: 42px; height: 44px; justify-content: center; padding: 0; gap: 0; }
   .nav-link span { display: none; }
   .header-right { display: none; }
 }

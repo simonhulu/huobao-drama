@@ -15,6 +15,7 @@ import { buildEgakiChildEnv } from '../services/egaki-chatgpt-image.js'
 import { maskSecret } from '../services/secret-crypto.js'
 import { buildRightCodeTaskUrl } from '../services/adapters/rightcode-image.js'
 import { ensureQwen3TTSServer, isQwen3TTSProvider } from '../services/adapters/qwen3-tts.js'
+import { isQwenTTSProvider, qwenTTSBaseUrl } from '../services/adapters/qwen-tts.js'
 
 const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -158,6 +159,15 @@ function viduHeaders(apiKey?: string, withJson = false) {
 function buildProbe(serviceType: string, provider: string, baseUrl: string, model?: string, apiKey?: string) {
   const p = provider.toLowerCase()
   const m = model || ''
+
+  if (serviceType === 'audio' && isQwenTTSProvider(p)) {
+    return {
+      method: 'POST',
+      url: `${qwenTTSBaseUrl({ baseUrl })}/services/audio/tts/customization`,
+      headers: bearerHeaders(apiKey, true),
+      body: { model: 'voice-enrollment', input: { action: 'list_voice', page_size: 1, page_index: 0 } },
+    }
+  }
 
   if (p === 'rightcode' || p === 'rightcodes' || p === 'right') {
     return {
@@ -474,10 +484,11 @@ app.post('/test', async (c) => {
   const serviceType = storedConfig?.serviceType || body.service_type
   const providerName = storedConfig?.provider || body.provider
   const baseUrl = storedConfig?.baseUrl || body.base_url
-  const apiKey = storedConfig?.apiKey || body.api_key
   const configModel = storedConfig?.model ? JSON.parse(storedConfig.model) : body.model
   const provider = String(providerName || '').toLowerCase()
-  if (!serviceType || !providerName || (provider !== 'egaki-chatgpt' && !isQwen3TTSProvider(provider) && !baseUrl)) {
+  const qwenTTS = serviceType === 'audio' && isQwenTTSProvider(provider)
+  const apiKey = storedConfig?.apiKey || body.api_key || (qwenTTS ? process.env.QWEN_API_KEY : undefined)
+  if (!serviceType || !providerName || (provider !== 'egaki-chatgpt' && !isQwen3TTSProvider(provider) && !qwenTTS && !baseUrl)) {
     return badRequest(c, 'service_type, provider and base_url are required')
   }
 
@@ -512,24 +523,31 @@ app.post('/test', async (c) => {
       method: probe.method,
       headers: probe.headers,
       body: probe.body ? JSON.stringify(probe.body) : undefined,
+      ...(qwenTTS ? { signal: AbortSignal.timeout(60_000) } : {}),
     })
     const text = await resp.text()
+    let qwenResult: any
+    if (qwenTTS) {
+      try { qwenResult = JSON.parse(text) } catch { /* A successful HTTP page is not a valid voice service response. */ }
+    }
+    const ok = resp.ok && (!qwenTTS || (!qwenResult?.code && Array.isArray(qwenResult?.output?.voice_list)))
     const reachable = [200, 204, 400, 401, 403].includes(resp.status)
       || ((provider === 'rightcode' || provider === 'rightcodes' || provider === 'right'
         || provider === 'gpt-image2' || provider === 'gpt-image-2' || provider === 'pcore') && resp.status === 404)
     const payload = {
-      ok: resp.ok,
+      ok,
       reachable,
       status: resp.status,
       status_text: resp.statusText,
       method: probe.method,
       url: probeUrl,
-      message: reachable
+      message: qwenTTS ? redactSecretText(ok ? '百炼音色服务认证与连接正常'
+        : String(qwenResult?.message || qwenResult?.code || '百炼音色服务返回异常，请检查 API Key、Base URL 和业务空间'), apiKey) : reachable
         ? (resp.ok ? '端点可访问，认证与路径基本正常' : '端点已响应，请根据状态码判断认证或路径是否正确')
         : '端点未按预期响应，请检查 Base URL 和代理前缀',
-      response_preview: redactSecretText(text.slice(0, 240), apiKey),
+      response_preview: redactSecretText(text, apiKey).slice(0, 240),
     }
-    if (reachable) {
+    if (reachable && (!qwenTTS || ok)) {
       logTaskSuccess('AIConfig', 'probe-done', {
         provider: providerName,
         status: resp.status,

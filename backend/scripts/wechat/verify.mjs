@@ -20,6 +20,10 @@ import {
   screenshot,
   emit,
   fail,
+  resolveManifestPath,
+  isHistoryManifest,
+  isVideoUploaded,
+  saveHistoryDraft,
 } from './lib.mjs'
 
 function parseArgs(argv) {
@@ -34,8 +38,38 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv)
   let title = null
-  if (args.manifest && fs.existsSync(args.manifest)) {
-    title = JSON.parse(fs.readFileSync(args.manifest, 'utf8')).title
+  let manifest = null
+  if (args.manifest) {
+    const file = resolveManifestPath(args.manifest)
+    if (!fs.existsSync(file)) throw new Error(`manifest 不存在: ${file}`)
+    manifest = JSON.parse(fs.readFileSync(file, 'utf8'))
+    title = manifest.title
+  }
+  if (isHistoryManifest(manifest) || manifest?.publish_package_id) {
+    let browser
+    let page
+    try {
+      const result = await saveHistoryDraft(manifest, {
+        async assertReady() {
+          browser = await connectBrowser()
+          page = (await browser.pages()).find((candidate) => candidate.url().includes('/platform/post/create'))
+          if (!page) throw new Error('找不到已暂存的发布页，请核对 operate 阶段')
+          attachDialogHandler(page)
+          if (!(await isLoggedIn(page))) throw new Error('未登录')
+          if (!(await isVideoUploaded(page))) throw new Error('发布页视频尚未上传完成')
+        },
+        async save() {
+          const saved = await saveDraft(page, 120_000, { requireEvidence: true })
+          await screenshot(page, 'verify_after_save')
+          return saved
+        },
+      })
+      emit({ ...result, title, publish_package_id: manifest.publish_package_id })
+      if (!result.saved) throw new Error('保存结果未知，请先在草稿箱核对，停止自动重试')
+    } finally {
+      browser?.disconnect()
+    }
+    return
   }
 
   const browser = await connectBrowser()

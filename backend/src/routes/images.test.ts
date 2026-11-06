@@ -11,6 +11,7 @@ process.env.DB_PATH = join(dbDir, 'test.db')
 const { db, schema } = await import('../db/index.js')
 const { now } = await import('../utils/response.js')
 const { default: route } = await import('./images.js')
+const { getTask } = await import('../services/tasks/store.js')
 
 test('POST /images uses storyboard episode aspect ratio over request aspect ratio', async () => {
   const ts = now()
@@ -195,4 +196,55 @@ test('POST /images reuses the active task and image generation for duplicate ide
     .all()
   assert.equal(generations.length, 1)
   assert.equal(generations[0].id, first.data.id)
+})
+
+test('POST /images persists synchronous-image compatibility only when explicitly requested', async () => {
+  const ts = now()
+  const configId = Number(db.insert(schema.aiServiceConfigs).values({
+    serviceType: 'image', provider: 'gpt-image2', name: 'Synchronous-compatible image config',
+    baseUrl: 'https://sync-image.example.test', apiKey: 'test-key', model: JSON.stringify(['gpt-image-2']),
+    isActive: true, createdAt: ts, updatedAt: ts,
+  }).run().lastInsertRowid)
+  for (const optIn of [undefined, false, true]) {
+    const res = await route.request('/', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Cover background', config_id: configId,
+        frame_type: `sync-compatibility-${String(optIn)}`, allow_synchronous_image: optIn }),
+    })
+    assert.equal(res.status, 201)
+    const result = await res.json()
+    assert.equal(getTask(result.data.task_id)?.payload.allow_synchronous_image, optIn === true)
+  }
+  const invalid = await route.request('/', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: 'Cover background', config_id: configId, allow_synchronous_image: 'true' }),
+  })
+  assert.equal(invalid.status, 400)
+})
+
+test('POST /images persists single-submission policy and one queue attempt only when explicitly requested', async () => {
+  for (const optIn of [undefined, false, true]) {
+    const res = await route.request('/', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Single submission cover',
+        frame_type: `single-submission-${String(optIn)}`, single_image_submission: optIn }),
+    })
+    assert.equal(res.status, 201)
+    const result = await res.json()
+    const task = getTask(result.data.task_id)
+    assert.equal(task?.payload.single_image_submission, optIn === true)
+    assert.equal(task?.maxAttempts, 1)
+  }
+  const invalid = await route.request('/', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: 'Cover background', single_image_submission: 'true' }),
+  })
+  assert.equal(invalid.status, 400)
+  assert.match(await invalid.text(), /single_image_submission must be a boolean/)
+})
+
+test('GET /images/capabilities advertises single-submission support before matching generation IDs', async () => {
+  const response = await route.request('/capabilities')
+  assert.equal(response.status, 200)
+  assert.deepEqual((await response.json()).data, { single_image_submission: true })
 })

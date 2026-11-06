@@ -4,17 +4,18 @@
     <div class="page-head">
       <div class="head-left">
         <h1 class="page-title">素材库</h1>
-        <p class="page-desc">已生成的 BGM 与本地 SFX 音效，可试听、筛选</p>
       </div>
-      <div class="head-actions">
+      <div v-if="activeTab !== 'voices'" class="head-actions">
         <button class="btn" :disabled="refreshing" @click="refreshMusic">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/>
           </svg>
-          <span>{{ refreshing ? '扫描中…' : '刷新索引' }}</span>
+          <span>{{ refreshing ? '扫描中…' : '刷新音频索引' }}</span>
         </button>
       </div>
     </div>
+
+    <HuashengMaterialUpdate v-if="activeTab !== 'voices'" />
 
     <!-- Tabs -->
     <div class="tabs">
@@ -23,15 +24,18 @@
         :key="tab.key"
         class="tab"
         :class="{ active: activeTab === tab.key }"
+        :aria-pressed="activeTab === tab.key"
         @click="activeTab = tab.key"
       >
         {{ tab.label }}
-        <span class="tab-count">{{ tabCounts[tab.key] }}</span>
+        <span v-if="tabCounts[tab.key] !== null" class="tab-count">{{ tabCounts[tab.key] }}</span>
       </button>
     </div>
 
+    <VoiceLibrary v-if="activeTab === 'voices'" @count="voiceCount = $event" />
+
     <!-- Filters -->
-    <div class="filters">
+    <div v-if="activeTab !== 'voices'" class="filters">
       <input v-model="query" class="input search-input" placeholder="搜索关键词、文件名、情绪…" />
       <select v-if="activeTab === 'music'" v-model="filterEmotion" class="input">
         <option value="">全部情绪</option>
@@ -50,7 +54,7 @@
     </div>
 
     <!-- Loading -->
-    <div v-if="loading" class="loading-state">
+    <div v-if="activeTab !== 'voices' && loading" class="loading-state">
       <div class="loading-grid">
         <div v-for="i in 4" :key="i" class="skeleton-card card"></div>
       </div>
@@ -93,7 +97,7 @@
     </div>
 
     <!-- SFX List -->
-    <div v-else class="asset-list">
+    <div v-else-if="activeTab === 'sfx'" class="asset-list">
       <div v-for="item in filteredSfx" :key="item.path" class="card asset-row">
         <div class="row-main">
           <span class="row-pack">{{ item.pack }}</span>
@@ -124,12 +128,21 @@
 import { toast } from 'vue-sonner'
 import { Trash2 } from 'lucide-vue-next'
 import { libraryAPI } from '~/composables/useApi'
+import HuashengMaterialUpdate from '~/components/HuashengMaterialUpdate.vue'
+import VoiceLibrary from '~/components/VoiceLibrary.vue'
 
 const tabs = [
   { key: 'music', label: '背景音乐' },
   { key: 'sfx', label: '音效' },
+  { key: 'voices', label: '音色' },
 ]
-const activeTab = ref('music')
+const route = useRoute()
+const router = useRouter()
+const activeTab = computed({
+  get: () => tabs.some(tab => tab.key === route.query.tab) ? route.query.tab : 'music',
+  set: value => router.replace({ query: { ...route.query, tab: value } }),
+})
+const voiceCount = ref(null)
 const loading = ref(false)
 const refreshing = ref(false)
 const query = ref('')
@@ -152,6 +165,7 @@ const packOptions = computed(() => {
 const tabCounts = computed(() => ({
   music: musicItems.value.length,
   sfx: sfxItems.value.length,
+  voices: voiceCount.value,
 }))
 
 function normalize(s) {
@@ -288,7 +302,7 @@ onMounted(load)
   font-family: var(--font-display);
   font-size: 26px;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   color: var(--text-0);
 }
 .page-desc { font-size: 13px; color: var(--text-3); font-weight: 400; }
@@ -455,4 +469,10 @@ onMounted(load)
   border: none;
 }
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@media (max-width: 640px) {
+  .page { padding: 24px 16px 32px; }
+  .page-head { gap: 12px; flex-wrap: wrap; align-items: center; }
+  .search-input { min-width: 0; width: 100%; }
+  .asset-grid, .loading-grid { grid-template-columns: minmax(0, 1fr); }
+}
 </style>

@@ -36,8 +36,12 @@ import { ensureNarrativePlanFromStoryboards, getNarrativeHierarchyForEpisode, im
 import { listProjectRenderArtifacts } from '../services/render-artifacts.js'
 import { createTask } from '../services/tasks/store.js'
 import { DEFAULT_NARRATION_SPEED } from '../services/narration-defaults.js'
+import stylePilotsRoute from './remotion-style-pilots.js'
+import { createHistoryFactoryRoute } from './history-factory.js'
 
 const app = new Hono()
+app.route('/style-pilots', stylePilotsRoute)
+app.route('/', createHistoryFactoryRoute())
 
 function numberOrUndefined(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined

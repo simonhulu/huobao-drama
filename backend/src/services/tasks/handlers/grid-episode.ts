@@ -17,8 +17,10 @@ import { generateEpisodeVideos } from '../../grok-video.js'
 import { generateOpeningVideo } from '../../opening-storyboard.js'
 import { getNarrativePlanStatus } from '../../narrative-hierarchy.js'
 import { db, schema } from '../../../db/index.js'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import type { TaskContext, TaskHandler } from '../types.js'
+import { assertMediaDiskSpace } from '../../storage-space.js'
+import { restoreTaskArchivedMedia } from '../../storage-archive.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '../../../../..')
@@ -92,6 +94,7 @@ const REMOTION_HARDWARE_ACCELERATION = process.platform === 'darwin' ? 'required
 
 async function runRemotionRender(propsPath: string, outputPath: string, ctx: TaskContext<any>): Promise<void> {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+  await assertMediaDiskSpace(path.dirname(outputPath), 512 * 1024 ** 2)
   const args = [
     'render',
     `--browser-executable=${CHROME_EXECUTABLE}`,
@@ -256,6 +259,12 @@ export function createGridEpisodeRenderHandler(): TaskHandler<GridEpisodeRenderP
     maxAttempts: 1,
     async run(ctx: TaskContext<GridEpisodeRenderPayload>) {
       const episodeId = resolveEpisodeId(ctx.payload)
+      ctx.signal.throwIfAborted()
+      await restoreTaskArchivedMedia('episode', String(episodeId), repoRoot)
+      const projects = db.select({ id: schema.remotionProjects.id }).from(schema.remotionProjects)
+        .where(and(eq(schema.remotionProjects.sourceEpisodeId, episodeId), isNull(schema.remotionProjects.deletedAt))).all()
+      for (const project of projects) await restoreTaskArchivedMedia('remotion', String(project.id), repoRoot)
+      ctx.signal.throwIfAborted()
       const onlyStoryboardIds = Array.isArray(ctx.payload.only_storyboard_ids)
         ? ctx.payload.only_storyboard_ids.map(Number).filter((n) => Number.isFinite(n) && n > 0)
         : undefined

@@ -451,6 +451,7 @@ export function taskTitle(task: CreationTask | undefined | null) {
     'compose.episode': '批量合成',
     'merge.episode': '全集拼接',
     'remotion.narrative_storyboard.monitor': '全片故事版画格',
+    'huasheng.materials.update': '更新素材库',
   }
   return typeLabels[type] || type || '任务'
 }

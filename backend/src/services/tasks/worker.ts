@@ -22,6 +22,7 @@ import {
   removeWorkerHeartbeat,
 } from './heartbeat.js'
 import type { CreationTask, TaskContext, TransitionTaskInput } from './types.js'
+import { NonRetryableTaskError } from './types.js'
 
 const RECONCILE_INTERVAL_MS = 30_000
 const WORKER_RECOVERY_INTERVAL_MS = 60_000
@@ -34,6 +35,7 @@ export interface RunWorkerOnceOptions {
   signal?: AbortSignal
   nowMs?: number
   types?: string[]
+  taskIds?: number[]
 }
 
 /**
@@ -123,6 +125,7 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
     leaseMs,
     nowMs: options.nowMs,
     types: handlers,
+    taskIds: options.taskIds,
   })
   if (!task) return false
   const leaseToken = task.leaseToken
@@ -150,11 +153,22 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
     return false
   }
 
-  const maxAttempts = Math.max(task.maxAttempts, handler.maxAttempts ?? 1)
+  const singleImageSubmission = task.type === 'image.generate' && task.payload?.single_image_submission === true
+  const maxAttempts = singleImageSubmission ? 1 : Math.max(task.maxAttempts, handler.maxAttempts ?? 1)
 
   if (task.cancelRequested) {
     transitionTaskWithLease(task.id, options.workerId, leaseToken, 'canceled', withImageSync(task, {
       progressMessage: 'Canceled before execution.',
+    }))
+    return true
+  }
+
+  // Attempts are persisted before invoking the handler, so recovered leases
+  // cannot submit again when the previous provider result is unknown.
+  if (singleImageSubmission && task.attempts > 0) {
+    transitionTaskWithLease(task.id, options.workerId, leaseToken, 'failed', withImageSync(task, {
+      errorCode: 'image_submission_already_attempted',
+      errorMessage: 'Single-submission image task was already attempted; inspect its existing provider submission before retrying.',
     }))
     return true
   }
@@ -258,13 +272,14 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
     const latest = getTask(task.id)
     const error = err instanceof Error ? err : new Error(String(err))
     const classification = classifyImageError(error)
+    const errorCode = error instanceof NonRetryableTaskError ? error.code : classification.code
 
     logTaskError('Worker', 'task-failed', {
       taskId: task.id,
       type: task.type,
       attempts: latest?.attempts ?? task.attempts,
       maxAttempts,
-      errorCode: classification.code,
+      errorCode,
       errorMessage: error.message,
     })
 
@@ -279,19 +294,19 @@ export async function runWorkerOnce(options: RunWorkerOnceOptions): Promise<bool
         progressMessage: 'Canceled during execution.',
       }))
     } else if (latest && latest.attempts < maxAttempts) {
-      if (classification.retryable) {
+      if (!(error instanceof NonRetryableTaskError) && classification.retryable) {
         const delayMs = computeRetryDelay(classification.code, latest.attempts)
         const scheduledAt = new Date(Date.now() + delayMs).toISOString()
         scheduleTaskRetryWithLease(task.id, options.workerId, leaseToken, error, classification.code, scheduledAt, createImageSyncCallback(task))
       } else {
         transitionTaskWithLease(task.id, options.workerId, leaseToken, 'failed', withImageSync(task, {
-          errorCode: classification.code,
+          errorCode,
           errorMessage: error.message,
         }))
       }
     } else {
       transitionTaskWithLease(task.id, options.workerId, leaseToken, 'failed', withImageSync(task, {
-        errorCode: classification.code,
+        errorCode,
         errorMessage: error.message,
       }))
     }

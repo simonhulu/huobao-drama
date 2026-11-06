@@ -1,0 +1,18 @@
+{
+  "title": "Natural Earth ne_50m_ocean — eastern-China extract",
+  "url": "https://naturalearth.s3.amazonaws.com/50m_physical/ne_50m_ocean.zip",
+  "license": "Public Domain",
+  "licenseUrl": "https://www.naturalearthdata.com/about/terms-of-use/",
+  "downloadedAt": "2026-10-28T05:01:08.281836+00:00",
+  "sourceSha256": "abf268ba229f5eaab5012d7bfba340b424a4d25ed1efa085815c4a17ee0fd77d",
+  "sha256": "36b7fbd03ceafe56bbff7d6966ad9912237660356bc1b1307a7a0331537eff5d",
+  "bounds": [
+    109,
+    30,
+    124,
+    42.5
+  ],
+  "processing": "SHP/DBF extraction; source geometry rounded to six decimal degrees; polygon clipping to regional extent; river records retain native geometry and are clipped at render preparation.",
+  "featureCount": 1,
+  "historyStatus": "modern geographic context, not reconstructed historical waterways or coastlines"
+}

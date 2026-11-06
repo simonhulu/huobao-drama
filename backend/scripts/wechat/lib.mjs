@@ -9,9 +9,12 @@
  * 页面状态（已传视频、已填字段）跨脚本进程保留，这正是"分阶段、不轮询"的根基。
  */
 import puppeteer from 'puppeteer-core'
+import sharp from 'sharp'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { VIDEO_TITLE_SYMBOL_RULE, hasSupportedVideoTitleSymbols } from '../../src/services/video-title-format.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 export const PROJECT_ROOT = path.resolve(__dirname, '../../..')
@@ -22,6 +25,173 @@ export const DEBUG_DIR = path.join(PROJECT_ROOT, 'data/wechat-channels-profile/d
 export const COVER_TARGETS = {
   '4:3': { width: 1200, height: 900 },
   '3:4': { width: 900, height: 1200 },
+}
+
+export function isHistoryManifest(manifest) {
+  return manifest?.source_type === 'history_script'
+}
+
+export function resolveManifestPath(file) {
+  if (path.isAbsolute(file) || fs.existsSync(file)) return path.resolve(file)
+  return path.resolve(PROJECT_ROOT, file)
+}
+
+async function sha256File(file) {
+  const hash = createHash('sha256')
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
+export function historyManifestFingerprint(manifest) {
+  return createHash('sha256').update(JSON.stringify([
+    manifest.publish_package_id, manifest.history_source_id, manifest.session,
+    manifest.title, manifest.description, manifest.video_sha256,
+    manifest.cover_3x4_sha256, manifest.cover_4x3_sha256,
+  ])).digest('hex')
+}
+
+export async function validateHistoryManifest(manifest) {
+  if (!isHistoryManifest(manifest) || manifest.platform !== 'wechat_channels') {
+    throw new Error('外部素材包必须为 history_script / wechat_channels manifest')
+  }
+  for (const field of ['publish_package_id', 'session']) {
+    if (typeof manifest[field] !== 'string' || !manifest[field].trim()) throw new Error(`缺少 ${field}`)
+  }
+  if (!Number.isSafeInteger(manifest.history_source_id) || manifest.history_source_id <= 0) {
+    throw new Error('缺少有效 history_source_id')
+  }
+  if (typeof manifest.title !== 'string' || !manifest.title.trim() || manifest.title.length > 16) {
+    throw new Error('已确认的视频号短标题必须为 1 至 16 字，不会自动截断')
+  }
+  if (!hasSupportedVideoTitleSymbols(manifest.title)) throw new Error(VIDEO_TITLE_SYMBOL_RULE)
+  if (typeof manifest.description !== 'string' || !manifest.description.trim()) {
+    throw new Error('已确认的视频号描述不能为空')
+  }
+  for (const field of ['video', 'cover_3x4', 'cover_4x3']) {
+    const file = manifest[`${field}_path`]
+    const expected = manifest[`${field}_sha256`]
+    if (typeof file !== 'string' || !path.isAbsolute(file)) throw new Error(`${field}_path 必须是绝对路径`)
+    if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/i.test(expected)) throw new Error(`缺少 ${field}_sha256`)
+    if (await sha256File(file) !== expected.toLowerCase()) throw new Error(`${field} 文件指纹不匹配，停止发布`)
+    if (field !== 'video') {
+      const target = COVER_TARGETS[field === 'cover_3x4' ? '3:4' : '4:3']
+      const metadata = await sharp(file).metadata()
+      if (!metadata.width || !metadata.height
+        || Math.abs(metadata.width / metadata.height - target.width / target.height) > 0.01) {
+        throw new Error(`${field} 封面比例不符合要求，请在素材包中重新排字，不会裁切已确认封面`)
+      }
+    }
+  }
+  return manifest
+}
+
+function historyStatePath(manifest, stateDir = path.join(PROJECT_ROOT, 'data/publish-state/wechat')) {
+  const key = createHash('sha256').update(manifest.publish_package_id).digest('hex')
+  return path.join(stateDir, `${key}.json`)
+}
+
+export function readHistoryPublishState(manifest, stateDir) {
+  const file = historyStatePath(manifest, stateDir)
+  if (!fs.existsSync(file)) return null
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'))
+  if (state.fingerprint !== historyManifestFingerprint(manifest)) {
+    throw new Error('该发布素材包已有其他内容的操作记录，请使用新的素材包标识')
+  }
+  return state
+}
+
+export function writeHistoryPublishState(manifest, update, stateDir) {
+  const file = historyStatePath(manifest, stateDir)
+  const previous = readHistoryPublishState(manifest, stateDir)
+  const state = {
+    ...previous,
+    ...update,
+    publish_package_id: manifest.publish_package_id,
+    fingerprint: historyManifestFingerprint(manifest),
+    updated_at: new Date().toISOString(),
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const temporary = `${file}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, JSON.stringify(state, null, 2))
+  fs.renameSync(temporary, file)
+  return state
+}
+
+export function assertHistoryCanStage(manifest, stateDir) {
+  const state = readHistoryPublishState(manifest, stateDir)
+  if (['saving', 'unknown', 'saved'].includes(state?.status)) {
+    throw new Error(state.status === 'saved' ? '该素材包已保存草稿，停止重复上传' : '上次保存结果未知，请先到草稿箱核对，停止自动重试')
+  }
+  return state
+}
+
+export function lockHistoryPublish(manifest, stateDir) {
+  const file = historyStatePath(manifest, stateDir)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const lock = `${file}.lock`
+  let descriptor
+  try {
+    descriptor = fs.openSync(lock, 'wx')
+  } catch (error) {
+    if (error.code === 'EEXIST') throw new Error('该素材包已有操作或未结束的操作记录，请核对草稿箱与发布页')
+    throw error
+  }
+  return () => {
+    fs.closeSync(descriptor)
+    fs.unlinkSync(lock)
+  }
+}
+
+export async function bindHistoryPage(page, manifest, { allowNew = false } = {}) {
+  const fingerprint = historyManifestFingerprint(manifest)
+  const bound = await page.evaluate(() => window.__historyPublishFingerprint || null)
+  if (bound && bound !== fingerprint) throw new Error('发布页已关联另一份素材包，请使用空白发布页')
+  if (!bound) {
+    if (!allowNew || await isVideoUploaded(page)) throw new Error('无法确认发布页视频归属，请使用空白发布页并先执行 video 或 all')
+    await page.evaluate((value) => { window.__historyPublishFingerprint = value }, fingerprint)
+    return { newlyBound: true }
+  }
+  return { newlyBound: false }
+}
+
+export async function assertHistoryPageReady(page, manifest) {
+  await bindHistoryPage(page, manifest)
+  if (!(await isVideoUploaded(page))) throw new Error('发布页视频尚未上传完成')
+  await injectCollector(page)
+  const metadata = await page.evaluate(() => {
+    const elements = window.__collectAll()
+    const title = elements.find((el) => el.tagName === 'INPUT' && (el.placeholder || '').includes('短标题'))
+    const description = elements.find((el) => el.tagName === 'DIV'
+      && String(el.className || '').includes('input-editor') && el.getAttribute('contenteditable') !== null)
+    return { title: title?.value, description: description?.innerText }
+  })
+  if (metadata.title !== manifest.title || metadata.description?.replace(/\r\n/g, '\n') !== manifest.description.replace(/\r\n/g, '\n')) {
+    throw new Error('发布页标题或描述与已确认素材包不同，停止保存')
+  }
+}
+
+/** Persist the attempt before clicking so a crash cannot silently create another draft. */
+export async function saveHistoryDraft(manifest, { assertReady, save, stateDir } = {}) {
+  const release = lockHistoryPublish(manifest, stateDir)
+  try {
+    const state = readHistoryPublishState(manifest, stateDir)
+    if (state?.status === 'saved') return { ok: true, saved: true, skipped: true, saved_at: state.saved_at }
+    if (['saving', 'unknown'].includes(state?.status)) throw new Error('上次保存结果未知，请先到草稿箱核对，停止自动重试')
+    if (state?.status !== 'staged') throw new Error('视频、双封面和文案尚未全部就绪，请先执行 operate')
+    await assertReady()
+    writeHistoryPublishState(manifest, { status: 'saving' }, stateDir)
+    try {
+      const saved = await save()
+      const savedAt = saved ? new Date().toISOString() : null
+      writeHistoryPublishState(manifest, { status: saved ? 'saved' : 'unknown', saved_at: savedAt }, stateDir)
+      return { ok: Boolean(saved), saved: Boolean(saved), outcome_unknown: !saved, saved_at: savedAt }
+    } catch (error) {
+      writeHistoryPublishState(manifest, { status: 'unknown', error: error.message }, stateDir)
+      throw error
+    }
+  } finally {
+    release()
+  }
 }
 
 export function sleep(ms) {
@@ -252,8 +422,12 @@ export async function uploadVideo(page, videoPath, { timeoutMs = 600_000 } = {})
 
 // --- 标题 / 描述 ----------------------------------------------------------
 
-export async function fillShortTitle(page, title) {
-  const text = smartTruncateChinese(title, 16)
+export async function fillShortTitle(page, title, { strict = false } = {}) {
+  if (strict && (typeof title !== 'string' || !title.trim() || title.length > 16)) {
+    throw new Error('短标题必须为 1 至 16 字，不会自动截断')
+  }
+  if (strict && !hasSupportedVideoTitleSymbols(title)) throw new Error(VIDEO_TITLE_SYMBOL_RULE)
+  const text = strict ? title : smartTruncateChinese(title, 16)
   await injectCollector(page)
   const ok = await page.evaluate((t) => {
     const els = window.__collectAll()
@@ -267,11 +441,20 @@ export async function fillShortTitle(page, title) {
     return true
   }, text)
   await sleep(500)
+  if (ok && strict) {
+    return page.evaluate((expected) => {
+      const input = window.__collectAll().find((el) => el.tagName === 'INPUT' && (el.placeholder || '').includes('短标题'))
+      return input?.value === expected
+    }, text)
+  }
   return ok
 }
 
-export async function fillDescription(page, description) {
-  const text = (description || '').slice(0, 200)
+export async function fillDescription(page, description, { strict = false } = {}) {
+  if (strict && (typeof description !== 'string' || !description.trim())) {
+    throw new Error('描述不能为空')
+  }
+  const text = strict ? description : (description || '').slice(0, 200)
   await injectCollector(page)
   // 1) 定位描述编辑器并聚焦、清空，把光标显式放到末尾。用真实键盘输入而非 innerText 赋值——
   //    直接赋值会绕过 Vue 数据绑定，视觉有字但框架 state 为空，保存后描述丢失。
@@ -304,14 +487,14 @@ export async function fillDescription(page, description) {
   await sleep(500)
   // 3) 校验框架真的收到了文字
   await injectCollector(page)
-  const filledLen = await page.evaluate(() => {
+  const filledText = await page.evaluate(() => {
     const els = window.__collectAll()
     const editor = els.find(
       (el) => el.tagName === 'DIV' && el.className && String(el.className).includes('input-editor') && el.getAttribute('contenteditable') !== null,
     )
-    return editor ? (editor.innerText || '').trim().length : 0
+    return editor ? (editor.innerText || '') : ''
   })
-  return filledLen > 0
+  return strict ? filledText.replace(/\r\n/g, '\n') === text.replace(/\r\n/g, '\n') : filledText.trim().length > 0
 }
 
 // --- 封面上传（两张卡片：3:4 个人主页 / 4:3 分享）-------------------------
@@ -612,7 +795,7 @@ export async function uploadCovers(page, cover3x4Path, cover4x3Path) {
 
 // --- 保存草稿 / 验证 ------------------------------------------------------
 
-export async function saveDraft(page, timeoutMs = 120_000) {
+export async function saveDraft(page, timeoutMs = 120_000, { requireEvidence = false } = {}) {
   for (let i = 0; i < 3; i++) {
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
     await sleep(1000)
@@ -647,16 +830,20 @@ export async function saveDraft(page, timeoutMs = 120_000) {
     // 弹窗可能延迟出现，循环里持续兜底处理
     await keepEditIfPrompted(page)
     await injectCollector(page)
-    const success = await page.evaluate((ts) => {
+    const success = await page.evaluate((ts, strict) => {
       const els = window.__collectAll()
+      if (strict) return els.some((el) => {
+        const rect = el.getBoundingClientRect()
+        return rect.width > 0 && rect.height > 0 && ts.includes((el.textContent || '').trim())
+      })
       const texts = els.map((el) => (el.textContent || '').trim())
       return texts.some((t) => ts.some((s) => t.includes(s)))
-    }, successTexts)
+    }, successTexts, requireEvidence)
     if (success) return true
     await sleep(2000)
   }
   // 点了但没看到 toast —— 交给 verify 阶段用草稿箱计数做权威判断
-  return true
+  return !requireEvidence
 }
 
 /** 读取草稿箱 tab 上的计数徽标文字，例如 "草稿箱 (2)"。需等 hydration。 */

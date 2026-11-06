@@ -1,0 +1,18 @@
+{
+  "title": "Natural Earth ne_10m_geography_regions_polys — eastern-China extract",
+  "url": "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_geography_regions_polys.zip",
+  "license": "Public Domain",
+  "licenseUrl": "https://www.naturalearthdata.com/about/terms-of-use/",
+  "downloadedAt": "2026-10-28T05:01:08.703202+00:00",
+  "sourceSha256": "cb7b9db200284ed1551f20eacc7f3333e9b5f311c19f7cb2670694529f688682",
+  "sha256": "a5e5302494c993d35b67a5bb8d21178e5eec4a49fc1e7b807e2c647f38cc8997",
+  "bounds": [
+    109,
+    30,
+    124,
+    42.5
+  ],
+  "processing": "SHP/DBF extraction; source geometry rounded to six decimal degrees; polygon clipping to regional extent; river records retain native geometry and are clipped at render preparation.",
+  "featureCount": 15,
+  "historyStatus": "modern geographic context, not reconstructed historical waterways or coastlines"
+}

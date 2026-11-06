@@ -1,5 +1,13 @@
 export type CreationTaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'stale'
 
+/** A validation failure that cannot be repaired by retrying the same payload. */
+export class NonRetryableTaskError extends Error {
+  constructor(message: string, readonly code = 'validation_failed') {
+    super(message)
+    this.name = 'NonRetryableTaskError'
+  }
+}
+
 export const TASK_CANCEL_REASON_MAX_LENGTH = 500
 export const TASK_CANCEL_ACTOR_MAX_LENGTH = 120
 export const TASK_EVENT_LIST_MAX_LIMIT = 500
@@ -49,6 +57,8 @@ export interface LeaseTaskInput {
   leaseMs: number
   nowMs?: number
   types?: string[]
+  /** Restrict claims to these task IDs; an empty list claims nothing. */
+  taskIds?: number[]
 }
 
 export interface TaskProgressInput {

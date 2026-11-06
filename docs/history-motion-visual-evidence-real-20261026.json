@@ -1,0 +1,58 @@
+{
+  "testedAt": "2026-10-26T12:24:02.886Z",
+  "results": [
+    {
+      "shotId": "shot-37",
+      "assetId": "7ebe0c1b-b1c9-4adf-8a45-cff85a95fac4",
+      "elapsedMs": 17592,
+      "status": "unavailable",
+      "decision": "uncertain",
+      "reason": "视觉抽检服务或抽帧不可用，未形成有效画面证据",
+      "assetSha256": "0d8bb1cb2b5d121931cb082c14eb900a177a5ca2e18e9d9bd98af9c05803fee3",
+      "method": "two-frame-model-review",
+      "limitations": "最多两帧自动抽检；不等于整段连续观看，不确认人物身份或历史实录，也不能排除未抽到的字幕与镜内切换"
+    },
+    {
+      "shotId": "shot-43",
+      "assetId": "610b9900-685a-4634-bc74-e17a6dc67bd4",
+      "elapsedMs": 11387,
+      "status": "sampled",
+      "decision": "uncertain",
+      "reason": "画面表现室内集会及展示纸张，可能适合作为传递材料的情景素材；但无法从可见内容确认材料提供了敌情印证，背景红色区域与星形图案也不够清晰，不能据此判定其年代或政治标志。",
+      "assetSha256": "b1fcfc31cf86b7c2907fe7893e055c1c531d875613bb779758673b830f0a3dc1",
+      "observation": {
+        "summary": "昏暗室内，一名穿深色服装、戴帽的人站在长桌旁，手持浅色纸张；多名同样戴帽、穿深色服装的人围坐桌边面向他。桌上可见杯子等物品，侧上方有光束照入。",
+        "eraEvidence": "可见人物穿戴的帽子和服装，但不足以明确判断年代；背景左侧有红色区域及黄色星形图案，细节不清。",
+        "burnedCaptions": {
+          "present": false,
+          "text": ""
+        },
+        "frameDifference": "两帧构图和人物位置基本相同；站立者手中的纸张在第二帧中略有变化。",
+        "subjectMotion": "站立者似乎在展示或阅读纸张，桌边众人面向他；仅凭抽帧无法确定连续动作。"
+      },
+      "sampledAtSeconds": [
+        0.8153846,
+        3.2615384
+      ],
+      "sampleHashes": [
+        "d6f2e94d2c6b98d8861d511c2dd52ff2a06c8638cbb1ff1b39708bc26b99150e",
+        "04d2eaba5f63608fd64c2118c9270f548da22f391ad6e30188e5055aa8808702"
+      ],
+      "inspectedRange": {
+        "start": 0,
+        "end": 4.076923
+      },
+      "observedAt": "2026-10-26T12:24:02.885Z",
+      "cacheHit": false,
+      "method": "two-frame-model-review",
+      "limitations": "最多两帧自动抽检；不等于整段连续观看，不确认人物身份或历史实录，也不能排除未抽到的字幕与镜内切换"
+    }
+  ],
+  "notes": [
+    "asset 7ebe0c1b: unavailable after 17.592 seconds; no valid observation or mismatch verdict. The sanitized failure does not establish whether the cause was request failure, response parsing, or extraction.",
+    "asset 610b9900: sampled successfully in 11.387 seconds; model returned uncertain, not mismatch. It described an indoor meeting and paper display, but the red/yellow background was too unclear to date.",
+    "Both clips were manually identified as unsuitable by the parent review; this automated run did not confirm either as mismatch. Therefore it is not demonstrated to reliably detect anachronisms.",
+    "Inspection is limited to two samples, not continuous viewing, complete OCR, identity recognition, or authentication as historical footage.",
+    "Production checks now have a 90-second per-job cumulative budget, including extraction, first visual observation, and later text fitting. At exhaustion, cached evidence remains reusable while new model calls stop with an explicit unavailable result."
+  ]
+}

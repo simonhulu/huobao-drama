@@ -15,7 +15,9 @@ import {
   isQwen3TTSProvider,
   resolveQwen3TTSRequestTimeoutMs,
 } from './adapters/qwen3-tts.js'
-import { resolveQwen3Instruct } from './qwen3-voice.js'
+import { resolveQwen3Instruct, resolveNarrationVoiceForConfig } from './qwen3-voice.js'
+import { isQwenTTSProvider } from './adapters/qwen-tts.js'
+import { synthesizeQwenTTS } from './qwen-tts-generation.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, redactUrl } from '../utils/task-logger.js'
 import { sanitizeTtsInput } from '../utils/tts-text.js'
 
@@ -31,7 +33,9 @@ interface TTSParams {
   configId?: number | null
   subtitleEnable?: boolean
   subtitleType?: 'sentence' | 'word' | 'word_streaming'
+  synchronous?: boolean
 }
+interface TTSOptions { signal?: AbortSignal }
 
 export interface TTSResult {
   audioUrl: string
@@ -73,12 +77,21 @@ export class TTSGenerationLimiter {
     }
   }
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    await new Promise<void>((resolve) => {
-      this.pending.push(resolve)
+  async run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    await new Promise<void>((resolve, reject) => {
+      signal?.throwIfAborted()
+      const start = () => { signal?.removeEventListener('abort', abort); resolve() }
+      const abort = () => {
+        const index = this.pending.indexOf(start)
+        if (index >= 0) this.pending.splice(index, 1)
+        reject(signal!.reason)
+      }
+      signal?.addEventListener('abort', abort, { once: true })
+      this.pending.push(start)
       this.tryNext()
     })
     try {
+      signal?.throwIfAborted()
       return await fn()
     } finally {
       this.running--
@@ -100,15 +113,16 @@ const ttsGenerationLimiter = new TTSGenerationLimiter(
 /**
  * 生成 TTS 音频，返回本地文件路径
  */
-export async function generateTTS(params: TTSParams): Promise<string> {
-  const result = await generateTTSWithMetadata(params)
+export async function generateTTS(params: TTSParams, options: TTSOptions = {}): Promise<string> {
+  const result = await generateTTSWithMetadata(params, options)
   return result.audioUrl
 }
 
 /**
  * 生成 TTS 音频，同时返回音频路径和字幕时间码（若厂商支持）
  */
-export async function generateTTSWithMetadata(params: TTSParams): Promise<TTSResult> {
+export async function generateTTSWithMetadata(params: TTSParams, options: TTSOptions = {}): Promise<TTSResult> {
+  options.signal?.throwIfAborted()
   const config = getAudioConfigById(params.configId)
   const adapter = getTTSAdapter(config.provider)
 
@@ -117,7 +131,7 @@ export async function generateTTSWithMetadata(params: TTSParams): Promise<TTSRes
   if (!cleanedText) {
     throw new Error('TTS text is empty after normalization')
   }
-  params = { ...params, text: cleanedText }
+  params = { ...params, text: cleanedText, voice: resolveNarrationVoiceForConfig(config, params.voice) }
 
   // 本地 Qwen3-TTS：确保 server 已启动，并把 voice id 解析成 VoiceDesign instruct
   const qwen3 = isQwen3TTSProvider(config.provider)
@@ -142,47 +156,50 @@ export async function generateTTSWithMetadata(params: TTSParams): Promise<TTSRes
     params,
   })
 
-  const { url, method, headers, body } = adapter.buildGenerateRequest(config, params)
-  logTaskProgress('AudioTask', 'request', {
-    provider: config.provider,
-    voice: params.voice,
-    method,
-    url: redactUrl(url),
-    model: params.model || config.model,
-  })
-  logTaskPayload('AudioTask', 'request payload', {
-    method,
-    url,
-    headers,
-    body,
-  })
-
-  const requestInit = {
-    method,
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(qwen3 ? resolveQwen3TTSRequestTimeoutMs() : 120_000),
-  }
-  const resp = await ttsGenerationLimiter.run(() => (
-    qwen3 ? fetchQwen3TTS(url, requestInit) : fetch(url, requestInit)
-  ))
-
-  if (!resp.ok) {
-    const errText = await resp.text()
-    logTaskError('AudioTask', 'tts-generate', { provider: config.provider, voice: params.voice, status: resp.status, error: errText })
-    throw new Error(`TTS API error ${resp.status}: ${errText}`)
-  }
-
   let parsed: any
-  if (config.provider.toLowerCase() === 'siliconflow') {
-    const arrayBuffer = await resp.arrayBuffer()
-    parsed = await adapter.parseResponse({ audioBuffer: Buffer.from(arrayBuffer) }, config)
+  if (isQwenTTSProvider(config.provider)) {
+    parsed = await synthesizeQwenTTS(config, params, { signal: options.signal,
+      runRequest: request => ttsGenerationLimiter.run(request, options.signal) })
   } else {
-    const result = await resp.json()
-    parsed = await adapter.parseResponse(result, config)
+    const { url, method, headers, body } = adapter.buildGenerateRequest(config, params)
+    logTaskProgress('AudioTask', 'request', {
+      provider: config.provider,
+      voice: params.voice,
+      method,
+      url: redactUrl(url),
+      model: params.model || config.model,
+    })
+    logTaskPayload('AudioTask', 'request payload', {
+      method,
+      url,
+      headers,
+      body,
+    })
+
+    const resp = await ttsGenerationLimiter.run(() => {
+      const deadline = AbortSignal.timeout(qwen3 ? resolveQwen3TTSRequestTimeoutMs() : 120_000)
+      const requestInit = { method, headers, body: JSON.stringify(body),
+        signal: options.signal ? AbortSignal.any([options.signal, deadline]) : deadline }
+      return qwen3 ? fetchQwen3TTS(url, requestInit) : fetch(url, requestInit)
+    }, options.signal)
+
+    if (!resp.ok) {
+      const errText = await resp.text()
+      logTaskError('AudioTask', 'tts-generate', { provider: config.provider, voice: params.voice, status: resp.status, error: errText })
+      throw new Error(`TTS API error ${resp.status}: ${errText}`)
+    }
+
+    if (config.provider.toLowerCase() === 'siliconflow') {
+      const arrayBuffer = await resp.arrayBuffer()
+      parsed = await adapter.parseResponse({ audioBuffer: Buffer.from(arrayBuffer) }, config)
+    } else {
+      const result = await resp.json()
+      parsed = await adapter.parseResponse(result, config, { signal: options.signal })
+    }
   }
 
   // 将 hex 解码为二进制
+  options.signal?.throwIfAborted()
   const buffer = Buffer.from(parsed.audioHex, 'hex')
 
   // 保存到本地
@@ -195,10 +212,15 @@ export async function generateTTSWithMetadata(params: TTSParams): Promise<TTSRes
   // 对 TTS 音频做响度标准化，解决部分提供商（如 MiniMax）输出音量过小的问题
   const normalizedFilename = `${uuid()}.m4a`
   const normalizedPath = path.join(audioDir, normalizedFilename)
-  await normalizeAudio(rawPath, normalizedPath)
-
-  // 删除原始未标准化文件
-  try { fs.unlinkSync(rawPath) } catch {}
+  try {
+    await normalizeAudio(rawPath, normalizedPath, options.signal)
+    options.signal?.throwIfAborted()
+  } catch (error) {
+    try { fs.unlinkSync(normalizedPath) } catch {}
+    throw error
+  } finally {
+    try { fs.unlinkSync(rawPath) } catch {}
+  }
 
   const relativePath = `static/audio/${normalizedFilename}`
 
@@ -227,16 +249,20 @@ export async function generateTTSWithMetadata(params: TTSParams): Promise<TTSRes
 /**
  * 使用 FFmpeg 对音频做响度标准化（EBU R128），统一不同 TTS 提供商的音量
  */
-function normalizeAudio(inputPath: string, outputPath: string): Promise<void> {
+function normalizeAudio(inputPath: string, outputPath: string, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
+    signal?.throwIfAborted()
+    const command = ffmpeg(inputPath)
       .audioFilters('loudnorm=I=-16:TP=-1.5:LRA=11')
       .audioCodec('aac')
       .audioBitrate('128k')
       .output(outputPath)
-      .on('end', () => resolve())
-      .on('error', (err) => reject(err))
-      .run()
+      .on('start', () => { if (signal?.aborted) command.kill('SIGKILL') })
+      .on('end', () => { signal?.removeEventListener('abort', abort); resolve() })
+      .on('error', (err) => { signal?.removeEventListener('abort', abort); reject(signal?.aborted ? signal.reason : err) })
+    const abort = () => { command.kill('SIGKILL'); reject(signal!.reason) }
+    signal?.addEventListener('abort', abort, { once: true })
+    command.run()
   })
 }
 

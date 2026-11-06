@@ -119,7 +119,7 @@ skills/     — Agent 技能定义 (SKILL.md)
 
 | 软件 | 版本要求 | 说明 |
 |---|---|---|
-| **Node.js** | 20+ | 前后端运行环境 |
+| **Node.js** | 25.6.1 | 使用 nvm、Homebrew 或 nodejs.org 的 Node；不要使用 Conda `nodejs_wheel`，后端含 `better-sqlite3` 原生模块 |
 | **npm** | 9+ | 包管理工具 |
 | **FFmpeg** | 4.0+ | 视频处理（**必需**） |
 
@@ -194,6 +194,9 @@ cd huobao-drama
 
 # 安装后端依赖
 cd backend && npm install
+
+# 如果此前用过其他 Node 主版本，先按当前 Node 重建 SQLite 原生模块
+npm rebuild better-sqlite3
 
 # 安装前端依赖
 cd ../frontend && npm install

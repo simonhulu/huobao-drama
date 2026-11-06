@@ -9,7 +9,7 @@ export interface CoverDesignExtractionContext {
 
 type JsonObject = Record<string, unknown>
 
-const FIELD_ALIASES: Record<keyof CoverDesign, string[]> = {
+const FIELD_ALIASES: Record<Exclude<keyof CoverDesign, 'headline_lines'>, string[]> = {
   type: ['type', '类型', '方案类型'],
   recommended_aspect_ratio: ['recommended_aspect_ratio', 'recommendedAspectRatio', '建议画幅比', '画幅比'],
   description: ['description', '画面描述'],
@@ -22,6 +22,8 @@ const FIELD_ALIASES: Record<keyof CoverDesign, string[]> = {
   color_and_font: ['color_and_font', 'colorAndFont', '色调/字体', '色调与字体'],
   ai_prompt: ['ai_prompt', 'aiPrompt', 'image_prompt', 'imagePrompt', 'AI图片生成提示词', 'AI图片提示词'],
   rationale: ['rationale', '为什么有效', '设计理由'],
+  thumbnail_layout: ['thumbnail_layout', 'thumbnailLayout', '标题位置', '排版方向'],
+  highlight_text: ['highlight_text', 'highlightText', '重点词', '强调词'],
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -36,7 +38,7 @@ function clean(value: unknown): string {
     .trim()
 }
 
-function fieldValue(source: JsonObject, field: keyof CoverDesign): string {
+function fieldValue(source: JsonObject, field: keyof typeof FIELD_ALIASES): string {
   for (const key of FIELD_ALIASES[field]) {
     const value = clean(source[key])
     if (value) return value
@@ -44,8 +46,13 @@ function fieldValue(source: JsonObject, field: keyof CoverDesign): string {
   return ''
 }
 
+function thumbnailLayoutValue(source: JsonObject): CoverDesign['thumbnail_layout'] | undefined {
+  const value = fieldValue(source, 'thumbnail_layout').toLowerCase()
+  return value === 'text-left' || value === 'text-right' ? value : undefined
+}
+
 function hasDesignFields(value: JsonObject): boolean {
-  return Object.keys(FIELD_ALIASES).some(field => FIELD_ALIASES[field as keyof CoverDesign]
+  return Object.keys(FIELD_ALIASES).some(field => FIELD_ALIASES[field as keyof typeof FIELD_ALIASES]
     .some(key => key in value && clean(value[key])))
 }
 
@@ -110,6 +117,8 @@ function normalizeExtractedDesign(value: JsonObject, context: CoverDesignExtract
     color_and_font: fieldValue(value, 'color_and_font') || undefined,
     ai_prompt: fieldValue(value, 'ai_prompt') || undefined,
     rationale: fieldValue(value, 'rationale') || undefined,
+    thumbnail_layout: thumbnailLayoutValue(value),
+    highlight_text: fieldValue(value, 'highlight_text') || undefined,
   }
 
   if (!design.main_title && !design.ai_prompt && !design.description) return null
@@ -171,7 +180,7 @@ function parseJsonObjectCandidates(text: string): JsonObject[] {
   return objects
 }
 
-function markdownFieldValue(block: string, field: keyof CoverDesign): string {
+function markdownFieldValue(block: string, field: keyof typeof FIELD_ALIASES): string {
   const aliases = FIELD_ALIASES[field]
     .filter(alias => !alias.includes('_') && !alias.includes('Prompt'))
     .map(alias => alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))

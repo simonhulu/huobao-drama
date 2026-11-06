@@ -1,0 +1,4 @@
+interface:
+  display_name: "历史视频制作（兼容入口）"
+  short_description: "转入统一历史工厂，复用配音、本地素材、图片与地图并在 Remotion 交付"
+  default_prompt: "使用 $history-motion-video-factory 兼容入口，按 remotion-history-factory 统一流程制作这篇历史视频。"

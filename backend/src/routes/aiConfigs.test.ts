@@ -234,3 +234,67 @@ test('pcore GPT Image 2 refuses a synchronous image-mode setting', async () => {
   assert.equal(response.status, 400)
   assert.match(json.message, /requires async: true/)
 })
+
+test('Qwen TTS probes the selected workspace and account with a read-only voice listing', async t => {
+  const configId = Number(db.insert(schema.aiServiceConfigs).values({
+    serviceType: 'audio', provider: 'qwen-tts', name: 'Qwen probe', baseUrl: 'https://workspace.cn-beijing.maas.aliyuncs.com/',
+    apiKey: 'qwen-probe-secret', model: '["qwen-audio-3.1-tts-flash"]', createdAt: 'now', updatedAt: 'now',
+  }).run().lastInsertRowid)
+  let calls = 0
+  t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls++
+    assert.equal(String(url), 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/customization')
+    assert.equal(init?.method, 'POST')
+    assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer qwen-probe-secret')
+    assert.ok(init?.signal instanceof AbortSignal)
+    assert.deepEqual(JSON.parse(String(init?.body)), { model: 'voice-enrollment', input: { action: 'list_voice', page_size: 1, page_index: 0 } })
+    return Response.json({ output: { voice_list: [] } })
+  })
+  const response = await route.request('/test', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config_id: configId, api_key: 'must-not-use-body-key' }) })
+  assert.equal(response.status, 200)
+  const { data } = await response.json() as any
+  assert.equal(data.ok, true)
+  assert.equal(data.reachable, true)
+  assert.equal(calls, 1)
+})
+
+test('Qwen TTS probes honor the same environment key and base URL defaults as synthesis', async t => {
+  const previousKey = process.env.QWEN_API_KEY, previousBase = process.env.QWEN_TTS_BASE_URL
+  process.env.QWEN_API_KEY = 'qwen-env-test-secret'
+  process.env.QWEN_TTS_BASE_URL = 'https://env-workspace.cn-beijing.maas.aliyuncs.com/api/v1'
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.QWEN_API_KEY; else process.env.QWEN_API_KEY = previousKey
+    if (previousBase === undefined) delete process.env.QWEN_TTS_BASE_URL; else process.env.QWEN_TTS_BASE_URL = previousBase
+  })
+  t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(String(url), 'https://env-workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/customization')
+    assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer qwen-env-test-secret')
+    return Response.json({ output: { voice_list: [] } })
+  })
+  const response = await route.request('/test', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ service_type: 'audio', provider: 'qwen-tts', model: ['qwen-audio-3.1-tts-flash'] }) })
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.equal((await response.json() as any).data.ok, true)
+})
+
+test('Qwen TTS probes reject provider business errors and malformed responses without leaking credentials', async t => {
+  const request = () => route.request('/test', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ service_type: 'audio', provider: 'qwen-tts', base_url: 'https://qwen.test/api/v1',
+      api_key: 'qwen-probe-error-secret', model: ['qwen-audio-3.1-tts-flash'] }) })
+  for (const status of [200, 401]) {
+    const mocked = t.mock.method(globalThis, 'fetch', async () => Response.json({ code: 'InvalidApiKey',
+      message: 'invalid qwen-probe-error-secret' }, { status }))
+    const response = await request()
+    assert.equal(response.status, 200)
+    const text = await response.text()
+    assert.equal(text.includes('qwen-probe-error-secret'), false)
+    const { data } = JSON.parse(text)
+    assert.equal(data.ok, false)
+    assert.equal(data.reachable, true)
+    assert.match(data.message, /InvalidApiKey|invalid/)
+    mocked.mock.restore()
+  }
+  t.mock.method(globalThis, 'fetch', async () => new Response('<html>unrelated endpoint</html>'))
+  assert.equal((await (await request()).json() as any).data.ok, false)
+})

@@ -1,14 +1,27 @@
 import { aiFetch } from './ai-client.js'
 import { getTextConfig, getTextProviderBaseUrl } from './ai.js'
 import { joinProviderUrl } from './adapters/url.js'
+import { createCoverEditorialPlan, type CoverEditorialPlan } from './cover-editorial-plan.js'
+import type { HistoryTitleResearch } from './history-title-research.js'
+
+export interface HistoryPublishingVariant {
+  videoId: number
+  producer: 'huasheng' | 'motion' | 'manual'
+  otherPackages: Array<{ producer: string; title: string; mainTitle: string; imagePrompt: string }>
+}
 
 export interface CoverPromptEnhanceInput {
   roughPrompt: string
   episodeTitle?: string
+  sourceTitle?: string
   episodeContent?: string
   episodeSynopsis?: string
   dramaTitle?: string
   dramaStyle?: string
+  editorialReview?: boolean
+  publishingCopy?: boolean
+  titleResearch?: HistoryTitleResearch
+  publishingVariant?: HistoryPublishingVariant
 }
 
 export interface CoverPromptEnhanceResult {
@@ -19,6 +32,33 @@ export interface CoverPromptEnhanceResult {
   kicker: string
   accent_color: string
   rationale: string
+  video_title?: string
+  baijiahao_title?: string
+  video_description?: string
+  editorial_plan?: CoverEditorialPlan
+  thumbnail_layout?: 'text-left' | 'text-right'
+  highlight_text?: string
+}
+
+export type CoverJsonRequest = (messages: { role: 'system' | 'user'; content: string }[], options?: { maxTokens?: number; temperature?: number }) => Promise<unknown>
+
+async function requestCoverJson(messages: Parameters<CoverJsonRequest>[0], options?: Parameters<CoverJsonRequest>[1]): Promise<unknown> {
+  const textConfig = getTextConfig()
+  if (!textConfig) throw new Error('No active text AI config')
+  const url = joinProviderUrl(getTextProviderBaseUrl(textConfig), '', '/chat/completions')
+  const response = await aiFetch(textConfig.provider || 'text', url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${textConfig.apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: textConfig.model, messages, temperature: options?.temperature ?? 0.5, max_tokens: options?.maxTokens ?? 2000,
+      response_format: { type: 'json_object' },
+    }),
+  }, { timeoutMs: 120_000, maxAttempts: 2, lane: 'text-agent' })
+  const data = await response.json()
+  const content = data?.choices?.[0]?.message?.content
+  if (!content) throw new Error('Cover prompt enhancement returned empty content')
+  if (data?.choices?.[0]?.finish_reason === 'length') throw new Error('封面方案输出不完整，请重试；未覆盖原方案')
+  try { return JSON.parse(content) } catch { throw new Error('Cover prompt enhancement returned invalid JSON') }
 }
 
 function buildSystemPrompt(): string {
@@ -65,42 +105,20 @@ function buildUserPrompt(input: CoverPromptEnhanceInput): string {
   return parts.join('\n')
 }
 
-export async function enhanceCoverPrompt(input: CoverPromptEnhanceInput): Promise<CoverPromptEnhanceResult> {
-  const textConfig = getTextConfig()
-  if (!textConfig) throw new Error('No active text AI config')
+export async function reviewCoverPrompt(input: CoverPromptEnhanceInput, design: CoverPromptEnhanceResult,
+  request: CoverJsonRequest = requestCoverJson) {
+  return createCoverEditorialPlan(input, request, design)
+}
 
-  const providerBase = getTextProviderBaseUrl(textConfig)
-  const url = joinProviderUrl(providerBase, '', '/chat/completions')
-
-  const response = await aiFetch(textConfig.provider || 'text', url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${textConfig.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: textConfig.model,
-      messages: [
-        { role: 'system', content: buildSystemPrompt() },
-        { role: 'user', content: buildUserPrompt(input) },
-      ],
-      temperature: 0.5,
-      max_tokens: 2000,
-      response_format: { type: 'json_object' },
-    }),
-  }, { timeoutMs: 120_000, maxAttempts: 2, lane: 'text-agent' })
-
-  const data = await response.json()
-  const content = data?.choices?.[0]?.message?.content
-  if (!content) throw new Error('Cover prompt enhancement returned empty content')
-
-  let parsed: any
-  try {
-    parsed = JSON.parse(content)
-  } catch {
-    throw new Error('Cover prompt enhancement returned invalid JSON')
-  }
-
+export async function enhanceCoverPrompt(input: CoverPromptEnhanceInput, request: CoverJsonRequest = requestCoverJson,
+  titleRewriteRequest?: CoverJsonRequest): Promise<CoverPromptEnhanceResult> {
+  if (input.editorialReview || input.publishingCopy) return createCoverEditorialPlan(input, request, undefined, titleRewriteRequest)
+  // Other episode workflows retain their existing single-request format.
+  const parsed: any = await request([
+    { role: 'system', content: buildSystemPrompt() },
+    { role: 'user', content: buildUserPrompt(input) },
+  ])
+  if (!parsed || typeof parsed !== 'object') throw new Error('封面方案格式不正确')
   return {
     enhanced_prompt: String(parsed.enhanced_prompt || parsed.enhancedPrompt || '').trim(),
     image_prompt: String(parsed.image_prompt || parsed.imagePrompt || '').trim(),

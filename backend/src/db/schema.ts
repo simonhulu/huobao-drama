@@ -27,6 +27,53 @@ export const mediaAccounts = sqliteTable('media_accounts', {
   deletedAt: text('deleted_at'),
 })
 
+export const stylePilots = sqliteTable('style_pilots', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  desc: text('desc'),
+  mood: text('mood'),
+  lens: text('lens'),
+  profile: text('profile'),
+  aspectRatio: text('aspect_ratio'),
+  prompt: text('prompt'),
+  url: text('url'),
+  mediaType: text('media_type').notNull().default('image'),
+  sortOrder: integer('sort_order').notNull().default(0),
+  isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
+export const historyScriptSources = sqliteTable('history_script_sources', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  platform: text('platform').notNull().default('douyin'),
+  sourceVideoId: text('source_video_id').notNull(),
+  sourceUrl: text('source_url').notNull(),
+  title: text('title').notNull(),
+  authorName: text('author_name'),
+  category: text('category', { enum: [
+    'regional_history',
+    'unofficial_history',
+    'historical_anecdote',
+    'historical_commentary',
+    'history_trivia',
+    'unclassified',
+  ] }).notNull(),
+  status: text('status').notNull().default('selected'),
+  metricsJson: text('metrics_json').notNull().default('{}'),
+  selectionJson: text('selection_json').notNull().default('{}'),
+  mediaJson: text('media_json').notNull().default('{}'),
+  rawTranscript: text('raw_transcript'),
+  correctedTranscript: text('corrected_transcript'),
+  rewrittenScript: text('rewritten_script'),
+  asrJson: text('asr_json'),
+  reviewJson: text('review_json'),
+  lastError: text('last_error'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  deletedAt: text('deleted_at'),
+}, (table) => [unique('history_script_sources_platform_video_unique').on(table.platform, table.sourceVideoId)])
+
 export const dramas = sqliteTable('dramas', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   mediaAccountId: integer('media_account_id'),

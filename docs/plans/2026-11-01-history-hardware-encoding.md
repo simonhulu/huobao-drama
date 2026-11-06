@@ -1,0 +1,18 @@
+# History Hardware Encoding
+
+The user requests hardware encoding immediately, without CPU-versus-hardware comparisons. Further clarification distinguishes browser frame rendering from video encoding: whole-render timings do not measure encoding alone. Keep the existing visual composition for this change; routing ordinary media through FFmpeg requires a separate visual-equivalence implementation, not removal of subtitles or overlays.
+
+1. Use the installed Remotion renderer's required H.264 VideoToolbox mode with a target bitrate. Remove CRF, x264 preset and software VBV options that prevent hardware selection. Retain existing upload budgets, dimensions, frame count, limited-range BT.709 and AAC validation. Leave unrelated video pipelines' encoding defaults unchanged.
+2. Record and verify the actual video stream encoder; fail if a new render used software or lacks hardware evidence. Existing partial files can still finalize with their original encoder reported accurately. Never silently fall back to CPU encoding.
+3. Add focused regressions for legal hardware options, old plan compatibility, hardware failure without retry, encoder evidence, size limits and render progress timing. Track asset freezing, bundling, frame rendering, encoding and finalization separately, explicitly recording overlap rather than summing overlapping durations.
+4. Run one isolated 1-2 second 1080p hardware render, verifying actual encoder, decoded frames, AAC, timing, color metadata and file budget. Do not run CPU comparisons, large benchmarks, business production or uploads. Remove only temporary test artifacts.
+5. New render child processes load the updated script directly; do not restart the backend or interrupt active renders. Verify that the running production job continues and that subsequent render configuration requires hardware.
+
+## Results
+
+- Implemented required VideoToolbox settings and actual stream encoder validation in `scripts/history-motion/encoding.mjs` and `render.mjs`. Existing partial finalization retains accurate legacy encoder reporting. Failed renders retain their checkpoint and cannot retry with software encoding.
+- Progress snapshots now include rendered/encoded frame counters and the stitch stage. The report records asset freezing, bundling, composition selection, rendering and finalization. Frame completion is observed independently; the SDK's final stitch duration is labelled encoding-and-muxing, not isolated video encoding. These timings must not be summed when stages overlap.
+- `node --test scripts/history-motion/encoding.test.mjs scripts/history-motion/render.test.mjs`: 31 passed, including the regression that failed with the previous `hardwareAcceleration: 'disable'` option.
+- Isolated 1-second 1920x1080 smoke passed with `h264_videotoolbox`, H.264/yuv420p/BT.709 limited range, 30 frames, AAC, decoded picture content and audible 330 Hz test audio. The file was 164,091 bytes, within budget. Elapsed time was 6,222 ms including startup and validation, with 2,943 ms inside renderMedia and 576 ms in the final encoding/muxing stage. This tiny smoke is not a production speed benchmark or CPU comparison. Temporary artifacts were removed by the test.
+- Backend PID 43750 and preexisting render PID 81858 remained running; the existing render progressed to 85%. No service restart, business task creation, upload or production interruption was performed.
+- A final review corrected resumed renders' `frameCapture` metadata to null because the original capture method is unknown. The focused finalization regression passed again after this metadata correction.

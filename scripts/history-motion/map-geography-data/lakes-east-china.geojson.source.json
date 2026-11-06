@@ -1,0 +1,18 @@
+{
+  "title": "Natural Earth ne_10m_lakes — eastern-China extract",
+  "url": "https://naturalearth.s3.amazonaws.com/10m_physical/ne_10m_lakes.zip",
+  "license": "Public Domain",
+  "licenseUrl": "https://www.naturalearthdata.com/about/terms-of-use/",
+  "downloadedAt": "2026-10-28T05:01:09.119297+00:00",
+  "sourceSha256": "0803a06f9c3cb4671d89b68c48b142aad9366ba40f665245e12a913fbc61722a",
+  "sha256": "206f83cb70e77d68e7d9ad014799a962428b88eec3a01e8bdc3e79b534a1b06d",
+  "bounds": [
+    109,
+    30,
+    124,
+    42.5
+  ],
+  "processing": "SHP/DBF extraction; source geometry rounded to six decimal degrees; polygon clipping to regional extent; river records retain native geometry and are clipped at render preparation.",
+  "featureCount": 43,
+  "historyStatus": "modern geographic context, not reconstructed historical waterways or coastlines"
+}

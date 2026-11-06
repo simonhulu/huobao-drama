@@ -22,6 +22,7 @@
 
       <div class="studio-topbar-side">
         <div class="studio-actions">
+          <NuxtLink v-if="historyPublicationUrl && !mergeUrl" class="btn" :to="historyPublicationUrl"><Send :size="13" />查看发表任务</NuxtLink>
           <button class="btn" title="进入 v8 生产中心" @click="navigateTo(`/remotion/episode/${epId}`)">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
             生产中心
@@ -1858,7 +1859,7 @@
         <div v-else class="export-split">
           <div class="export-main">
             <template v-if="mergeUrl">
-              <div v-memo="[mergeUrl, mergeStatus]">
+              <div v-memo="[mergeUrl, mergeStatus, historyPublicationUrl]">
                 <video :src="mergeVideoSrc" controls class="export-video" preload="metadata" playsinline />
                 <div class="export-bar">
                   <span class="tag tag-success">拼接完成</span>
@@ -1872,6 +1873,8 @@
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                     下载视频
                   </a>
+                  <NuxtLink v-if="historyPublicationUrl" class="btn btn-primary" :to="historyPublicationUrl"><Send :size="13" />查看发表任务</NuxtLink>
+                  <template v-else>
                   <button
                     v-if="!isAwaitingConfirmWeChat"
                     class="btn btn-primary"
@@ -1910,8 +1913,9 @@
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
                     确认保存抖音草稿
                   </button>
+                  </template>
                 </div>
-                <div v-if="draftUrlWeChat || publishErrorWeChat || isAwaitingConfirmWeChat || draftUrlDouyin || publishErrorDouyin || isAwaitingConfirmDouyin" class="publish-status-bar" style="margin-top:8px">
+                <div v-if="!historyPublicationUrl && (draftUrlWeChat || publishErrorWeChat || isAwaitingConfirmWeChat || draftUrlDouyin || publishErrorDouyin || isAwaitingConfirmDouyin)" class="publish-status-bar" style="margin-top:8px">
                   <template v-if="draftUrlWeChat || publishErrorWeChat || isAwaitingConfirmWeChat">
                     <a v-if="draftUrlWeChat" :href="draftUrlWeChat" target="_blank" class="publish-draft-link">打开视频号草稿</a>
                     <span v-if="isAwaitingConfirmWeChat" class="publish-error-text">已自动填好视频号信息，请在浏览器中检查，确认后点击上方按钮保存草稿。</span>
@@ -2149,8 +2153,9 @@
 <script setup>
 import { toast } from 'vue-sonner'
 import {
-  Users, MapPin, Video, ImageIcon, Image, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download, Loader2, Settings2, X, Sparkles, Copy, Play, Square,
+  Users, MapPin, Video, ImageIcon, Image, Layers, Mic2, FileText, FolderKanban, Clapperboard, Download, Loader2, Settings2, X, Sparkles, Copy, Play, Square, Send,
 } from 'lucide-vue-next'
+import { historyEpisodePublicationUrl } from '../../../../../../backend/src/services/episode-publication-entry.js'
 import { dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, imageAPI, videoAPI, composeAPI, ttsAPI, mergeAPI, gridAPI, gridEpisodeAPI, aiConfigAPI, voicesAPI, libraryAPI, taskAPI, introTemplateAPI } from '~/composables/useApi'
 import { useAgent } from '~/composables/useAgent'
 import { useTasks } from '~/composables/useTasks'
@@ -2195,6 +2200,7 @@ const settingsDrawerOpen = ref(false)
 const rawContent = computed(() => episode.value?.content || '')
 const scriptContent = computed(() => episode.value?.script_content || episode.value?.scriptContent || '')
 const epId = computed(() => episode.value?.id || 0)
+const historyPublicationUrl = computed(() => historyEpisodePublicationUrl(episode.value?.metadata, drama.value?.metadata))
 const renderMode = computed(() => episode.value?.render_mode || 'image_story')
 const isImageStory = computed(() => renderMode.value === 'image_story')
 const autoMode = computed(() => episode.value?.auto_mode === true)
@@ -2262,7 +2268,10 @@ const isPublishingWeChat = computed(() => {
   return isTaskTypeRunning('publish.wechat_channels')
 })
 const isAwaitingConfirmWeChat = computed(() => wechatPublishRecord.value?.status === 'awaiting_confirm')
-const publishErrorWeChat = computed(() => wechatPublishRecord.value?.error_message || taskError('publish.wechat_channels')?.message || '')
+const publishErrorWeChat = computed(() => {
+  const task = latestMediaTask('publish.wechat_channels', () => true)
+  return wechatPublishRecord.value?.error_message || (isFailedTask(task) ? taskFailureMessage(task) : '')
+})
 const draftUrlWeChat = computed(() => wechatPublishRecord.value?.draft_url || '')
 const awaitingConfirmTaskIdWeChat = computed(() => wechatPublishRecord.value?.task_id || null)
 const isPublishingDouyin = computed(() => {
@@ -2270,7 +2279,10 @@ const isPublishingDouyin = computed(() => {
   return isTaskTypeRunning('publish.douyin')
 })
 const isAwaitingConfirmDouyin = computed(() => douyinPublishRecord.value?.status === 'awaiting_confirm')
-const publishErrorDouyin = computed(() => douyinPublishRecord.value?.error_message || taskError('publish.douyin')?.message || '')
+const publishErrorDouyin = computed(() => {
+  const task = latestMediaTask('publish.douyin', () => true)
+  return douyinPublishRecord.value?.error_message || (isFailedTask(task) ? taskFailureMessage(task) : '')
+})
 const draftUrlDouyin = computed(() => douyinPublishRecord.value?.draft_url || '')
 const awaitingConfirmTaskIdDouyin = computed(() => douyinPublishRecord.value?.task_id || null)
 const isPublishing = computed(() => isPublishingWeChat.value || isPublishingDouyin.value)
@@ -4056,6 +4068,11 @@ async function saveHooks() {
 }
 
 async function loadPublishRecords() {
+  if (historyPublicationUrl.value) {
+    publishRecords.value = []
+    stopPublishRecordsPolling()
+    return
+  }
   if (!epId.value) return
   try {
     publishRecords.value = await episodeAPI.publishRecords(epId.value)
@@ -4071,6 +4088,7 @@ function stopPublishRecordsPolling() {
 }
 
 function startPublishRecordsPolling() {
+  if (historyPublicationUrl.value) return stopPublishRecordsPolling()
   if (publishRecordsPollTimer.value) return
   publishRecordsPollTimer.value = setInterval(async () => {
     await loadPublishRecords()
@@ -4081,6 +4099,7 @@ function startPublishRecordsPolling() {
 }
 
 async function doPublishWeChatChannels() {
+  if (historyPublicationUrl.value) return navigateTo(historyPublicationUrl.value)
   if (!mergeUrl.value) {
     toast.error('请先完成视频拼接')
     return
@@ -4096,6 +4115,7 @@ async function doPublishWeChatChannels() {
 }
 
 async function doConfirmPublishWeChatChannels() {
+  if (historyPublicationUrl.value) return navigateTo(historyPublicationUrl.value)
   const taskId = awaitingConfirmTaskIdWeChat.value
   if (!taskId) {
     toast.error('找不到等待确认的任务')
@@ -4111,6 +4131,7 @@ async function doConfirmPublishWeChatChannels() {
 }
 
 async function doPublishDouyin() {
+  if (historyPublicationUrl.value) return navigateTo(historyPublicationUrl.value)
   if (!mergeUrl.value) {
     toast.error('请先完成视频拼接')
     return
@@ -4126,6 +4147,7 @@ async function doPublishDouyin() {
 }
 
 async function doConfirmPublishDouyin() {
+  if (historyPublicationUrl.value) return navigateTo(historyPublicationUrl.value)
   const taskId = awaitingConfirmTaskIdDouyin.value
   if (!taskId) {
     toast.error('找不到等待确认的任务')
@@ -7315,14 +7337,20 @@ onMounted(() => {
 
   .studio-topbar-main {
     align-items: center;
+    flex-basis: 100%;
   }
 
   .studio-topbar {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+  }
+
+  .studio-topbar-side {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .studio-actions {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
   }
 
   .studio-topbar .btn {

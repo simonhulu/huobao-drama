@@ -2,6 +2,12 @@ node_modules/
 dist/
 *.js
 *.d.ts
+!src/services/narrative-hierarchy.js
+!src/services/narrative-hierarchy.d.ts
+!src/services/composition/grid-audio-mix.js
+!src/services/composition/grid-audio-mix.d.ts
+!src/services/video-title-format.js
+!src/services/video-title-format.d.ts
 *.map
 .venv*/
 .tmp/

@@ -15,6 +15,8 @@ interface ImageGeneratePayload {
   imageGenerationId?: number
   config_id?: number
   configId?: number
+  allow_synchronous_image?: boolean
+  single_image_submission?: boolean
 }
 
 interface ImageGenerateDeps {
@@ -26,7 +28,9 @@ function readPayload(payload: ImageGeneratePayload) {
   const generationId = Number(payload.image_generation_id ?? payload.imageGenerationId)
   const configId = payload.config_id ?? payload.configId
   if (!generationId) throw new Error('image_generation_id is required')
-  return { generationId, configId: configId == null ? undefined : Number(configId) }
+  return { generationId, configId: configId == null ? undefined : Number(configId),
+    allowSynchronousImage: payload.allow_synchronous_image === true,
+    singleSubmission: payload.single_image_submission === true }
 }
 
 export function createImageGenerateHandler(deps: ImageGenerateDeps = {}): TaskHandler<ImageGeneratePayload> {
@@ -36,7 +40,10 @@ export function createImageGenerateHandler(deps: ImageGenerateDeps = {}): TaskHa
     resumable: true,
     maxAttempts: 3,
     async run(ctx: TaskContext<ImageGeneratePayload>) {
-      const { generationId, configId } = readPayload(ctx.payload)
+      const { generationId, configId, allowSynchronousImage, singleSubmission } = readPayload(ctx.payload)
+      if (singleSubmission && ctx.attempts > 1) {
+        throw new Error('Single-submission image task was already attempted; inspect its existing provider submission')
+      }
       ctx.progress('Starting image generation', 0, 3)
       ctx.event('image.generation', { generationId })
       let result
@@ -49,14 +56,14 @@ export function createImageGenerateHandler(deps: ImageGenerateDeps = {}): TaskHa
       }
 
       try {
-        result = await execute(generationId, { configId, taskContext: ctx })
+        result = await execute(generationId, { configId, taskContext: ctx, allowSynchronousImage, singleSubmission })
       } catch (err: any) {
         const error = err instanceof Error ? err : new Error(String(err))
         const classification = classifyImageError(error)
         const alreadyRepaired = listTaskEvents(ctx.taskId)
           .some(event => event.eventType === 'image.prompt_repaired')
 
-        if (classification.code !== 'content_policy_violation' || alreadyRepaired) {
+        if (singleSubmission || classification.code !== 'content_policy_violation' || alreadyRepaired) {
           syncPanelStatus()
           throw error
         }
@@ -79,7 +86,7 @@ export function createImageGenerateHandler(deps: ImageGenerateDeps = {}): TaskHa
         }
 
         ctx.progress('Retrying image generation with repaired prompt', 2, 3)
-        result = await execute(generationId, { configId, taskContext: ctx })
+        result = await execute(generationId, { configId, taskContext: ctx, allowSynchronousImage, singleSubmission })
       }
       ctx.progress('Image generation completed', 3, 3)
       ctx.event('image.completed', result)

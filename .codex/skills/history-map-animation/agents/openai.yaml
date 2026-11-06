@@ -1,0 +1,4 @@
+interface:
+  display_name: "历史地图动画"
+  short_description: "Create animated history maps from verified geography"
+  default_prompt: "使用 $history-map-animation 为这段历史旁白制作有真实地形、城市和势力变化的地图动画。"

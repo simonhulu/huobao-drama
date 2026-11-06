@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url'
 import { execFileSync } from 'child_process'
 import type { AudioLayer, MotionPlan, RenderResult, StoryboardComposition, VideoLayer } from './types.js'
 import { getVideoEncoderOptions, getVideoDecodeOptions } from './video-encoder.js'
+import { assertMediaDiskSpace } from '../storage-space.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FPS = 30
@@ -344,6 +345,7 @@ export async function renderStoryboardComposition(
   comp: StoryboardComposition,
 ): Promise<RenderResult> {
   fs.mkdirSync(path.dirname(comp.outputPath), { recursive: true })
+  await assertMediaDiskSpace(path.dirname(comp.outputPath))
 
   return new Promise((resolve, reject) => {
     let cmd = ffmpeg(comp.video.filePath)

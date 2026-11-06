@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { eq } from 'drizzle-orm'
+import Database from 'better-sqlite3'
 import { AiProviderError, classifyImageError, computeRetryDelay } from '../utils/error-taxonomy.js'
 
 const dbDir = mkdtempSync(join(tmpdir(), 'huobao-image-limiter-'))
@@ -345,4 +346,136 @@ test('computeRetryDelay waits for circuit breaker cooldown on network failures',
   const circuitDelay = computeRetryDelay('circuit_open', 1)
   assert.ok(timeoutDelay >= 30_000, `provider timeout delay was ${timeoutDelay}`)
   assert.ok(circuitDelay >= 30_000, `circuit delay was ${circuitDelay}`)
+})
+
+test('executeImageGeneration saves synchronous GPT Image 2 bytes only with the per-task opt-in', async () => {
+  const ts = new Date().toISOString()
+  const configId = Number(db.insert(schema.aiServiceConfigs).values({
+    serviceType: 'image', provider: 'gpt-image2', name: 'Synchronous image fixture',
+    baseUrl: 'https://sync-image.example.test', apiKey: 'test-key', model: JSON.stringify(['gpt-image-2']),
+    createdAt: ts, updatedAt: ts,
+  }).run().lastInsertRowid)
+  const originalFetch = global.fetch
+  const originalProxyProviders = process.env.IMAGE_PROXY_ENABLED_PROVIDERS
+  process.env.IMAGE_PROXY_ENABLED_PROVIDERS = 'none'
+  let requests = 0
+  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(String(input), 'https://sync-image.example.test/v1/images/generations')
+    assert.equal(JSON.parse(String(init?.body)).async, true)
+    requests++
+    return new Response(JSON.stringify({ data: [{ b64_json: png1x1.toString('base64') }] }), { status: 200 })
+  }) as typeof fetch
+  try {
+    for (const optIn of [undefined, false, true]) {
+      const generationId = Number(db.insert(schema.imageGenerations).values({
+        provider: 'gpt-image2', prompt: 'Cover background', model: 'gpt-image-2', size: '1024x1024',
+        status: 'processing', createdAt: ts, updatedAt: ts,
+      }).run().lastInsertRowid)
+      if (optIn) {
+        const result = await executeImageGeneration(generationId, { configId, allowSynchronousImage: optIn })
+        assert.deepEqual(readFileSync(join(process.env.STORAGE_PATH!, '..', result.local_path)), png1x1)
+      } else {
+        await assert.rejects(executeImageGeneration(generationId, { configId, allowSynchronousImage: optIn }),
+          /synchronous image response; async task id is required/)
+      }
+      const updated = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, generationId)).get()!
+      assert.equal(updated.status, optIn ? 'completed' : 'failed')
+      assert.equal(updated.taskId, null)
+    }
+    assert.equal(requests, 3)
+  } finally {
+    global.fetch = originalFetch
+    if (originalProxyProviders == null) delete process.env.IMAGE_PROXY_ENABLED_PROVIDERS
+    else process.env.IMAGE_PROXY_ENABLED_PROVIDERS = originalProxyProviders
+  }
+})
+
+test('image completion reserves its WAL write before a competing connection can invalidate the read snapshot', async t => {
+  const ts = new Date().toISOString()
+  const configId = Number(db.insert(schema.aiServiceConfigs).values({
+    serviceType: 'image', provider: 'gpt-image2', name: 'Concurrent completion fixture',
+    baseUrl: 'https://completion-lock.example.test', apiKey: 'test-key', model: JSON.stringify(['gpt-image-2']),
+    createdAt: ts, updatedAt: ts,
+  }).run().lastInsertRowid)
+  const generationId = Number(db.insert(schema.imageGenerations).values({
+    provider: 'gpt-image2', prompt: 'Canal scene', model: 'gpt-image-2', status: 'processing',
+    createdAt: ts, updatedAt: ts,
+  }).run().lastInsertRowid)
+  db.$client.exec('CREATE TABLE image_completion_lock_probe (value INTEGER); INSERT INTO image_completion_lock_probe VALUES (0)')
+  const competitor = new Database(process.env.DB_PATH!)
+  competitor.pragma('busy_timeout=0')
+  t.after(() => competitor.close())
+  assert.equal(competitor.pragma('journal_mode', { simple: true }), 'wal')
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({
+    data: [{ b64_json: png1x1.toString('base64') }],
+  }), { status: 200 }))
+  const originalPrepare = db.$client.prepare.bind(db.$client)
+  let competingWriteCode: string | undefined
+  let competingWrites = 0
+  t.mock.method(db.$client, 'prepare', (sql: string) => {
+    if (sql.startsWith('update "image_generations"') && sql.includes('"completed_at"')) {
+      // syncRelatedImageTables has already read its generation here. A deferred
+      // transaction lets this writer commit and then fails SQLITE_BUSY_SNAPSHOT.
+      competingWrites++
+      try { competitor.prepare('UPDATE image_completion_lock_probe SET value=value+1').run() }
+      catch (error) { competingWriteCode = (error as { code: string }).code }
+    }
+    return originalPrepare(sql)
+  })
+  const result = await executeImageGeneration(generationId, { configId, allowSynchronousImage: true })
+  assert.equal(competingWrites, 1)
+  assert.equal(competingWriteCode, 'SQLITE_BUSY')
+  assert.deepEqual(readFileSync(join(process.env.STORAGE_PATH!, '..', result.local_path)), png1x1)
+  assert.equal(db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, generationId)).get()!.status, 'completed')
+  competitor.prepare('UPDATE image_completion_lock_probe SET value=value+1').run()
+  assert.equal((competitor.prepare('SELECT value FROM image_completion_lock_probe').get() as { value: number }).value, 1)
+})
+
+test('singleSubmission prevents HTTP retries after an ambiguous timeout while ordinary image generation still retries', async () => {
+  const ts = new Date().toISOString()
+  const configId = Number(db.insert(schema.aiServiceConfigs).values({
+    serviceType: 'image', provider: 'single-submission-test', name: 'Single submission fixture',
+    baseUrl: 'https://single-submission.example.test', apiKey: 'test-key', model: 'fixture',
+    settings: JSON.stringify({ adapter: {
+      request: { url: '/generate', method: 'POST', body: { prompt: '{{prompt}}' } },
+      response: { async: false, imageUrlPath: 'image_url' },
+    } }),
+    createdAt: ts, updatedAt: ts,
+  }).run().lastInsertRowid)
+  const originalFetch = global.fetch
+  const originalProxyProviders = process.env.IMAGE_PROXY_ENABLED_PROVIDERS
+  process.env.IMAGE_PROXY_ENABLED_PROVIDERS = 'none'
+  let requests = 0
+  let failNext = true
+  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).startsWith('data:')) return originalFetch(input, init)
+    assert.equal(init?.method, 'POST')
+    requests++
+    if (failNext) {
+      failNext = false
+      throw new TypeError('fetch failed: request timed out after submission')
+    }
+    return new Response(JSON.stringify({ image_url: `data:image/png;base64,${png1x1.toString('base64')}` }), { status: 200 })
+  }) as typeof fetch
+  try {
+    for (const singleSubmission of [true, false]) {
+      failNext = true
+      requests = 0
+      const generationId = Number(db.insert(schema.imageGenerations).values({
+        provider: 'single-submission-test', prompt: 'Cover background', model: 'fixture', size: '1024x1024',
+        status: 'processing', createdAt: ts, updatedAt: ts,
+      }).run().lastInsertRowid)
+      if (singleSubmission) {
+        await assert.rejects(executeImageGeneration(generationId, { configId, singleSubmission }), /timed out/)
+        assert.equal(requests, 1)
+      } else {
+        await executeImageGeneration(generationId, { configId })
+        assert.equal(requests, 2)
+      }
+    }
+  } finally {
+    global.fetch = originalFetch
+    if (originalProxyProviders == null) delete process.env.IMAGE_PROXY_ENABLED_PROVIDERS
+    else process.env.IMAGE_PROXY_ENABLED_PROVIDERS = originalProxyProviders
+  }
 })

@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import puppeteer, { type Page } from 'puppeteer-core'
+import sharp from 'sharp'
 import { v4 as uuid } from 'uuid'
 import { readImageAsDataUrl } from '../utils/storage.js'
 
@@ -27,6 +28,10 @@ export interface CoverDesign {
   color_and_font?: string
   ai_prompt?: string
   rationale?: string
+  thumbnail_layout?: 'text-left' | 'text-right'
+  highlight_text?: string
+  /** Explicit science-poster line breaks; legacy thumbnails keep automatic two-line fitting. */
+  headline_lines?: 2 | 3
 }
 
 export interface CoverComposerInput {
@@ -46,6 +51,26 @@ export interface SingleCoverComposerInput {
   baseImagePath: string
   frameType: '4:3' | '3:4'
   outputDir?: string
+}
+
+export interface CoverVariant {
+  key: string
+  baseImagePath: string
+  width: number
+  height: number
+}
+
+export interface CoverVariantsInput {
+  design: CoverDesign
+  variants: CoverVariant[]
+  outputDir: string
+}
+
+export interface ComposedCoverVariant {
+  key: string
+  path: string
+  width: number
+  height: number
 }
 
 const STORAGE_ROOT = process.env.STORAGE_PATH || path.resolve(__dirname, '../../../data/static')
@@ -139,6 +164,9 @@ export function normalizeCoverDesign(
 }
 
 export function buildCoverHtml(design: CoverDesign, bgDataUrl: string, width: number, height: number): string {
+  if (design.thumbnail_layout === 'text-left' || design.thumbnail_layout === 'text-right') {
+    return buildThumbnailCoverHtml(design, bgDataUrl, width, height)
+  }
   const mainTitleText = cleanText(design.main_title) || '本集真相'
   const subTitleText = cleanText(design.sub_title)
   const kickerText = cleanText(design.kicker) || cleanText(design.type) || '主题拆解'
@@ -283,6 +311,33 @@ html, body { width: ${width}px; height: ${height}px; overflow: hidden; backgroun
 </html>`
 }
 
+function buildThumbnailCoverHtml(design:CoverDesign,bgDataUrl:string,width:number,height:number) {
+  const explicitLines=design.headline_lines===2 || design.headline_lines===3
+  const title=(explicitLines?String(design.main_title || '').trim():cleanText(design.main_title)) || '本集真相',highlight=cleanText(design.highlight_text)
+  const at=highlight?title.indexOf(highlight):-1
+  const escapeTitle=explicitLines?escapeHtmlWithBreaks:escapeHtml
+  const headline=at<0?escapeTitle(title):`${escapeTitle(title.slice(0,at))}<span class="highlight">${escapeHtml(highlight)}</span>${escapeTitle(title.slice(at+highlight.length))}`
+  const landscape=width>=height,scale=landscape?height:width,left=design.thumbnail_layout==='text-left'
+  const titleSize=explicitLines?Math.min(Math.round(scale*.21),Math.floor(height*(landscape?.70:.44)/(design.headline_lines!*1.08))):Math.round(scale*.21)
+  const accent=safeAccentColor(design.accent_color || '#FFE044'),subtitle=cleanText(design.sub_title)
+  const label=[cleanText(design.kicker),cleanText(design.episode_label)].filter(Boolean).join(' / ')
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:${width}px;height:${height}px;overflow:hidden;background:#171717}
+.stage{position:relative;width:100%;height:100%;background-image:url('${bgDataUrl}');background-size:cover;background-position:center}
+.shade{position:absolute;inset:0;background:linear-gradient(${left?'90':'270'}deg,rgba(16,24,32,.28),rgba(16,24,32,.06) 48%,transparent 65%)}
+.copy{position:absolute;${left?'left':'right'}:5%;top:${landscape?'15%':'6%'};width:${landscape?'55%':'90%'};height:${landscape?'72%':'46%'};display:flex;flex-direction:column;justify-content:center;gap:${Math.round(scale*.035)}px;font-family:"PingFang SC","Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei",sans-serif;letter-spacing:0}
+.label{color:white;font-size:${Math.round(scale*.045)}px;line-height:1.15;font-weight:800;text-shadow:0 2px 4px #000}
+.main-title{color:#fff;font-size:${titleSize}px;line-height:1.08;font-weight:900;overflow-wrap:anywhere;text-wrap:balance;-webkit-text-stroke:${Math.max(2,Math.round(scale*.009))}px #151515;paint-order:stroke fill;text-shadow:0 ${Math.round(scale*.006)}px ${Math.round(scale*.012)}px #000}
+.highlight{color:${accent};display:inline-block;white-space:nowrap}
+.sub-title{align-self:flex-start;max-width:100%;padding:${Math.round(scale*.012)}px ${Math.round(scale*.024)}px;background:${accent};color:#101010;font-size:${Math.round(scale*.063)}px;line-height:1.2;font-weight:900;overflow-wrap:anywhere;text-wrap:balance;box-shadow:0 2px 4px #0005}
+</style></head><body><div class="stage"><div class="shade"></div><div class="copy" data-thumbnail-copy${explicitLines?' data-explicit-headline':''}>
+${label?`<div class="label">${escapeHtml(label)}</div>`:''}
+<div class="main-title" data-fit-lines="${explicitLines?design.headline_lines:2}">${headline}</div>
+${subtitle?`<div class="sub-title" data-fit-lines="2">${escapeHtml(subtitle)}</div>`:''}
+</div></div></body></html>`
+}
+
 async function renderOne(
   page: Page,
   design: CoverDesign,
@@ -290,22 +345,106 @@ async function renderOne(
   width: number,
   height: number,
   outDir: string,
+  filename = `${uuid()}.png`,
 ): Promise<string> {
   const html = buildCoverHtml(design, bgDataUrl, width, height)
   await page.setViewport({ width, height, deviceScaleFactor: 1 })
   await page.setContent(html, { waitUntil: 'load' })
   await page.evaluate(() => document.fonts.ready)
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll<HTMLElement>('[data-fit-lines]')) {
+      const style=getComputedStyle(el),ratio=parseFloat(style.lineHeight)/parseFloat(style.fontSize)
+      let size=parseFloat(style.fontSize)
+      const lines=Number(el.dataset.fitLines)
+      while(size>18 && (el.scrollWidth>el.clientWidth+1 || el.getBoundingClientRect().height>size*ratio*lines+2)) {
+        size-=2;el.style.fontSize=size+'px'
+      }
+    }
+    const copy=document.querySelector<HTMLElement>('[data-thumbnail-copy]')
+    // The combined headline, label and subtitle must fit the same safe area.
+    const title=copy?.querySelector<HTMLElement>('.main-title')
+    if(copy && title) {
+      let size=parseFloat(getComputedStyle(title).fontSize)
+      while(size>18 && (copy.scrollHeight>copy.clientHeight+1 || copy.scrollWidth>copy.clientWidth+1)) {
+        size-=2;title.style.fontSize=size+'px'
+      }
+    }
+    if(copy && (copy.scrollHeight>copy.clientHeight+1 || copy.scrollWidth>copy.clientWidth+1))throw Error('封面文字超出安全区，请缩短封面文案')
+  })
 
   const buffer = await page.screenshot({
     clip: { x: 0, y: 0, width, height },
     type: 'png',
   })
 
-  const filename = `${uuid()}.png`
   const filePath = path.join(outDir, filename)
   fs.writeFileSync(filePath, buffer)
 
   return `static/covers/${filename}`
+}
+
+/** Render each format from its unlettered local image, never from a finished cover. */
+export async function composeCoverVariants(input: CoverVariantsInput): Promise<ComposedCoverVariant[]> {
+  if (!input.variants.length) throw new Error('At least one cover variant is required')
+  const keys = new Set<string>()
+  for (const variant of input.variants) {
+    if (!/^[a-z0-9_-]+$/i.test(variant.key)) {
+      throw new Error(`Invalid cover variant key: ${variant.key}`)
+    }
+    const key = variant.key.toLowerCase()
+    if (keys.has(key)) throw new Error(`Duplicate cover variant key: ${variant.key}`)
+    keys.add(key)
+    if (!Number.isSafeInteger(variant.width) || variant.width <= 0
+      || !Number.isSafeInteger(variant.height) || variant.height <= 0) {
+      throw new Error(`Invalid cover dimensions for ${variant.key}`)
+    }
+  }
+
+  const backgrounds = new Map<string, string>()
+  for (const variant of input.variants) {
+    const imagePath = path.resolve(variant.baseImagePath)
+    if (!backgrounds.has(imagePath)) {
+      const buffer = await sharp(imagePath).rotate().png().toBuffer()
+      backgrounds.set(imagePath, `data:image/png;base64,${buffer.toString('base64')}`)
+    }
+  }
+  const executablePath = getChromeExecutablePath()
+  if (!fs.existsSync(executablePath)) {
+    throw new Error(`Chrome executable not found: ${executablePath}`)
+  }
+  const outDir = path.resolve(input.outputDir)
+  fs.mkdirSync(outDir, { recursive: true })
+  const browser = await puppeteer.launch({
+    executablePath,
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu',
+      '--allow-file-access-from-files',
+    ],
+  })
+
+  try {
+    const page = await browser.newPage()
+    const results: ComposedCoverVariant[] = []
+    for (const variant of input.variants) {
+      const filename = `${variant.key}.png`
+      await renderOne(page, input.design, backgrounds.get(path.resolve(variant.baseImagePath))!,
+        variant.width, variant.height, outDir, filename)
+      results.push({
+        key: variant.key,
+        path: path.join(outDir, filename),
+        width: variant.width,
+        height: variant.height,
+      })
+    }
+    return results
+  } finally {
+    await browser.close()
+  }
 }
 
 export async function composeCoverImages(input: CoverComposerInput): Promise<CoverComposerResult> {

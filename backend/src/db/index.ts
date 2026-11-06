@@ -28,6 +28,70 @@ sqlite.exec(`
     deleted_at TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS style_pilots (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    "desc" TEXT,
+    mood TEXT,
+    lens TEXT,
+    profile TEXT,
+    aspect_ratio TEXT,
+    prompt TEXT,
+    url TEXT,
+    media_type TEXT NOT NULL DEFAULT 'image',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS history_script_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL DEFAULT 'douyin',
+    source_video_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    author_name TEXT,
+    category TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'selected',
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    selection_json TEXT NOT NULL DEFAULT '{}',
+    media_json TEXT NOT NULL DEFAULT '{}',
+    raw_transcript TEXT,
+    corrected_transcript TEXT,
+    rewritten_script TEXT,
+    asr_json TEXT,
+    review_json TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    CONSTRAINT history_script_sources_platform_video_unique UNIQUE (platform, source_video_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS history_script_deliveries (
+    script_id INTEGER PRIMARY KEY REFERENCES history_script_sources(id),
+    title TEXT NOT NULL DEFAULT '',
+    baijiahao_title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    video_path TEXT,
+    video_name TEXT,
+    duration REAL,
+    script_sha256 TEXT,
+    cover_script_sha256 TEXT,
+    cover_design_json TEXT NOT NULL DEFAULT '{}',
+    covers_json TEXT NOT NULL DEFAULT '{}',
+    design_status TEXT NOT NULL DEFAULT 'idle',
+    design_run_id TEXT,
+    design_lease_until TEXT,
+    design_error TEXT,
+    cover_status TEXT NOT NULL DEFAULT 'idle',
+    cover_run_id TEXT,
+    cover_lease_until TEXT,
+    error TEXT,
+    updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS dramas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_account_id INTEGER,
@@ -830,6 +894,12 @@ function ensureColumn(table: string, column: string, definition: string) {
   }
 }
 
+ensureColumn('history_script_sources', 'deleted_at', 'TEXT')
+ensureColumn('history_script_deliveries', 'design_status', "TEXT NOT NULL DEFAULT 'idle'")
+ensureColumn('history_script_deliveries', 'baijiahao_title', "TEXT NOT NULL DEFAULT ''")
+ensureColumn('history_script_deliveries', 'design_run_id', 'TEXT')
+ensureColumn('history_script_deliveries', 'design_lease_until', 'TEXT')
+ensureColumn('history_script_deliveries', 'design_error', 'TEXT')
 ensureColumn('remotion_renders', 'started_at', 'TEXT')
 ensureColumn('remotion_assets', 'started_at', 'TEXT')
 ensureColumn('episodes', 'image_config_id', 'INTEGER')
@@ -982,7 +1052,7 @@ const previousNarrationVoiceIds = [
 ]
 sqlite.prepare(`
   UPDATE episodes
-  SET narration_voice_id = 'voice-clone-aug7-1786117023178',
+  SET narration_voice_id = 'ttv-voice-2026072016135626-xnywYYL4',
       narration_speed = CASE
         WHEN narration_speed IS NULL OR narration_speed = 1.0 THEN 1.2
         ELSE narration_speed

@@ -74,6 +74,31 @@ test('rejects synchronous image responses instead of bypassing the task queue', 
   )
 })
 
+test('accepts synchronous URL and base64 images only for explicitly opted-in tasks', () => {
+  const urlResult = { data: [{ url: 'https://cdn.example.com/sync.png' }] }
+  const base64Result = { data: [{ b64_json: 'iVBORw0KGgo=' }] }
+  for (const result of [urlResult, base64Result]) {
+    assert.throws(() => adapter.parseGenerateResponse(result), /async task id is required/)
+    assert.throws(() => adapter.parseGenerateResponse(result, { allowSynchronousImage: false }), /async task id is required/)
+  }
+  assert.deepEqual(adapter.parseGenerateResponse(urlResult, { allowSynchronousImage: true }), {
+    isAsync: false, imageUrl: 'https://cdn.example.com/sync.png',
+  })
+  assert.deepEqual(adapter.parseGenerateResponse(base64Result, { allowSynchronousImage: true }), { isAsync: false })
+  assert.deepEqual(adapter.parseGenerateResponse({ id: 'image-result-id', ...base64Result }, {
+    allowSynchronousImage: true,
+  }), { isAsync: false })
+  assert.deepEqual(adapter.extractImageBase64({ ...base64Result, output_format: 'webp' }), {
+    data: 'iVBORw0KGgo=', mimeType: 'image/webp',
+  })
+  assert.deepEqual(adapter.parseGenerateResponse({ id: 'async-task' }, { allowSynchronousImage: true }), {
+    isAsync: true, taskId: 'async-task',
+  })
+  assert.throws(() => adapter.parseGenerateResponse({ error: { message: 'provider failure' } }, {
+    allowSynchronousImage: true,
+  }), /provider failure/)
+})
+
 test('parses completed and failed task responses', () => {
   assert.deepEqual(adapter.parsePollResponse({
     id: 'task_img_123',

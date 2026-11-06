@@ -792,3 +792,42 @@ test('acquireNextQueuedTask marks dependent task failed when a dependency fails'
   assert.equal(loaded?.status, 'failed')
   assert.match(loaded?.errorMessage || '', /provider error/)
 })
+
+test('task ID scope excludes unrelated claims and dependency transitions, including an empty scope', () => {
+  const type = 'test.scoped-image-task'
+  const failedDependency = createTask({ type })
+  transitionTask(failedDependency.id, 'failed')
+  const unrelated = createTask({ type, priority: 100 })
+  addTaskDependency(unrelated.id, failedDependency.id)
+  const target = createTask({ type, priority: 1 })
+
+  assert.equal(acquireNextQueuedTask({ workerId: 'scoped-empty', leaseMs: 1000, taskIds: [] }), null)
+  assert.equal(getTask(unrelated.id)?.status, 'queued')
+  assert.equal(getTask(target.id)?.leaseOwner, null)
+
+  const claimed = acquireNextQueuedTask({ workerId: 'scoped-one', leaseMs: 1000, taskIds: [target.id] })
+  assert.equal(claimed?.id, target.id)
+  assert.equal(getTask(unrelated.id)?.status, 'queued')
+  assert.equal(acquireNextQueuedTask({ workerId: 'scoped-again', leaseMs: 1000, taskIds: [target.id] }), null)
+  assert.equal(getTask(target.id)?.leaseOwner, 'scoped-one')
+})
+
+test('task ID scope still respects task types, schedules and dependencies', () => {
+  const type = 'test.scoped-eligibility'
+  const dependency = createTask({ type })
+  const waiting = createTask({ type, priority: 100 })
+  addTaskDependency(waiting.id, dependency.id)
+  const delayed = createTask({ type, priority: 100, scheduledAt: new Date(Date.now() + 60_000).toISOString() })
+  const otherType = createTask({ type: `${type}.other`, priority: 100 })
+  const target = createTask({ type, priority: 1 })
+  const taskIds = [waiting.id, delayed.id, otherType.id, target.id]
+
+  assert.equal(acquireNextQueuedTask({ workerId: 'eligible-one', leaseMs: 1000, types: [type], taskIds })?.id, target.id)
+  assert.equal(acquireNextQueuedTask({ workerId: 'eligible-none', leaseMs: 1000, types: [type], taskIds }), null)
+  for (const id of [dependency.id, waiting.id, delayed.id, otherType.id]) {
+    assert.equal(getTask(id)?.status, 'queued')
+    assert.equal(getTask(id)?.leaseOwner, null)
+  }
+  transitionTask(dependency.id, 'succeeded')
+  assert.equal(acquireNextQueuedTask({ workerId: 'eligible-ready', leaseMs: 1000, types: [type], taskIds })?.id, waiting.id)
+})

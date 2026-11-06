@@ -26,15 +26,21 @@ import merge from './routes/merge.js'
 import grid from './routes/grid.js'
 import skills from './routes/skills.js'
 import scripts from './routes/scripts.js'
+import historyScripts from './routes/history-scripts.js'
+import { createCbaVideoRoute } from './routes/cba-video.js'
+import { createNbaVideoRoute } from './routes/nba-video.js'
 import tasks from './routes/tasks.js'
 import taskAudit from './routes/taskAudit.js'
 import health from './routes/health.js'
 import webhooks from './routes/webhooks.js'
 import aiVoices from './routes/aiVoices.js'
 import library from './routes/library.js'
+import { createHuashengMaterialsRoute } from './routes/huasheng-materials.js'
 import introTemplates from './routes/introTemplates.js'
 import remotion from './routes/remotion.js'
 import sciencePop from './routes/science-pop.js'
+import mysteryStories from './routes/mystery-stories.js'
+import { registerMysteryStoryHandlers } from './services/tasks/handlers/mystery-stories.js'
 import mediaAccounts from './routes/mediaAccounts.js'
 import dharma from './routes/dharma.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
@@ -61,6 +67,20 @@ import { registerNarrativeStoryboardMonitorHandler } from './services/tasks/hand
 import { registerSciencePopHandlers } from './services/tasks/handlers/science-pop.js'
 import { registerDharmaEpisodeHandlers } from './services/tasks/handlers/dharma-episode.js'
 import { registerDharmaFootageGenerateHandler } from './services/tasks/handlers/dharma-footage-generate.js'
+import { registerHistorySourceJobHandler, hasHistorySourceWorker, resumeHistorySourceJob } from './services/history-source-jobs.js'
+import { createHistoryWorkflowMaintenance } from './services/history-workflow-maintenance.js'
+import { db } from './db/index.js'
+import { registerHistoryProductionContinuationHandler } from './services/history-production-continuation.js'
+import { registerHuashengMaterialUpdateHandler } from './services/huasheng-material-updates.js'
+import { startHistoryHuashengWorker } from './services/history-huasheng.js'
+import { startHistoryHuashengExportWorker } from './services/history-huasheng-export.js'
+import { startHistorySocialUploadWorker } from './services/history-social-upload.js'
+import { startHistoryVideoPublicationWorker } from './services/history-video-publication.js'
+import { startHistoryDualProductionWorker } from './services/history-video-workflow.js'
+import { startHistoryFactoryWorker } from './services/history-factory.js'
+import { getScienceWorkflowService } from './services/science-workflow.js'
+import { getScienceCollectionService } from './services/science-collection.js'
+import { createStorageRoute } from './routes/storage.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = path.resolve(__dirname, '../..')
@@ -99,16 +119,22 @@ api.route('/merge', merge)
 api.route('/grid', grid)
 api.route('/skills', skills)
 api.route('/scripts', scripts)
+api.route('/history-scripts', historyScripts)
+api.route('/cba-video', createCbaVideoRoute())
+api.route('/nba-video', createNbaVideoRoute())
 api.route('/tasks', tasks)
 api.route('/task-audit', taskAudit)
 api.route('/health', health)
 api.route('/ai-voices', aiVoices)
 api.route('/library', library)
+api.route('/huasheng-materials', createHuashengMaterialsRoute())
 api.route('/intro-templates', introTemplates)
 api.route('/remotion', remotion)
 api.route('/science-pop', sciencePop)
+api.route('/mystery-stories', mysteryStories)
 api.route('/media-accounts', mediaAccounts)
 api.route('/dharma', dharma)
+api.route('/storage', createStorageRoute())
 
 app.route('/api/v1', api)
 
@@ -131,11 +157,29 @@ registerPublishWeChatChannelsHandler()
 registerPublishDouyinHandler()
 registerNarrativeStoryboardMonitorHandler()
 registerSciencePopHandlers()
+registerMysteryStoryHandlers()
 registerDharmaEpisodeHandlers()
 registerDharmaFootageGenerateHandler()
+registerHistorySourceJobHandler()
+registerHistoryProductionContinuationHandler()
+registerHuashengMaterialUpdateHandler()
 
 const workers: ReturnType<typeof startTaskWorkerLoop>[] = []
+function startProductionWorkers() {
+// Only previously enqueued jobs are recovered; startup never backfills old drafts.
+const huashengWorker = startHistoryHuashengWorker()
+const huashengExportWorker = startHistoryHuashengExportWorker()
+const historySocialUploadWorker = startHistorySocialUploadWorker()
+const historyVideoPublicationWorker = startHistoryVideoPublicationWorker()
+const historyDualProductionWorker = startHistoryDualProductionWorker()
+const historyFactoryWorker = startHistoryFactoryWorker()
+const historyMaintenanceWorker = process.env.TASK_WORKER_DISABLED === '1' ? undefined
+  : createHistoryWorkflowMaintenance({database:db.$client,hasSourceWorker:hasHistorySourceWorker,
+    resumeCollection:resumeHistorySourceJob,onError:error=>console.error('[history-maintenance]',error)})
+historyMaintenanceWorker?.start()
 if (process.env.TASK_WORKER_DISABLED !== '1') {
+  getScienceWorkflowService().startAutomaticExports()
+  getScienceCollectionService().startAutomaticRecovery()
   const imageWorkerConcurrency = Math.max(1, Number(process.env.IMAGE_TASK_WORKER_CONCURRENCY || 16))
   const generalWorkerConcurrency = Math.max(1, Number(process.env.GENERAL_TASK_WORKER_CONCURRENCY || process.env.TASK_WORKER_CONCURRENCY || 12))
 
@@ -205,12 +249,26 @@ if (process.env.TASK_WORKER_DISABLED !== '1') {
     }))
   }
 }
+return {huashengWorker,huashengExportWorker,historySocialUploadWorker,historyVideoPublicationWorker,historyDualProductionWorker,historyFactoryWorker,historyMaintenanceWorker}
+}
+let productionWorkers:ReturnType<typeof startProductionWorkers>|undefined
 
 async function shutdown(signal: string) {
+  productionWorkers?.historyMaintenanceWorker?.stop()
   console.log(`[shutdown] received ${signal}, waiting for ${workers.length} worker pool(s) to finish...`)
   try {
     const timeoutMs = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS) || 120_000
-    await Promise.all(workers.map(worker => worker.stop(timeoutMs)))
+    await Promise.all([
+      ...workers.map(worker => worker.stop(timeoutMs)),
+      productionWorkers?.huashengWorker?.stop(timeoutMs),
+      productionWorkers?.huashengExportWorker?.stop(),
+      productionWorkers?.historySocialUploadWorker.stop(),
+      productionWorkers?.historyVideoPublicationWorker.stop(),
+      productionWorkers?.historyDualProductionWorker.stop(),
+      productionWorkers?.historyFactoryWorker.stop(timeoutMs),
+      getScienceWorkflowService().stop(),
+      getScienceCollectionService().stop(),
+    ])
   } catch (error) {
     console.error('[shutdown] worker stop error:', error)
   }
@@ -248,4 +306,4 @@ app.get('*', serveStatic({ root: distPath, path: 'index.html' }))
 const port = Number(process.env.PORT || 5679)
 const hostname = process.env.HOST || '127.0.0.1'
 console.log(`Huobao Drama TS server on http://${hostname}:${port}`)
-serve({ fetch: app.fetch, port, hostname })
+serve({ fetch: app.fetch, port, hostname },()=>{productionWorkers=startProductionWorkers()})

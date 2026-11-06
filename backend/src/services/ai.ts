@@ -5,6 +5,7 @@ import { db, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
 import { logTaskProgress, logTaskWarn } from '../utils/task-logger.js'
 import { joinProviderUrl } from './adapters/url.js'
+import { getAIProviderAdmission, getTextAdmissionOptions } from './ai-provider-admission.js'
 
 export type ServiceType = 'text' | 'image' | 'video' | 'audio' | 'music'
 
@@ -47,11 +48,11 @@ export function getTextProviderBaseUrl(config: AIConfig) {
   return config.baseUrl
 }
 
-export function getActiveConfig(serviceType: ServiceType): AIConfig | null {
+export function getActiveConfig(serviceType: ServiceType, provider?: string): AIConfig | null {
   const rows = db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.serviceType, serviceType))
     .all()
-    .filter(r => r.isActive)
+    .filter(r => r.isActive && (!provider || r.provider?.trim().toLowerCase() === provider.trim().toLowerCase() && Boolean(r.apiKey?.trim())))
     .sort((a, b) => (b.priority || 0) - (a.priority || 0)) // 高优先级优先
 
   const active = rows[0]
@@ -148,6 +149,14 @@ function parseConfigSettings(settings?: string | Record<string, any> | null): Re
   return settings
 }
 
+/** Extra text request settings used by the opening storyboard service. */
+export function getTextRequestExtras(config: AIConfig): Record<string, any> {
+  const settings = parseConfigSettings(config.settings)
+  if (!settings) return {}
+  const effort = settings.reasoning_effort ?? settings.reasoningEffort
+  return typeof effort === 'string' && effort.trim() ? { reasoning_effort: effort.trim() } : {}
+}
+
 export interface AIConfigWithId extends AIConfig {
   id: number
   settings?: Record<string, any> | null
@@ -182,9 +191,31 @@ export function getNarrationAudioConfig(): AIConfigWithId | null {
   return null
 }
 
+export class TextModelHttpError extends Error {
+  constructor(readonly status: number, body: string, readonly retryAfterMs?: number) {
+    super(`Text model request failed: ${status} ${body}`)
+    this.name = 'TextModelHttpError'
+  }
+}
+
+export interface TextModelTool {
+  type: 'function'
+  function: {
+    name: string
+    description?: string
+    parameters: Record<string, any>
+    strict?: boolean
+  }
+}
+
+export type TextModelToolChoice = 'auto' | 'none' | 'required' | {
+  type: 'function'
+  function: { name: string }
+}
+
 export async function callTextModel(
   messages: Array<{ role: string; content: string }>,
-  options?: { temperature?: number; maxTokens?: number; responseFormat?: { type: string }; extraBody?: Record<string, any> },
+  options?: { temperature?: number; maxTokens?: number; responseFormat?: { type: string }; tools?: TextModelTool[]; toolChoice?: TextModelToolChoice; extraBody?: Record<string, any>; signal?: AbortSignal; requireComplete?: boolean },
 ): Promise<string> {
   const config = getTextConfig()
   const baseUrl = getTextProviderBaseUrl(config)
@@ -198,22 +229,57 @@ export async function callTextModel(
   if (options?.responseFormat) {
     body.response_format = options.responseFormat
   }
-  const res = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Text model request failed: ${res.status} ${text}`)
+  if (options?.tools?.length) {
+    body.tools = options.tools
+    body.tool_choice = options.toolChoice ?? 'required'
+    body.parallel_tool_calls = false
+    delete body.response_format
   }
-  const data = await res.json()
-  const content = data.choices?.[0]?.message?.content
-  if (typeof content !== 'string') {
-    throw new Error('Text model returned no content')
-  }
-  return content.trim()
+  const endpoint = `${baseUrl}/chat/completions`
+  return getAIProviderAdmission().run({ endpoint, apiKey: config.apiKey }, async lease => {
+    options?.signal?.throwIfAborted()
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: options?.signal,
+    })
+    if (!res.ok) {
+      const retryAfter = res.headers.get('retry-after')?.trim()
+      const seconds = retryAfter ? Number(retryAfter) : NaN
+      const retryAfterMs = Number.isFinite(seconds) ? seconds >= 0 ? seconds * 1000 : NaN
+        : retryAfter ? Math.max(0, Date.parse(retryAfter) - Date.now()) : NaN
+      if (res.status === 429) {
+        try { await lease.defer(Number.isFinite(retryAfterMs) ? retryAfterMs : undefined) }
+        catch { console.warn('[ai-admission] provider cooldown could not be persisted') }
+      }
+      const text = await res.text()
+      throw new TextModelHttpError(res.status, text, Number.isFinite(retryAfterMs) ? retryAfterMs : undefined)
+    }
+    const data = await res.json()
+    const choice = data.choices?.[0]
+    const finishReason = choice?.finish_reason
+    if (options?.tools?.length ? finishReason !== 'tool_calls' : options?.requireComplete && finishReason !== 'stop') {
+      throw new Error('Text model response did not complete normally; refusing a truncated or incomplete draft')
+    }
+    if (options?.tools?.length) {
+      const toolCalls = choice?.message?.tool_calls
+      const expectedName = options.toolChoice && typeof options.toolChoice === 'object'
+        ? options.toolChoice.function.name : options.tools[0]?.function.name
+      if (!Array.isArray(toolCalls) || toolCalls.length !== 1 || toolCalls[0]?.type !== 'function'
+        || toolCalls[0]?.function?.name !== expectedName || typeof toolCalls[0]?.function?.arguments !== 'string'
+        || !toolCalls[0].function.arguments.trim()) {
+        throw new Error(`模型未返回指定工具 ${expectedName || 'function'} 的完整调用，已拒绝使用普通文本代替`)
+      }
+      return toolCalls[0].function.arguments.trim()
+    }
+    const content = choice?.message?.content
+    if (typeof content !== 'string') {
+      throw new Error('Text model returned no content')
+    }
+    return content.trim()
+  }, { ...getTextAdmissionOptions(config.settings), signal: options?.signal })
 }

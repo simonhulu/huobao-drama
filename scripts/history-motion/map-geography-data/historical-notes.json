@@ -1,0 +1,27 @@
+{
+  "checkedAt": "2026-10-28",
+  "retrieval": "Official-source excerpts returned by MiniMax web search; URLs retained for independent review.",
+  "references": [
+    {
+      "id": "yellow-river-1855",
+      "title": "黄河1855年铜瓦厢改道",
+      "publisher": "水利部黄河水利委员会",
+      "url": "http://www.yrcc.gov.cn/hhwh/wxyc/202312/t20231220_373347.html",
+      "excerpt": "咸丰五年(1855年)六月，黄河在河南兰考北岸铜瓦厢决口……夺大清河，汇入渤海。铜瓦厢以下数百里南流河道自此废弃，成为废黄河。",
+      "application": "Ming/pre-1855 scenes omit the modern lower Yellow River main stem east of 114.5 E. HydroRIVERS MAIN_RIV 40417973 is identified from reaches at the present Jinan Yellow River; ORD_CLAS=1 identifies the main stem. No medieval replacement geometry is invented. Tributaries and upstream reaches remain modern geographic context."
+    },
+    {
+      "id": "yongding-name-1698",
+      "title": "卢沟桥与永定河名称沿革",
+      "publisher": "北京市丰台区人民政府",
+      "url": "https://www.bjft.gov.cn/fengtaishibao/html/2025-07/11/content_9506_18703589.htm",
+      "excerpt": "清康熙三十七年(1698年)，皇帝命令河道总督于成龙整治卢沟，疏浚河道并筑长堤，并赐名永定河。",
+      "application": "Ming context labels the named Yongding reach as 卢沟河. Geometry remains modern geographical context; the name substitution does not claim reconstruction of the Ming channel."
+    }
+  ],
+  "otherLimits": [
+    "Natural Earth Reservoir features are omitted from historical scenery; modern lake and ocean outlines remain geographic context.",
+    "Natural Earth Zhang is a generalized downstream record. The 漳河 label is restricted west of 115.4 E, and 海河 is restricted east of 117.1 E; these are label applicability windows, never reconstructed river boundaries.",
+    "HydroRIVERS contains hydrologic geometry and stream order, not historical Chinese river names. Names are sourced separately; modern drainage topology is not evidence for ancient battles."
+  ]
+}

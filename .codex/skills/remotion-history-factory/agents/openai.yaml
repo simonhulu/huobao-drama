@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remotion History Factory"
+  short_description: "统一历史视频制作：本地素材优先，图片补缺，地图与动画按需，在 Remotion 交付"
+  default_prompt: "使用 $remotion-history-factory 从这篇已确认稿件或 Episode 自动制作历史视频，复用配音与本地素材，按需补图、地图和动态文字，在现有 Remotion 页面交付。"

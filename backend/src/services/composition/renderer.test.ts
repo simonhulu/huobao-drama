@@ -103,6 +103,24 @@ test('buildMotionTransitionFilters emits real flash and dip-black filters', () =
   assert.match(filters[1], /fade=t=out/)
 })
 
+test('disk reserve stops composition before FFmpeg and preserves an existing output', async t => {
+  const workDir = mkdtempSync(path.join(tmpdir(), 'huobao-composition-space-'))
+  const previous = process.env.MEDIA_DISK_RESERVE_GIB
+  t.after(() => {
+    fs.rmSync(workDir, { recursive: true, force: true })
+    if (previous === undefined) delete process.env.MEDIA_DISK_RESERVE_GIB
+    else process.env.MEDIA_DISK_RESERVE_GIB = previous
+  })
+  const composition = buildStoryboardComposition({
+    outputDir: workDir, width: 320, height: 180, duration: 1,
+    baseImagePath: path.join(workDir, 'not-needed.png'), audioLayers: [],
+  })
+  fs.writeFileSync(composition.outputPath, 'previous completed video')
+  process.env.MEDIA_DISK_RESERVE_GIB = '1000000000'
+  await assert.rejects(renderStoryboardComposition(composition), { code: 'MEDIA_DISK_FULL' })
+  assert.equal(fs.readFileSync(composition.outputPath, 'utf8'), 'previous completed video')
+})
+
 test('renderStoryboardComposition produces a valid video with audio', { skip: !ffmpegAvailable() }, async () => {
   const workDir = mkdtempSync(path.join(tmpdir(), 'huobao-composition-'))
   const imagePath = path.join(workDir, 'input.png')

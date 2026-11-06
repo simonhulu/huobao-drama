@@ -60,3 +60,20 @@ test('TTSGenerationLimiter caps concurrent executions', async () => {
   assert.equal(maxRunning, 2)
   assert.equal(running, 0)
 })
+
+test('an expired queued preview leaves the TTS queue without submitting later', async () => {
+  const limiter = new TTSGenerationLimiter(1, 1, 10)
+  let release!: () => void
+  const held = limiter.run(() => new Promise<void>(resolve => { release = resolve }))
+  await new Promise(resolve => setImmediate(resolve))
+  const controller = new AbortController()
+  let submitted = false
+  const preview = limiter.run(async () => { submitted = true }, controller.signal)
+  controller.abort(new Error('试听等待超时'))
+  const rejected = assert.rejects(preview, /试听等待超时/)
+  release()
+  await held
+  await rejected
+  assert.equal(submitted, false)
+  assert.equal(await limiter.run(async () => 'ready'), 'ready')
+})

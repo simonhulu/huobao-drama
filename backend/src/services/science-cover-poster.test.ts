@@ -1,0 +1,371 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import sharp from 'sharp'
+import { generateScienceCoverPosters, SCIENCE_COVER_TOOL, type SciencePosterInput, type SciencePosterOptions,
+  type SciencePosterImageRuntime } from './science-cover-poster.js'
+
+const plan = {
+  headlineLines: ['骆驼', '为什么', '这么耐渴？'], highlight: '骆驼', subject: '一只健康的单峰骆驼',
+  evidenceQuote: '骆驼能减少水分流失，体温也会随环境变化。', payoff: '正文解释了骆驼减少水分流失的多种生理机制。',
+  landscapeTextSide: 'text-left',
+  landscapePrompt: '横版独立摄影构图，右侧是一只真实单峰骆驼的头颈大特写，细致毛发与眼睛，左侧是纯黑背景供标题排字，柔和侧光，画面不含任何文字。',
+  portraitPrompt: '竖版独立摄影构图，真实单峰骆驼的头颈集中在下半部分，上方留出深色干净空间，清晰毛发与眼睛，柔和侧光，画面不含文字。',
+}
+const signal = () => new AbortController().signal
+async function fixture(t: any) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'science-poster-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const input: SciencePosterInput = { title: '骆驼为什么耐渴？', script: `沙漠昼夜温差大。${plan.evidenceQuote}`, sourceTitle: 'Why camels thrive',
+    instruction: '黑底，突出眼睛，黄色写骆驼', directory, revision: 1 }
+  const requests: Array<Parameters<SciencePosterImageRuntime['create']>[0]> = [], executes: number[] = [], composed: string[] = []
+  const states = new Map<number, NonNullable<Awaited<ReturnType<SciencePosterImageRuntime['state']>>>>()
+  let calls = 0
+  const images: SciencePosterImageRuntime = {
+    config: async () => ({ id: 7, identity: 'same-config' }),
+    create: async request => { requests.push(request); const id = requests.length; states.set(id, { status: 'processing', taskId: null, localPath: null, errorMsg: null, lastErrorCode: null }); return id },
+    state: async id => states.get(id) || null,
+    execute: async (id, configId, executionSignal) => {
+      assert.equal(configId, 7); executionSignal.throwIfAborted(); executes.push(id)
+      const file = path.join(directory, `base-${id}.png`)
+      await sharp({ create: { width: 1200, height: 1200, channels: 3, background: id === 1 ? '#1d3a59' : '#7f391e' } }).png().toFile(file)
+      states.set(id, { status: 'completed', taskId: `provider-${id}`, localPath: file, errorMsg: null, lastErrorCode: null })
+      return file
+    },
+  }
+  const options: SciencePosterOptions = { signal: signal(), dependencies: {
+    call: async (messages, options) => {
+      calls++
+      assert.deepEqual(options?.toolChoice, { type: 'function', function: { name: SCIENCE_COVER_TOOL } })
+      assert.equal(options?.tools?.[0]?.function.strict, true)
+      assert.equal((options?.tools?.[0]?.function.parameters as any).additionalProperties, false)
+      assert.equal(JSON.parse(messages[1]!.content).userInstruction, input.instruction)
+      return JSON.stringify(plan)
+    },
+    images,
+    compose: async request => {
+      assert.equal(request.design.headline_lines, 3)
+      assert.equal(request.design.main_title, '骆驼\n为什么\n这么耐渴？')
+      assert.equal(request.design.highlight_text, '骆驼')
+      return Promise.all(request.variants.map(async variant => {
+        composed.push(variant.key)
+        const file = path.join(request.outputDir, `${variant.key}.png`)
+        await sharp(variant.baseImagePath).resize(variant.width, variant.height).png().toFile(file)
+        return { ...variant, path: file }
+      }))
+    },
+  } }
+  return { input, options, images, states, requests, executes, composed, calls: () => calls }
+}
+
+test('strict-tool design generates independently composed posters, preserves instruction and reuses both completed formats', async t => {
+  const f = await fixture(t)
+  const result = await generateScienceCoverPosters(f.input, f.options)
+  for (const [file, dimensions] of [[result.landscapePath, [1280, 720]], [result.portraitPath, [810, 1080]]] as const) {
+    const meta = await sharp(file).metadata()
+    assert.deepEqual([meta.width, meta.height], dimensions); assert.equal(meta.format, 'jpeg')
+  }
+  assert.equal(f.calls(), 1); assert.deepEqual(f.executes, [1, 2])
+  assert.deepEqual(f.requests.map(request => request.frameType), ['16:9', '3:4'])
+  assert.notEqual(f.requests[0]!.prompt, f.requests[1]!.prompt)
+  assert.match(f.requests[0]!.prompt, /左侧50%/)
+  assert.match(f.requests[1]!.prompt, /上方45%/)
+  assert.deepEqual(await generateScienceCoverPosters(f.input, f.options), result)
+  assert.equal(f.calls(), 1); assert.equal(f.executes.length, 2); assert.equal(f.composed.length, 2)
+  await fs.writeFile(result.portraitPath, 'corrupt output')
+  await generateScienceCoverPosters(f.input, f.options)
+  assert.equal(f.executes.length, 2, 'damaged output recomposes the saved independent base, with no paid image request')
+  assert.deepEqual(f.composed, ['landscape', 'portrait', 'portrait'])
+})
+
+test('a failed portrait query resumes its saved provider job and never regenerates the finished landscape', async t => {
+  const f = await fixture(t), execute = f.images.execute
+  let interrupted = false
+  f.images.execute = async (id, configId, signal) => {
+    if (id === 2 && !interrupted) {
+      interrupted = true
+      f.states.set(id, { status: 'failed', taskId: 'original-portrait-task', localPath: null, errorMsg: 'network timeout', lastErrorCode: 'network_error' })
+      throw new Error('network timeout')
+    }
+    if (id === 2) assert.equal(f.states.get(id)?.taskId, 'original-portrait-task')
+    return execute(id, configId, signal)
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /network timeout/)
+  assert.deepEqual(f.composed, ['landscape'])
+  await generateScienceCoverPosters(f.input, f.options)
+  assert.equal(f.requests.length, 2); assert.equal(f.calls(), 1)
+  assert.deepEqual(f.composed, ['landscape', 'portrait'])
+})
+
+test('a lost submission acknowledgement is preserved and not replayed on automatic retry', async t => {
+  const f = await fixture(t)
+  let submissions = 0
+  f.images.execute = async () => { submissions++; throw new Error('connection lost after dispatch') }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /connection lost/)
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /已提交但未取得任务编号/)
+  assert.equal(submissions, 1); assert.equal(f.requests.length, 1)
+})
+
+test('a rejected model advances only through the configured list and retains the selected provider job across restart', async t => {
+  const f = await fixture(t), create = f.images.create, execute = f.images.execute
+  f.images.config = async () => ({ id: 7, identity: 'same-config', models: ['unavailable-model', 'supported-model'] })
+  f.images.create = async input => {
+    const id = await create(input)
+    f.states.set(id, { ...f.states.get(id)!, model: input.model })
+    return id
+  }
+  let interrupted = false
+  const attemptedModels: string[] = []
+  f.images.execute = async (id, configId, signal) => {
+    const model = f.requests[id - 1]!.model!
+    attemptedModels.push(model)
+    if (model === 'unavailable-model') {
+      f.states.set(id, { ...f.states.get(id)!, status: 'failed', lastErrorCode: 'bad_request',
+        errorMsg: 'API error 404: {"error":{"type":"model_not_found","message":"Model is not supported by any configured account"}}' })
+      throw new Error('model_not_found')
+    }
+    if (!interrupted) {
+      interrupted = true
+      f.states.set(id, { ...f.states.get(id)!, status: 'failed', taskId: 'accepted-fallback-job',
+        lastErrorCode: 'network_error', errorMsg: 'network timeout' })
+      throw new Error('network timeout')
+    }
+    if (id === 2) assert.equal(f.states.get(id)?.taskId, 'accepted-fallback-job')
+    return execute(id, configId, signal)
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /network timeout/)
+  const checkpoint = JSON.parse(await fs.readFile(path.join(f.input.directory, 'poster-checkpoint.json'), 'utf8'))
+  assert.equal(checkpoint.images.landscape.generationId, 2)
+  assert.equal(checkpoint.images.landscape.model, 'supported-model')
+  assert.deepEqual(checkpoint.images.landscape.rejectedModels, [{ generationId: 1, model: 'unavailable-model' }])
+  await generateScienceCoverPosters(f.input, f.options)
+  assert.deepEqual(f.requests.map(request => request.model), ['unavailable-model', 'supported-model', 'unavailable-model', 'supported-model'])
+  assert.deepEqual(attemptedModels, ['unavailable-model', 'supported-model', 'supported-model', 'unavailable-model', 'supported-model'])
+  assert.equal(f.calls(), 1)
+})
+
+test('an existing rejected-model checkpoint recovers its actual model from the saved generation', async t => {
+  const f = await fixture(t), execute = f.images.execute
+  f.images.execute = async id => {
+    f.states.set(id, { ...f.states.get(id)!, status: 'failed', model: 'unavailable-model',
+      lastErrorCode: 'unsupported_model', errorMsg: 'Unsupported model' })
+    throw new Error('Unsupported model')
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /Unsupported model/)
+  f.images.config = async () => ({ id: 7, identity: 'same-config', models: ['unavailable-model', 'supported-model'] })
+  f.images.execute = execute
+  await generateScienceCoverPosters(f.input, f.options)
+  assert.equal(f.requests[1]!.model, 'supported-model')
+  assert.deepEqual(f.executes, [2, 3])
+})
+
+test('unknown failures and already accepted jobs never switch models', async t => {
+  for (const failure of [
+    { taskId: null, lastErrorCode: 'network_error', errorMsg: 'network timeout' },
+    { taskId: null, lastErrorCode: 'bad_request', errorMsg: 'invalid size' },
+    { taskId: 'accepted-provider-job', lastErrorCode: 'unsupported_model', errorMsg: 'model_not_found' },
+  ]) {
+    const f = await fixture(t)
+    f.images.config = async () => ({ id: 7, identity: 'same-config', models: ['unavailable-model', 'supported-model'] })
+    f.images.execute = async id => {
+      f.states.set(id, { ...f.states.get(id)!, status: 'failed', model: 'unavailable-model', ...failure })
+      throw new Error(failure.errorMsg)
+    }
+    await assert.rejects(generateScienceCoverPosters(f.input, f.options), error => error instanceof Error && error.message === failure.errorMsg)
+    assert.equal(f.requests.length, 1)
+  }
+})
+
+test('model rejection exhausts the configured candidates once without repeating duplicate names', async t => {
+  const f = await fixture(t)
+  const attempts: number[] = []
+  f.images.config = async () => ({ id: 7, identity: 'same-config', models: ['unavailable-model', 'unavailable-model', 'also-unavailable'] })
+  f.images.execute = async id => {
+    attempts.push(id)
+    f.states.set(id, { ...f.states.get(id)!, status: 'failed', model: f.requests[id - 1]!.model,
+      lastErrorCode: 'unsupported_model', errorMsg: 'Unsupported model' })
+    throw new Error('Unsupported model')
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /Unsupported model/)
+  assert.deepEqual(f.requests.map(request => request.model), ['unavailable-model', 'also-unavailable'])
+  assert.deepEqual(attempts, [1, 2])
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /Unsupported model/)
+  assert.equal(f.requests.length, 2)
+  assert.deepEqual(attempts, [1, 2, 2], 'a new invocation retries only the restored final candidate once')
+})
+
+test('a restored rejected final model can recover without redesigning or regenerating the finished format', async t => {
+  const f = await fixture(t), execute = f.images.execute
+  f.images.config = async () => ({ id: 7, identity: 'same-config', models: ['temporarily-unavailable'] })
+  f.images.execute = async (id, configId, signal) => {
+    if (id === 2) {
+      f.states.set(id, { ...f.states.get(id)!, status: 'failed', model: 'temporarily-unavailable',
+        lastErrorCode: 'unsupported_model', errorMsg: 'Unsupported model' })
+      throw new Error('Unsupported model')
+    }
+    return execute(id, configId, signal)
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /Unsupported model/)
+  assert.deepEqual(f.composed, ['landscape'])
+  f.images.execute = async (id, configId, signal) => {
+    assert.equal(id, 2)
+    const checkpoint = JSON.parse(await fs.readFile(path.join(f.input.directory, 'poster-checkpoint.json'), 'utf8'))
+    assert.equal(checkpoint.images.portrait.dispatched, true, 'the recovery dispatch is saved before execution')
+    return execute(id, configId, signal)
+  }
+  await generateScienceCoverPosters(f.input, f.options)
+  assert.equal(f.requests.length, 2)
+  assert.equal(f.calls(), 1)
+  assert.deepEqual(f.executes, [1, 2])
+  assert.deepEqual(f.composed, ['landscape', 'portrait'])
+})
+
+test('a lost acknowledgement while retrying a restored rejection cannot be replayed again', async t => {
+  const f = await fixture(t)
+  f.images.config = async () => ({ id: 7, identity: 'same-config', models: ['temporarily-unavailable'] })
+  f.images.execute = async id => {
+    f.states.set(id, { ...f.states.get(id)!, status: 'failed', model: 'temporarily-unavailable',
+      lastErrorCode: 'unsupported_model', errorMsg: 'Unsupported model' })
+    throw new Error('Unsupported model')
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /Unsupported model/)
+  let submissions = 0
+  f.images.execute = async id => {
+    submissions++
+    f.states.set(id, { ...f.states.get(id)!, status: 'processing', lastErrorCode: null, errorMsg: null })
+    throw new Error('connection lost after dispatch')
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /connection lost/)
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /已提交但未取得任务编号/)
+  assert.equal(submissions, 1)
+  assert.equal(f.requests.length, 1)
+})
+
+test('tool schema violations and ungrounded promises stop before any image submission', async t => {
+  for (const invalid of [{ ...plan, headlineLines: 'wrong type' }, { ...plan, evidenceQuote: '骆驼能够连续一年完全不喝水。' },
+    { ...plan, highlight: '沙漠' }, { ...plan, portraitPrompt: plan.landscapePrompt }]) {
+    const f = await fixture(t)
+    f.options.dependencies!.call = async () => JSON.stringify(invalid)
+    await assert.rejects(generateScienceCoverPosters(f.input, f.options), /工具参数|依据不在|关键词|分别设计/)
+    assert.equal(f.requests.length, 0)
+  }
+})
+
+test('invalid headline lengths, line counts and JSON receive bounded correction before image dispatch', async t => {
+  const invalidResponses = [
+    JSON.stringify({ ...plan, headlineLines: ['一二三四五六七', '一二三四五六七', '一二三四五六七'] }),
+    JSON.stringify({ ...plan, headlineLines: ['骆驼为什么这么耐渴？'] }),
+    JSON.stringify({ ...plan, headlineLines: ['骆驼', '为什么', '这么', '耐渴？'] }),
+    JSON.stringify({ ...plan, headlineLines: ['骆驼为什么', '能一口气喝这么多水？'] }),
+    '{"headlineLines":',
+  ]
+  for (const invalid of invalidResponses) {
+    const f = await fixture(t), call = f.options.dependencies!.call!
+    let attempts = 0
+    f.options.dependencies!.call = async (messages, options) => {
+      attempts++
+      assert.equal(f.requests.length, 0, 'design correction must complete before any image record or request')
+      if (attempts === 1) return invalid
+      assert.equal(messages.at(-2)?.role, 'assistant')
+      assert.equal(messages.at(-2)?.content, invalid)
+      assert.match(messages.at(-1)?.content || '', /未通过校验/)
+      assert.match(messages.at(-1)?.content || '', /18/)
+      assert.equal(options?.tools?.[0]?.function.strict, true)
+      return call(messages, options)
+    }
+    await generateScienceCoverPosters(f.input, f.options)
+    assert.equal(attempts, 2)
+    assert.equal(f.requests.length, 2)
+    assert.equal(f.executes.length, 2)
+    const checkpoint = JSON.parse(await fs.readFile(path.join(f.input.directory, 'poster-checkpoint.json'), 'utf8'))
+    assert.deepEqual(checkpoint.plan, plan)
+    assert.equal(checkpoint.revision, f.input.revision)
+  }
+})
+
+test('design validation and temporary service failures share one finite budget without image submission', async t => {
+  const f = await fixture(t)
+  let attempts = 0
+  const waits: number[] = []
+  f.options.dependencies!.call = async () => {
+    attempts++
+    if (attempts === 2) throw Object.assign(new Error('upstream unavailable'), { status: 503 })
+    return JSON.stringify({ ...plan, headlineLines: ['一二三四五六七', '一二三四五六七', '一二三四五六七'] })
+  }
+  f.options.dependencies!.sleep = async ms => { waits.push(ms) }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /封面标题/)
+  assert.equal(attempts, 3)
+  assert.deepEqual(waits, [4000])
+  assert.equal(f.requests.length, 0)
+  assert.equal(f.executes.length, 0)
+})
+
+test('design correction observes cancellation before making a second text or image request', async t => {
+  const f = await fixture(t), controller = new AbortController(), reason = new Error('stop cover design')
+  let attempts = 0
+  f.options.signal = controller.signal
+  f.options.dependencies!.call = async () => { attempts++; return 'not JSON' }
+  f.options.report = message => { if (/修正/.test(message)) controller.abort(reason) }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), error => error === reason)
+  assert.equal(attempts, 1)
+  assert.equal(f.requests.length, 0)
+})
+
+test('authentication failures are not retried as design corrections', async t => {
+  for (const status of [401, 403]) {
+    const f = await fixture(t)
+    let attempts = 0
+    f.options.dependencies!.call = async () => { attempts++; throw Object.assign(new Error('access denied'), { status }) }
+    await assert.rejects(generateScienceCoverPosters(f.input, f.options), /access denied/)
+    assert.equal(attempts, 1)
+    assert.equal(f.requests.length, 0)
+  }
+})
+
+test('changed content or manual instructions require a new revision directory, retaining the prior poster', async t => {
+  const f = await fixture(t)
+  const result = await generateScienceCoverPosters(f.input, f.options)
+  const original = await fs.readFile(result.landscapePath)
+  for (const patch of [{ instruction: '改成自然沙漠背景' }, { script: `${f.input.script}添加新的结论。` }, { revision: 2 }])
+    await assert.rejects(generateScienceCoverPosters({ ...f.input, ...patch }, f.options), /已绑定其他文稿或指令/)
+  assert.deepEqual(await fs.readFile(result.landscapePath), original)
+  assert.equal(f.requests.length, 2)
+})
+
+test('cancellation after a paid result retains that base and retries without buying another image', async t => {
+  const f = await fixture(t), execute = f.images.execute, controller = new AbortController()
+  f.options.signal = controller.signal
+  f.images.execute = async (...args) => { const file = await execute(...args); controller.abort(); return file }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /abort/i)
+  assert.equal(f.requests.length, 1); assert.equal(f.composed.length, 0)
+  f.images.execute = execute; f.options.signal = signal()
+  await generateScienceCoverPosters(f.input, f.options)
+  assert.deepEqual(f.executes, [1, 2]); assert.equal(f.requests.length, 2)
+})
+
+test('configuration changes and modified generated bases cannot silently replace checkpointed input', async t => {
+  const f = await fixture(t)
+  f.images.execute = async id => {
+    f.states.set(id, { status: 'failed', taskId: 'original-task', localPath: null, errorMsg: 'timeout', lastErrorCode: 'network_error' })
+    throw new Error('timeout')
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /timeout/)
+  f.images.config = async () => ({ id: 7, identity: 'changed-config' })
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /配置已变化/)
+  assert.equal(f.requests.length, 1)
+})
+
+test('temporary tool HTTP errors retry within a finite limit without relaxing the schema', async t => {
+  const f = await fixture(t), call = f.options.dependencies!.call!
+  let attempts = 0
+  const waits: number[] = []
+  f.options.dependencies!.call = async (...args) => {
+    if (++attempts < 3) throw Object.assign(new Error('upstream unavailable'), { status: 502 })
+    return call(...args)
+  }
+  f.options.dependencies!.sleep = async ms => { waits.push(ms) }
+  await generateScienceCoverPosters(f.input, f.options)
+  assert.equal(attempts, 3); assert.deepEqual(waits, [2000, 4000])
+})

@@ -1,0 +1,225 @@
+{
+  "status": 200,
+  "msg": "success",
+  "result": {
+    "data": [
+      {
+        "nid": "4988223",
+        "title": "名帅有能！吉林客胜广厦后，李昂迎来CBA执教生涯首次两连胜",
+        "uptime": "1792849453",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239523",
+        "originLink": "https://bbs.hupu.com/643239523.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988188",
+        "title": "一锤定音！周鹏大空位三分空心入网，广东彻底杀死比赛",
+        "uptime": "1792848719",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239011",
+        "originLink": "https://bbs.hupu.com/643239011.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988180",
+        "title": "拉塞尔出战21分钟，投篮11中6得到16分3篮板4助攻1抢断",
+        "uptime": "1792848753",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643238947",
+        "originLink": "https://bbs.hupu.com/643238947.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988170",
+        "title": "塔克最后一投不中，吉林客场战胜广厦收获两连胜",
+        "uptime": "1792848278",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643238746",
+        "originLink": "https://bbs.hupu.com/643238746.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988344",
+        "title": "山西男篮分享球队训练片段：我们想要的不只是打好一场比赛",
+        "uptime": "1792855419",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643242472",
+        "originLink": "https://bbs.hupu.com/643242472.html",
+        "imgShowPlay": 1
+      },
+      {
+        "nid": "4988324",
+        "title": "福建男篮总结比赛：客场作战的福建男篮没能完成逆转",
+        "uptime": "1792853620",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643241708",
+        "originLink": "https://bbs.hupu.com/643241708.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988307",
+        "title": "吉林男篮总结比赛：取得客场开门红的同时取得两连胜",
+        "uptime": "1792852518",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643241167",
+        "originLink": "https://bbs.hupu.com/643241167.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988303",
+        "title": "赵柏清社媒分享日常：来日本三个月，教练队友都在帮我尽快的适应",
+        "uptime": "1792852380",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643241097",
+        "originLink": "https://bbs.hupu.com/643241097.html",
+        "imgShowPlay": 1
+      },
+      {
+        "nid": "4988301",
+        "title": "广东主帅：徐杰下午身体有点不舒服，他对球队有很多的贡献",
+        "uptime": "1792852218",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643241026",
+        "originLink": "https://bbs.hupu.com/643241026.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988290",
+        "title": "媒体人：徐杰今日因感冒选择休战，广东打法体系逐渐成型",
+        "uptime": "1792851528",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643240679",
+        "originLink": "https://bbs.hupu.com/643240679.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988285",
+        "title": "胡明轩：第四节大家没放弃，最后通过防守&拼抢篮板拿下比赛",
+        "uptime": "1792851425",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643240627",
+        "originLink": "https://bbs.hupu.com/643240627.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988277",
+        "title": "李昂：大家心态更成熟了，过去的比赛我们基本都打到了最后",
+        "uptime": "1792851087",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643240475",
+        "originLink": "https://bbs.hupu.com/643240475.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988271",
+        "title": "黎伊扬出战37分钟，投篮11中6、罚球4中3得到16分5助攻2抢断",
+        "uptime": "1792850794",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643240294",
+        "originLink": "https://bbs.hupu.com/643240294.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988268",
+        "title": "邹阳出战37分钟，投篮10中7得到17分7篮板1助攻2抢断1盖帽",
+        "uptime": "1792850609",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643240206",
+        "originLink": "https://bbs.hupu.com/643240206.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988265",
+        "title": "博特赖特出战29分钟，投篮23中11得到25分6篮板2助攻2盖帽",
+        "uptime": "1792850462",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643240115",
+        "originLink": "https://bbs.hupu.com/643240115.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988264",
+        "title": "卢伟：我们攻防两端还是磨合的不好，这场球赢了很感谢大家",
+        "uptime": "1792850459",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643240112",
+        "originLink": "https://bbs.hupu.com/643240112.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988260",
+        "title": "哈姆雷特出战33分钟，投篮15中7、罚球9中7得到26分5篮板2助",
+        "uptime": "1792850357",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643240060",
+        "originLink": "https://bbs.hupu.com/643240060.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988256",
+        "title": "媒体人：广东现在的第一任务是赢球，能赢就行&丑胜也是胜",
+        "uptime": "1792850204",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239985",
+        "originLink": "https://bbs.hupu.com/643239985.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988253",
+        "title": "王哲林出战22分钟，投篮8中5、罚球4中2得到12分8篮板4失误",
+        "uptime": "1792850196",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239975",
+        "originLink": "https://bbs.hupu.com/643239975.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988251",
+        "title": "广东主帅：赢球固然开心，但这场没有发挥出我们应有的表现",
+        "uptime": "1792850141",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239950",
+        "originLink": "https://bbs.hupu.com/643239950.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988248",
+        "title": "大杀器！古德温出战37分钟，投篮18中13得到30分6篮板11助攻",
+        "uptime": "1792850050",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239908",
+        "originLink": "https://bbs.hupu.com/643239908.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988243",
+        "title": "孙铭徽出战27分钟，投篮9中3得到13分4助攻4失误",
+        "uptime": "1792849939",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239841",
+        "originLink": "https://bbs.hupu.com/643239841.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988242",
+        "title": "胡金秋前三节得到19分、末节没有得分进账",
+        "uptime": "1792849828",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239778",
+        "originLink": "https://bbs.hupu.com/643239778.html",
+        "imgShowPlay": 0
+      },
+      {
+        "nid": "4988240",
+        "title": "媒体人：广东还没找出最高效率的进攻方式，防守还一堆漏洞",
+        "uptime": "1792849764",
+        "type": 5,
+        "link": "kanqiu://bbs/topic/643239741",
+        "originLink": "https://bbs.hupu.com/643239741.html",
+        "imgShowPlay": 0
+      }
+    ]
+  },
+  "time": null
+}

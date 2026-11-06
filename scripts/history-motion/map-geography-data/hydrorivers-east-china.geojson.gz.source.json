@@ -1,0 +1,20 @@
+{
+  "title": "HydroRIVERS v1.0 Asia — eastern-China extract, Strahler order >= 3",
+  "url": "https://data.hydrosheds.org/file/HydroRIVERS/HydroRIVERS_v10_as_shp.zip",
+  "license": "HydroSHEDS license — scientific, educational and commercial use permitted with attribution",
+  "licenseUrl": "https://www.hydrosheds.org/products/hydrorivers",
+  "downloadedAt": "2026-10-28T05:00:45.310198+00:00",
+  "sourceSha256": "29780b0a75f90024f22e7e2029e5e3045f7325cda0528db65c5cc4c864b98525",
+  "sha256": "5a66390cfbf5d533e91e588a892a2f0f7d38aa0a53f3a8f7028d86b2a56f347c",
+  "bounds": [
+    109,
+    30,
+    124,
+    42.5
+  ],
+  "processing": "SHP/DBF extraction; source geometry rounded to six decimal degrees; polygon clipping to regional extent; river records retain native geometry and are clipped at render preparation.",
+  "featureCount": 20152,
+  "historyStatus": "modern geographic context, not reconstructed historical waterways or coastlines",
+  "uncompressedSha256": "95b6db0985df9b184970472274458acf1cdc307e8942068f592eb9fbf79a2170",
+  "compression": "gzip"
+}

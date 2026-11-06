@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "places": [
+    {
+      "name": "瑞金",
+      "aliases": [
+        "瑞金",
+        "瑞金市",
+        "Ruijin"
+      ],
+      "lon": 116.02715,
+      "lat": 25.8832,
+      "locationStatus": "modern-reference",
+      "scope": "Modern populated place in Ganzhou, Jiangxi; not the historical city site or a boundary.",
+      "source": {
+        "kind": "geonames",
+        "title": "GeoNames 10378131: Ruijin (populated place, Jiangxi, China)",
+        "url": "https://www.geonames.org/10378131/ruijin.html",
+        "license": "CC BY 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+        "attribution": "GeoNames, CC BY 4.0",
+        "crs": "EPSG:4326",
+        "coordinateProperty": "schema.org Place.geo in source HTML",
+        "raw": [
+          {
+            "url": "https://www.geonames.org/10378131/ruijin.html",
+            "file": "ruijin-geonames-10378131.html",
+            "sha256": "9944d29d562bab7eaa2907f7d45dce80afb80e216caefaa6cef5d926118c38f5",
+            "downloadedAt": "2026-10-26T09:50:18.821783+00:00"
+          },
+          {
+            "url": "https://www.geonames.org/about.html",
+            "file": "geonames-about.html",
+            "sha256": "6ea6785602f265919cd30d55795a89b1c75b773231b71895ed24303225d853b7",
+            "downloadedAt": "2026-10-26T09:50:18.821988+00:00"
+          },
+          {
+            "url": "https://www.geonames.org/search.html?q=Ruijin&country=CN",
+            "file": "ruijin-geonames-search.html",
+            "sha256": "a22c0e41b460d5c4bf9981cf0dc2c7cf813ce24e65f49c06a5a15100194f3ca6",
+            "downloadedAt": "2026-10-26T09:59:13.553498+00:00"
+          }
+        ]
+      },
+      "selectionReason": "GeoNames search distinguishes the Ruijin populated place (10378131) from the Ruijin administrative district (1797053). Use the populated place as the modern city locator; neither represents a surveyed 1934 site."
+    }
+  ]
+}

@@ -1,9 +1,10 @@
 const BASE = '/api/v1'
 
-async function req<T = any>(method: string, path: string, body?: any, headers?: Record<string, string>): Promise<T> {
+async function req<T = any>(method: string, path: string, body?: any, headers?: Record<string, string>, signal?: AbortSignal): Promise<T> {
   const opts: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json', ...headers },
+    ...(signal ? { signal } : {}),
   }
   if (body) opts.body = JSON.stringify(body)
 
@@ -24,7 +25,10 @@ async function req<T = any>(method: string, path: string, body?: any, headers?: 
     if (!resp.ok || (json?.code && json.code >= 400)) {
       const message = json?.message || raw || `${resp.status}`
       console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold', 'color:#888', message)
-      throw new Error(message)
+      const error = new Error(message) as Error & { status?: number; data?: any }
+      error.status = resp.status
+      error.data = json?.data
+      throw error
     }
 
     console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#66bb6a', 'color:#66bb6a;font-weight:bold', 'color:#888')
@@ -60,10 +64,11 @@ async function reqUpload<T = any>(method: string, path: string, body: FormData):
 }
 
 export const api = {
-  get: <T = any>(p: string) => req<T>('GET', p),
+  get: <T = any>(p: string, signal?: AbortSignal) => req<T>('GET', p, undefined, undefined, signal),
   post: <T = any>(p: string, b?: any, headers?: Record<string, string>) => req<T>('POST', p, b, headers),
   put: <T = any>(p: string, b?: any) => req<T>('PUT', p, b),
-  del: <T = any>(p: string) => req<T>('DELETE', p),
+  patch: <T = any>(p: string, b?: any) => req<T>('PATCH', p, b),
+  del: <T = any>(p: string, b?: any) => req<T>('DELETE', p, b),
   upload: <T = any>(p: string, b: FormData) => reqUpload<T>('POST', p, b),
 }
 
@@ -265,6 +270,25 @@ export const scriptAPI = {
   clean: (content: string, options: any = {}) => api.post('/scripts/clean', { content, ...options }),
 }
 
+export const historyScriptsAPI = {
+  list: (params?: { category?: string; status?: string; q?: string; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams()
+    if (params?.category) query.set('category', params.category)
+    if (params?.status) query.set('status', params.status)
+    if (params?.q) query.set('q', params.q)
+    if (params?.limit) query.set('limit', String(params.limit))
+    if (params?.offset) query.set('offset', String(params.offset))
+    const qs = query.toString()
+    return api.get<{ items: any[]; total: number }>(`/history-scripts${qs ? `?${qs}` : ''}`)
+  },
+  get: (id: number) => api.get<any>(`/history-scripts/${id}`),
+  updateRewrite: (id: number, data: { rewrittenScript: string; expectedUpdatedAt?: string }) =>
+    api.put<any>(`/history-scripts/${id}/rewrite`, data),
+  saveDraft: (id: number, data: { rewrittenScript: string; expectedRevision: string }) =>
+    api.patch<any>(`/history-scripts/${id}`, data),
+  videoUrl: (id: number) => `/api/v1/history-scripts/${id}/video`,
+}
+
 export const skillsAPI = {
   list: () => api.get('/skills'),
   get: (id: string) => api.get(`/skills/${id}`),
@@ -275,7 +299,11 @@ export const skillsAPI = {
 
 export const voicesAPI = {
   list: (provider?: string) => api.get(`/ai-voices${provider ? `?provider=${provider}` : ''}`),
-  preview: (data: { voice_id: string; config_id?: number | null; text?: string }) => api.post('/ai-voices/preview', data),
+  available: (configId: number) => api.get(`/ai-voices/available?config_id=${encodeURIComponent(configId)}`),
+  setDefault: (data: { config_id: number; voice_id: string }) => api.post('/ai-voices/default', data),
+  preview: (data: { voice_id: string; config_id?: number | null; text?: string }, signal?: AbortSignal) =>
+    req<any>('POST', '/ai-voices/preview', data, undefined, signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(65_000)]) : AbortSignal.timeout(65_000)),
   sync: () => api.post('/ai-voices/sync', {}),
   design: (data: { config_id?: number; voice_name?: string; prompt: string; preview_text: string; aigc_watermark?: boolean }) =>
     api.post('/ai-voices/design', data),
@@ -373,6 +401,7 @@ export const dharmaAPI = {
 }
 
 export const remotionAPI = {
+  stylePilots: () => api.get<{ items: any[] }>('/remotion/style-pilots'),
   tree: () => api.get<any[]>('/remotion/projects/tree'),
   list: (params?: { source_episode_id?: number; status?: string }) => {
     const query = new URLSearchParams()
@@ -388,4 +417,59 @@ export const remotionAPI = {
   storyboardProgress: (id: number) => api.get<any>(`/remotion/projects/${id}/narrative-storyboard-progress`),
   renderArtifacts: (id: number) => api.get<{ artifacts: any[] }>(`/remotion/projects/${id}/render-artifacts`),
   del: (id: number) => api.del(`/remotion/projects/${id}`),
+}
+
+type HistoryBrowserSession = {
+  status: 'login_required' | 'waiting_login' | 'session_saved' | 'ready' | 'checking' | 'blocked' | 'error'
+  message: string
+  updatedAt: string | null
+  checkedAt: string | null
+  canCollect: boolean
+  checks: { at: string; stage: string; message: string; outcome?: 'pending' | 'passed' | 'failed' }[]
+}
+
+export const historyScriptAPI = {
+  list: (params?: { q?: string; category?: string; status?: string; video?: 'completed' | 'not_completed' | ''; titlePlan?: 'generated' | 'not_generated' | ''; cover?: 'generated' | 'not_generated' | ''; motion?: 'generated' | 'not_generated' | ''; upload?: 'not_uploaded' | 'partially_uploaded' | 'uploaded' | ''; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams()
+    if (params?.q) query.set('q', params.q)
+    if (params?.category) query.set('category', params.category)
+    if (params?.status) query.set('status', params.status)
+    for (const key of ['video', 'titlePlan', 'cover', 'motion', 'upload'] as const) {
+      if (params?.[key]) query.set(key, params[key])
+    }
+    query.set('limit', String(params?.limit ?? 20))
+    query.set('offset', String(params?.offset ?? 0))
+    return api.get<{ items: any[]; total: number }>(`/history-scripts?${query.toString()}`)
+  },
+  get: (id: number) => api.get<any>(`/history-scripts/${id}`),
+  continuation: (id: number) => api.get<{ task: any | null; complete: boolean }>(`/history-scripts/${id}/continuation`),
+  continueProduction: (id: number, expectedRevision: string) =>
+    api.post<{ task: any | null; message?: string; complete: boolean; created: boolean }>(`/history-scripts/${id}/continue`, { expectedRevision }),
+  del: (id: number, expectedRevision: string) =>
+    api.del<{ id: number }>(`/history-scripts/${id}`, { expectedRevision }),
+  saveRewrite: (id: number, data: { rewrittenScript: string; expectedRevision: string }) =>
+    api.patch<any>(`/history-scripts/${id}`, data),
+  jobs: (params: { limit?: number; beforeId?: number | string } = {}) => {
+    const query = new URLSearchParams({ limit: String(params.limit || 20) })
+    if (params.beforeId) query.set('beforeId', String(params.beforeId))
+    return api.get<{ job: any | null; recent: any[]; total: number; hasMore: boolean; nextCursor: number | null }>(`/history-scripts/jobs?${query}`)
+  },
+  collectionSettings: () => api.get<{ keywords: string[]; youtubeChannels: string[] }>('/history-scripts/collection-settings'),
+  saveCollectionSettings: (data: { keywords?: string[]; youtubeChannels?: string[] }) => api.put<{ keywords: string[]; youtubeChannels: string[] }>('/history-scripts/collection-settings', data),
+  startJob: (data: { targetCount: number | null; categories?: string[]; keywords?: string[]; source?: 'douyin' | 'czgts' | 'youtube'; youtube?: { urls: string[] } | { url: string }; czgts?: { startTime: string; endTime: string } }) =>
+    api.post<{ job: any; created: boolean }>('/history-scripts/jobs', data),
+  getJob: (id: string) => api.get<{ job: any }>(`/history-scripts/jobs/${encodeURIComponent(id)}`),
+  jobEvents: (id: string, params: { limit?: number; beforeId?: number } = {}) => {
+    const query = new URLSearchParams({ limit: String(params.limit || 100) })
+    if (params.beforeId) query.set('beforeId', String(params.beforeId))
+    return api.get<{ items: any[]; total: number; hasMore: boolean; nextCursor: number | null }>(`/history-scripts/jobs/${encodeURIComponent(id)}/events?${query}`)
+  },
+  stopJob: (id: string) => api.post<{ job: any }>(`/history-scripts/jobs/${encodeURIComponent(id)}/stop`, {}),
+  resumeJob: (id: string) => api.post<{ job: any }>(`/history-scripts/jobs/${encodeURIComponent(id)}/resume`, {}),
+  refreshYoutubeSession: (id: string) => api.post<{ message: string }>(`/history-scripts/jobs/${encodeURIComponent(id)}/youtube-session`, {}),
+  browserSession: () => api.get<{ session: HistoryBrowserSession }>('/history-scripts/browser-session'),
+  openBrowserLogin: () => api.post<{ session: HistoryBrowserSession }>('/history-scripts/browser-session/open', {}),
+  checkBrowserLogin: () => api.post<{ session: HistoryBrowserSession }>('/history-scripts/browser-session/check', {}),
+  exportUrl: (id: number) => `/api/v1/history-scripts/${id}/export`,
+  videoUrl: (id: number) => `/api/v1/history-scripts/${id}/video`,
 }

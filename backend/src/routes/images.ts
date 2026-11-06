@@ -138,6 +138,12 @@ const app = new Hono()
 app.post('/', async (c) => {
   const body = await c.req.json()
   if (!body.prompt) return badRequest(c, 'prompt is required')
+  if (body.allow_synchronous_image != null && typeof body.allow_synchronous_image !== 'boolean') {
+    return badRequest(c, 'allow_synchronous_image must be a boolean')
+  }
+  if (body.single_image_submission != null && typeof body.single_image_submission !== 'boolean') {
+    return badRequest(c, 'single_image_submission must be a boolean')
+  }
 
   try {
     let configId: number | undefined = body.config_id
@@ -215,6 +221,7 @@ app.post('/', async (c) => {
       scopeType: body.storyboard_id ? 'storyboard' : body.character_id ? 'character' : body.scene_id ? 'scene' : null,
       scopeId: body.storyboard_id ? Number(body.storyboard_id) : body.character_id ? Number(body.character_id) : body.scene_id ? Number(body.scene_id) : null,
       priority: body.character_id ? 10 : body.scene_id ? 5 : 0,
+      ...(body.single_image_submission === true ? { maxAttempts: 1 } : {}),
       idempotencyKey: `image.generate:${body.storyboard_id ? 'storyboard' : body.character_id ? 'character' : body.scene_id ? 'scene' : 'global'}:${body.storyboard_id || body.character_id || body.scene_id || body.drama_id || 'new'}:${body.frame_type || 'default'}`,
     }
 
@@ -268,6 +275,8 @@ app.post('/', async (c) => {
           image_generation_id: insertedGenerationId,
           config_id: configId,
           frame_type: body.frame_type,
+          allow_synchronous_image: body.allow_synchronous_image === true,
+          single_image_submission: body.single_image_submission === true,
         },
       })
       const authoritativeGenerationId = imageGenerationIdFromTask(taskResult.task)
@@ -295,6 +304,8 @@ app.post('/', async (c) => {
     return badRequest(c, err.message)
   }
 })
+
+app.get('/capabilities', (c) => success(c, { single_image_submission: true }))
 
 // GET /images/:id
 app.get('/:id', async (c) => {

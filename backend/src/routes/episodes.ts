@@ -30,6 +30,7 @@ import {
   dharmaPublishingPackageFingerprint,
   normalizeDharmaPublishingPackage,
 } from '../services/dharma-publishing-package.js'
+import { historyEpisodePublicationUrl } from '../services/episode-publication-entry.js'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 
@@ -1079,6 +1080,17 @@ app.get('/:id/publish-records', async (c) => {
     .orderBy(schema.episodePublishRecords.updatedAt)
     .all()
   return success(c, toSnakeCaseArray(rows))
+})
+
+app.use('/:id/publish/*', async (c, next) => {
+  if (c.req.method !== 'POST') return next()
+  const episode = db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(c.req.param('id')))).get()
+  if (!episode) return next()
+  const drama = db.select({ metadata: schema.dramas.metadata }).from(schema.dramas)
+    .where(eq(schema.dramas.id, episode.dramaId)).get()
+  const publicationUrl = historyEpisodePublicationUrl(episode.metadata, drama?.metadata)
+  if (publicationUrl) return c.json({ code: 409, message: '历史视频请在统一发表工作台继续原任务', data: { publicationUrl } }, 409)
+  await next()
 })
 
 // POST /episodes/:id/publish/douyin — 提交到抖音创作者平台

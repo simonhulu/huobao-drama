@@ -1,0 +1,19 @@
+{
+  "url": "https://api.github.com/repos/nvkelso/natural-earth-vector/git/blobs/61a0d7137a6ff1113cc259525e7479c63d5fec86",
+  "downloadedAt": "2026-10-23T22:52:36.539Z",
+  "sha256": "7c07c283e34bfe9606165c0353771d58c63052b675f51fa8268c9ff343c43156",
+  "bytes": 7307743,
+  "etag": "W/\"f5b6d05eeb571e99e0277362bfe23648fe599fa8abfcdd70f377742e1219866e\"",
+  "imagerySources": null,
+  "title": "Natural Earth 1:10m named river reference, eastern-China subset",
+  "sourceSha256": "bb854a900ecbd3b408df46d5e16e3e0f974ba55993f9d8b5c26e855273c0905a",
+  "license": "Public Domain",
+  "licenseUrl": "https://www.naturalearthdata.com/about/terms-of-use/",
+  "bounds": [
+    109,
+    30,
+    124,
+    42.5
+  ],
+  "processing": "Select intersecting source river records; names/coordinates retained without fabricated river paths"
+}

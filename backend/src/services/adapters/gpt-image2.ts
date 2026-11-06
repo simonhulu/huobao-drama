@@ -8,6 +8,7 @@ import type {
   AIConfig,
   ImageGenerationRecord,
   ImageGenResponse,
+  ImageGenerateResponseOptions,
   ImagePollResponse,
 } from './types.js'
 import { joinProviderUrl } from './url.js'
@@ -46,15 +47,17 @@ export class GptImage2Adapter implements ImageProviderAdapter {
     }
   }
 
-  parseGenerateResponse(result: any): ImageGenResponse {
+  parseGenerateResponse(result: any, options: ImageGenerateResponseOptions = {}): ImageGenResponse {
+    const imageUrl = extractImageUrl(result)
+    const imageBase64 = extractImageBase64(result)
+    if (options.allowSynchronousImage === true && (imageUrl || imageBase64)) {
+      return imageUrl ? { isAsync: false, imageUrl } : { isAsync: false }
+    }
     const taskId = result?.id || result?.task_id || result?.data?.id
     if (taskId) return { isAsync: true, taskId: String(taskId) }
 
-    // This adapter deliberately has no synchronous fallback. A direct image
-    // response proves the provider did not honor the required `async: true`
-    // contract; accepting it would make a long-running workflow block in the
-    // request path and bypass its persisted provider-task recovery.
-    if (extractImageUrl(result) || extractImageBase64(result)) {
+    // Keep the async contract unless this specific task opts into compatibility.
+    if (imageUrl || imageBase64) {
       throw new Error('GPT Image 2 provider returned a synchronous image response; async task id is required')
     }
 

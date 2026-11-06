@@ -15,7 +15,7 @@ export interface ImageProviderAdapter {
   /**
    * 解析生成响应，判断是同步还是异步
    */
-  parseGenerateResponse(result: any): ImageGenResponse
+  parseGenerateResponse(result: any, options?: ImageGenerateResponseOptions): ImageGenResponse
 
   /**
    * 构建轮询请求
@@ -108,6 +108,11 @@ export interface ImageGenResponse {
   imageUrl?: string
 }
 
+export interface ImageGenerateResponseOptions {
+  /** Explicit per-task compatibility for providers that return a finished image. */
+  allowSynchronousImage?: boolean
+}
+
 export interface ImagePollResponse {
   status: 'pending' | 'processing' | 'completed' | 'failed'
   imageUrl?: string
@@ -176,7 +181,7 @@ export interface TTSProviderAdapter {
 
   buildGenerateRequest(config: AIConfig, params: any): ProviderRequest
 
-  parseResponse(result: any, config: AIConfig): Promise<{
+  parseResponse(result: any, config: AIConfig, options?: { signal?: AbortSignal }): Promise<{
     audioHex: string
     audioLength: number
     sampleRate: number

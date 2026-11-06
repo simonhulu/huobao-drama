@@ -9,7 +9,11 @@ import { and, eq, notInArray } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
-import { generateTTS } from '../services/tts-generation.js'
+import { generateVoicePreview } from '../services/voice-preview.js'
+import { getAudioConfigById, getNarrationAudioConfig } from '../services/ai.js'
+import { DEFAULT_NARRATION_VOICE_ID } from '../services/narration-defaults.js'
+import { QWEN_TTS_DEFAULT_VOICE, QWEN_TTS_MODEL, QWEN_TTS_PROVIDER } from '../services/adapters/qwen-tts.js'
+import { listQwenVoices } from '../services/qwen-tts-voices.js'
 
 type MiniMaxVoiceType = 'system' | 'voice_generation' | 'voice_cloning'
 
@@ -48,6 +52,64 @@ app.get('/', async (c) => {
   return success(c, parsed)
 })
 
+// Query the selected account directly. Local saved voices can belong to a
+// different account or be expired, and the legacy sync filters system voices.
+app.get('/available', async (c) => {
+  const configId = Number(c.req.query('config_id'))
+  if (!Number.isSafeInteger(configId) || configId <= 0) return badRequest(c, '请选择音频配置')
+  const config = findVoiceConfig(configId)
+  if (!config) return badRequest(c, '音频配置不存在、未启用或不支持云端音色查询')
+  try {
+    const { voices, counts } = await fetchAvailableVoices(config)
+    const narration = getNarrationAudioConfig()
+    const configuredVoice = narration?.settings?.narrationVoiceId
+    const defaultVoice = config.provider?.toLowerCase() === QWEN_TTS_PROVIDER
+      ? voices.some(voice => voice.voice_id === configuredVoice) ? configuredVoice : QWEN_TTS_DEFAULT_VOICE
+      : configuredVoice || DEFAULT_NARRATION_VOICE_ID
+    return success(c, {
+      voices, counts, config_id: config.id, fetched_at: now(),
+      default_restart_required: process.env.VOICE_DEFAULT_RESTART_REQUIRED === '1',
+      default_voice_id: narration?.id === config.id ? defaultVoice : null,
+    })
+  } catch (error) {
+    return badRequest(c, safeVoiceError(error, config.apiKey))
+  }
+})
+
+// This changes future narration only; existing masters and episodes stay put.
+app.post('/default', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>
+  const configId = Number(body.config_id), voiceId = String(body.voice_id || '').trim()
+  if (!Number.isSafeInteger(configId) || configId <= 0 || !voiceId) return badRequest(c, '请选择音频配置和音色')
+  const config = findVoiceConfig(configId)
+  if (!config) return badRequest(c, '音频配置不存在、未启用或不支持云端音色查询')
+  try {
+    const { voices } = await fetchAvailableVoices(config)
+    if (!voices.some(voice => voice.voice_id === voiceId)) return badRequest(c, '该音色不在当前账号可用列表中，请刷新后重试')
+    db.transaction(tx => {
+      // Read fresh settings after the network call so unrelated edits survive.
+      const rows = tx.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.serviceType, 'audio')).all()
+      const current = rows.find(row => row.id === config.id)
+      if (!current?.isActive || current.apiKey !== config.apiKey || current.baseUrl !== config.baseUrl
+        || current.provider?.toLowerCase() !== config.provider?.toLowerCase()
+        || current.model !== config.model) throw Error('音频配置已变化，请刷新音色库后重试')
+      for (const row of rows) {
+        const settings = row.settings ? JSON.parse(row.settings) : {}
+        if (row.id !== config.id && !settings.useForNarration) continue
+        tx.update(schema.aiServiceConfigs).set({
+          settings: JSON.stringify({ ...settings, useForNarration: row.id === config.id,
+            ...(row.id === config.id ? { narrationVoiceId: voiceId } : {}) }),
+          updatedAt: now(),
+        }).where(eq(schema.aiServiceConfigs.id, row.id)).run()
+      }
+    }, { behavior: 'immediate' })
+    return success(c, { voice_id: voiceId, config_id: config.id,
+      default_restart_required: process.env.VOICE_DEFAULT_RESTART_REQUIRED === '1' })
+  } catch (error) {
+    return badRequest(c, safeVoiceError(error, config.apiKey))
+  }
+})
+
 // POST /ai-voices/preview - 生成一段短试听音频
 app.post('/preview', async (c) => {
   const body = await c.req.json().catch(() => ({})) as Record<string, unknown>
@@ -56,16 +118,24 @@ app.post('/preview', async (c) => {
 
   const text = String(body.text || '这是一段音色试听。声音清晰，节奏自然，适合历史故事与人物讲述。').trim().slice(0, 200)
   if (!text) return badRequest(c, 'text is required')
+  const configId = body.config_id == null ? undefined : Number(body.config_id)
+  if (configId !== undefined && (!Number.isSafeInteger(configId) || configId <= 0
+      || !db.select().from(schema.aiServiceConfigs).where(and(eq(schema.aiServiceConfigs.id, configId),
+        eq(schema.aiServiceConfigs.serviceType, 'audio'), eq(schema.aiServiceConfigs.isActive, true))).get())) {
+    return badRequest(c, '所选音频配置不存在或未启用，请重新选择音频配置')
+  }
 
+  let apiKey = ''
   try {
-    const result = await generateTTS({
+    apiKey = getAudioConfigById(configId).apiKey
+    const result = await generateVoicePreview({
       text,
       voice: voiceId,
-      configId: body.config_id == null ? undefined : Number(body.config_id),
+      configId,
     })
     return success(c, { audio_url: result, voice_id: voiceId })
-  } catch (error: any) {
-    return badRequest(c, error?.message || '音色试听生成失败')
+  } catch (error) {
+    return badRequest(c, safeVoiceError(error, apiKey) || '音色试听生成失败')
   }
 })
 
@@ -265,6 +335,75 @@ function findMiniMaxConfig(configId?: number): typeof schema.aiServiceConfigs.$i
   return rows
     .filter(row => row.isActive)
     .sort((a, b) => (b.priority || 0) - (a.priority || 0))[0] || null
+}
+
+function findVoiceConfig(configId: number) {
+  const row = db.select().from(schema.aiServiceConfigs).where(and(
+    eq(schema.aiServiceConfigs.id, configId), eq(schema.aiServiceConfigs.serviceType, 'audio'),
+    eq(schema.aiServiceConfigs.isActive, true),
+  )).get()
+  return row && ['minimax', QWEN_TTS_PROVIDER].includes(row.provider?.toLowerCase() || '') ? row : null
+}
+
+function safeVoiceError(error: unknown, apiKey: string) {
+  const message = error instanceof Error ? error.message : String(error)
+  return apiKey ? message.split(apiKey).join('***') : message
+}
+
+async function fetchAvailableVoices(config: typeof schema.aiServiceConfigs.$inferSelect) {
+  if (config.provider?.toLowerCase() === QWEN_TTS_PROVIDER) return fetchAvailableQwenVoices(config)
+  if (!config.apiKey) throw Error('MiniMax API key 未配置')
+  // Keep custom gateways intact; these two hosts are official aliases.
+  const base = /^https:\/\/api\.(?:minimaxi\.com|minimax\.cn)\/?$/.test(config.baseUrl)
+    ? 'https://api.minimax.cn' : config.baseUrl
+  const response = await fetch(joinProviderUrl(base, '/v1', '/get_voice'), {
+    method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ voice_type: 'all' }), signal: AbortSignal.timeout(60_000),
+  })
+  const result = await response.json().catch(() => ({})) as any
+  if (!response.ok || result.base_resp?.status_code !== 0) {
+    throw Error(`MiniMax 音色查询失败（${result.base_resp?.status_code ?? response.status}）：${result.base_resp?.status_msg || '请稍后重试'}`)
+  }
+  const saved = db.select().from(schema.aiVoices).where(eq(schema.aiVoices.provider, 'minimax')).all()
+  const local = new Map(saved.map(row => [row.voiceId, row]))
+  const counts: Record<MiniMaxVoiceType, number> = { system: 0, voice_generation: 0, voice_cloning: 0 }
+  const seen = new Set<string>()
+  const voices = (['system', 'voice_generation', 'voice_cloning'] as const).flatMap(type =>
+    asArray(result[type === 'system' ? 'system_voice' : type]).flatMap((voice: any) => {
+      const id = String(voice?.voice_id || '').trim()
+      if (!id || seen.has(id)) return []
+      seen.add(id); counts[type]++
+      const previous = local.get(id)
+      const name = String(voice.voice_name || previous?.voiceName || id)
+      const description = parseDescription(voice.description)
+      const language = extractLanguage(id, name)
+      return [{ voice_id: id, voice_name: name,
+        description: description.length ? description : parseDescription(previous?.description),
+        language: language === '其他' && (/^(male-qn-|female-)/.test(id) || previous?.language === '中文'
+          || description.some(text => /普通话|中文|北方口音|南方口音/.test(text))) ? '中文' : language,
+        provider: 'minimax', voice_type: type,
+      }]
+    }))
+  return { voices, counts }
+}
+
+async function fetchAvailableQwenVoices(config: typeof schema.aiServiceConfigs.$inferSelect) {
+  const models = JSON.parse(config.model || '[]')
+  const custom = await listQwenVoices({ provider: QWEN_TTS_PROVIDER, baseUrl: config.baseUrl,
+    apiKey: config.apiKey, model: (Array.isArray(models) ? models[0] : models) || QWEN_TTS_MODEL })
+  const saved = db.select().from(schema.aiVoices).where(eq(schema.aiVoices.provider, QWEN_TTS_PROVIDER)).all()
+  const local = new Map(saved.map(row => [row.voiceId, row]))
+  const voices = [{ voice_id: QWEN_TTS_DEFAULT_VOICE, voice_name: QWEN_TTS_DEFAULT_VOICE,
+    description: [] as string[], language: '中文', provider: QWEN_TTS_PROVIDER, voice_type: 'system' as MiniMaxVoiceType },
+  ...custom.map(voice => {
+    const previous = local.get(voice.voice_id)
+    return { voice_id: voice.voice_id, voice_name: previous?.voiceName || `复刻音色 ${voice.voice_id.slice(-8)}`,
+      description: parseDescription(previous?.description), language: previous?.language || '中文', provider: QWEN_TTS_PROVIDER,
+      voice_type: previous?.voiceType === 'voice_generation' ? 'voice_generation' as const : 'voice_cloning' as const }
+  })]
+  const counts: Record<MiniMaxVoiceType, number> = { system: 1, voice_generation: 0, voice_cloning: 0 }
+  for (const voice of voices.slice(1)) counts[voice.voice_type]++
+  return { voices, counts }
 }
 
 function parseDescription(value: unknown): string[] {

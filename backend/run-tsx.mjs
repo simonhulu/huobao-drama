@@ -4,23 +4,21 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
-const envFile = ['.env.local', '.env']
+const envArgs = ['.env', '.env.local']
   .map((name) => path.join(root, name))
-  .find((file) => existsSync(file))
+  .filter((file) => existsSync(file))
+  .map((file) => `--env-file=${file}`)
 
-const tsxBin = process.platform === 'win32'
-  ? path.join(root, 'node_modules', '.bin', 'tsx.cmd')
-  : path.join(root, 'node_modules', '.bin', 'tsx')
+// Do not execute the package's `#!/usr/bin/env node` shim: PATH may resolve a
+// different Node installation than the one that launched this script.
+const tsxCli = path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 
 const userArgs = process.argv.slice(2)
-const args = envFile && userArgs[0] === 'watch'
-  ? ['watch', `--env-file=${envFile}`, ...userArgs.slice(1)]
-  : [
-      ...(envFile ? [`--env-file=${envFile}`] : []),
-      ...userArgs,
-    ]
+const args = userArgs[0] === 'watch'
+  ? ['watch', ...envArgs, ...userArgs.slice(1)]
+  : [...envArgs, ...userArgs]
 
-const child = spawn(tsxBin, args, {
+const child = spawn(process.execPath, [tsxCli, ...args], {
   cwd: root,
   env: process.env,
   stdio: 'inherit',

@@ -22,6 +22,7 @@ export interface TTSParams {
   emotion?: string
   subtitleEnable?: boolean
   subtitleType?: 'sentence' | 'word' | 'word_streaming'
+  synchronous?: boolean
 }
 
 export interface TTSResult {
@@ -49,7 +50,7 @@ export class MiniMaxTTSAdapter implements TTSProviderAdapter {
   readonly provider = 'minimax'
 
   buildGenerateRequest(config: AIConfig, params: TTSParams): ProviderRequest {
-    const url = joinProviderUrl(config.baseUrl, '/v1', '/t2a_async_v2')
+    const url = joinProviderUrl(config.baseUrl, '/v1', params.synchronous ? '/t2a_v2' : '/t2a_async_v2')
 
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${config.apiKey}`,
@@ -73,6 +74,7 @@ export class MiniMaxTTSAdapter implements TTSProviderAdapter {
         channel: 1,
       },
       subtitle_enable: params.subtitleEnable ?? false,
+      ...(params.synchronous ? { stream: false, output_format: 'hex' } : {}),
     }
 
     // MiniMax can infer emotion from the text. Forcing "happy" here makes
@@ -90,7 +92,18 @@ export class MiniMaxTTSAdapter implements TTSProviderAdapter {
 
   async parseResponse(result: any, config: AIConfig): Promise<TTSResult> {
     if (result.base_resp?.status_code !== 0) {
-      throw new Error(result.base_resp?.status_msg || 'TTS async creation failed')
+      throw new Error(`MiniMax ${result.base_resp?.status_code ?? 'error'}: ${result.base_resp?.status_msg || 'TTS generation failed'}`)
+    }
+
+    if (result.data) {
+      const audio = result.data.audio
+      if (typeof audio !== 'string' || !audio.length || audio.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(audio)) {
+        throw new Error('MiniMax 未返回有效的试听音频')
+      }
+      const extra = result.extra_info || {}
+      return { audioHex: audio, audioLength: Number(extra.audio_length) || 0,
+        sampleRate: Number(extra.audio_sample_rate) || 32000, bitrate: Number(extra.bitrate) || 128000,
+        format: extra.audio_format || 'mp3', channel: Number(extra.audio_channel) || 1, extra }
     }
 
     const taskId = result.task_id

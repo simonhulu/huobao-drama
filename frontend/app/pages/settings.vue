@@ -1,5 +1,5 @@
 <template>
-  <div class="settings-layout">
+  <div class="settings-layout" :class="{ 'storage-settings': tab === 'storage' }">
     <aside class="settings-nav">
       <div class="nav-group">
         <div class="nav-group-label">基础</div>
@@ -126,6 +126,8 @@
         </div>
 
       </div>
+
+      <StorageManagement v-else-if="tab === 'storage'" />
 
       <!-- ===== Agent 配置 ===== -->
       <div v-else-if="tab === 'agents'" class="settings-scroll">
@@ -567,18 +569,20 @@
 </template>
 
 <script setup>
-import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, RefreshCw, Upload, Clapperboard } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, RefreshCw, Upload, Clapperboard, HardDrive } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
+import StorageManagement from '~/components/StorageManagement.vue'
 import { toast } from 'vue-sonner'
 import { aiConfigAPI, agentConfigAPI, skillsAPI, voicesAPI, introTemplateAPI } from '~/composables/useApi'
 import brandLogo from '~/assets/huobao-logo.png'
 
 const showBrandImage = ref(true)
-const tab = ref('ai')
+const tab = ref(useRoute().query.tab === 'storage' ? 'storage' : 'ai')
 const showAdvanced = ref(false)
 const baseTabs = [
   { id: 'ai', label: 'AI 服务', icon: Cpu },
   { id: 'intro', label: '开场模板', icon: Clapperboard },
+  { id: 'storage', label: '磁盘管理', icon: HardDrive },
 ]
 const advancedTabs = [
   { id: 'agents', label: 'Agent 配置', icon: Bot },
@@ -709,8 +713,8 @@ function detectPresetFromSettings(settings) {
   return 'custom'
 }
 const serviceTypes = [{ type: 'text', label: '文本' }, { type: 'image', label: '图片' }, { type: 'video', label: '视频' }, { type: 'audio', label: '音频' }]
-const providers = ['ali', 'apimart', 'chatfire', 'egaki-chatgpt', 'gemini', 'gpt-image2', 'minimax', 'openai', 'openrouter', 'pcore', 'qwen3-tts', 'rightcode', 'siliconflow', 'vidu', 'volcengine']
-const providerSelectOptions = computed(() => providers.map(p => ({ label: p, value: p })))
+const providers = ['ali', 'apimart', 'chatfire', 'egaki-chatgpt', 'gemini', 'gpt-image2', 'minimax', 'openai', 'openrouter', 'pcore', 'qwen-tts', 'qwen3-tts', 'rightcode', 'siliconflow', 'vidu', 'volcengine']
+const providerSelectOptions = computed(() => providers.map(p => ({ label: p === 'qwen-tts' ? '阿里云百炼 Qwen（云端）' : p === 'qwen3-tts' ? 'Qwen3-TTS（本地）' : p, value: p })))
 const serviceMeta = {
   text: { label: '文本', desc: '剧本改写、角色场景提取、分镜拆解等 Agent 文本能力' },
   image: { label: '图片', desc: '角色图、场景图、镜头图与首尾帧等静态图像生成' },
@@ -740,6 +744,7 @@ const providerPresets = {
   },
   audio: {
     minimax: { label: '火宝音频', baseUrl: 'https://api.chatfire.site/minimax', models: ['speech-2.8-hd'] },
+    'qwen-tts': { label: '阿里云百炼 Qwen（云端）', baseUrl: 'https://dashscope.aliyuncs.com/api/v1', models: ['qwen-audio-3.1-tts-flash'] },
     'qwen3-tts': { label: 'Qwen3-TTS 本地（免费）', baseUrl: 'http://127.0.0.1:5987', models: ['VoiceDesign-1.7B-8bit'] },
     siliconflow: { label: 'SiliconFlow 解说音频', baseUrl: 'https://api.siliconflow.com', models: ['FunAudioLLM/CosyVoice2-0.5B'] },
   },
@@ -760,6 +765,7 @@ const endpointPrefixes = {
   openai: '/v1',
   openrouter: '/v1',
   minimax: '/v1',
+  'qwen-tts': '',
   gemini: '/v1beta',
   volcengine: '/api/v3',
   ali: '/api/v1',

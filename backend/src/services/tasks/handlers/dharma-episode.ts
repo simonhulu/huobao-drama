@@ -36,6 +36,8 @@ import {
   getDharmaCanaryRenderAdmission,
   getDharmaFormalRenderAdmission,
 } from '../../dharma-production-admission.js'
+import { assertMediaDiskSpace } from '../../storage-space.js'
+import { restoreTaskArchivedMedia } from '../../storage-archive.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '../../../../..')
@@ -598,6 +600,7 @@ async function runRemotionRender(
   ctx: TaskContext<any>,
 ): Promise<RemotionRenderResult> {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+  await assertMediaDiskSpace(path.dirname(outputPath), 512 * 1024 ** 2)
   throwIfAborted(ctx.signal)
   const browserExecutable = resolveDharmaBrowserExecutable()
   const args = [
@@ -845,6 +848,11 @@ export function createDharmaEpisodeRenderHandler(): TaskHandler<DharmaEpisodeRen
       let stagingDir: string | null = null
       try {
         const preflight = await runTimedStage(ctx, 'preflight', async () => {
+          throwIfAborted(ctx.signal)
+          await restoreTaskArchivedMedia('episode', String(episodeId), repoRoot)
+          const projects = db.select({ id: schema.remotionProjects.id }).from(schema.remotionProjects)
+            .where(and(eq(schema.remotionProjects.sourceEpisodeId, episodeId), isNull(schema.remotionProjects.deletedAt))).all()
+          for (const project of projects) await restoreTaskArchivedMedia('remotion', String(project.id), repoRoot)
           throwIfAborted(ctx.signal)
           const compiledPlan = await compileDharmaProductionPlan(episodeId, {
             signal: ctx.signal,

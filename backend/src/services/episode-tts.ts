@@ -22,7 +22,9 @@ import {
   resolveQwen3TTSRequestTimeoutMs,
 } from './adapters/qwen3-tts.js'
 import type { AIConfig } from './adapters/types.js'
-import { resolveQwen3Instruct, resolveDefaultNarrationVoiceId } from './qwen3-voice.js'
+import { resolveQwen3Instruct, resolveDefaultNarrationVoiceId, resolveNarrationVoiceForConfig } from './qwen3-voice.js'
+import { isQwenTTSProvider } from './adapters/qwen-tts.js'
+import { synthesizeQwenTTS } from './qwen-tts-generation.js'
 import {
   resolveStoryboardNarrationTextForTTS,
   getVerbatimSource,
@@ -71,7 +73,11 @@ export interface EpisodePreTTSResult {
 async function requestEpisodeLongTTS(
   config: AIConfig,
   params: TTSParams,
-): Promise<{ audioBuffer: Buffer; titles: any[]; extra: Record<string, any> }> {
+): Promise<{ audioBuffer: Buffer; titles: any[]; extra: Record<string, any>; format?: string }> {
+  if (isQwenTTSProvider(config.provider)) {
+    const parsed = await synthesizeQwenTTS(config, { ...params, voice: resolveNarrationVoiceForConfig(config, params.voice) })
+    return { audioBuffer: Buffer.from(parsed.audioHex, 'hex'), titles: parsed.titles, extra: parsed.extra, format: parsed.format }
+  }
   if (isQwen3TTSProvider(config.provider)) {
     await ensureQwen3TTSServer(config)
     const adapter = new Qwen3TTSAdapter()
@@ -144,7 +150,7 @@ export async function generateEpisodePreTTS(episodeId: number): Promise<EpisodeP
     subtitleType: 'sentence',
   }
 
-  const { audioBuffer, titles, extra } = await requestEpisodeLongTTS(config, params)
+  const { audioBuffer, titles, extra, format = 'mp3' } = await requestEpisodeLongTTS(config, params)
   logTaskProgress('EpisodeTTS', 'pre-tts-retrieved', {
     episodeId,
     audioBytes: audioBuffer.length,
@@ -154,7 +160,7 @@ export async function generateEpisodePreTTS(episodeId: number): Promise<EpisodeP
 
   const audioDir = path.join(STORAGE_ROOT, 'audio')
   fs.mkdirSync(audioDir, { recursive: true })
-  const filename = `${uuid()}_pre_episode${episodeId}.mp3`
+  const filename = `${uuid()}_pre_episode${episodeId}.${format}`
   const absPath = path.join(audioDir, filename)
   fs.writeFileSync(absPath, audioBuffer)
   const audioUrl = `static/audio/${filename}`
@@ -943,7 +949,7 @@ export async function generateEpisodeUnifiedTTS(
     subtitleType: 'word',
   }
 
-  const { audioBuffer, titles, extra } = await requestEpisodeLongTTS(config, adapterParams)
+  const { audioBuffer, titles, extra, format = 'mp3' } = await requestEpisodeLongTTS(config, adapterParams)
   logTaskProgress('EpisodeTTS', 'unified-tts-retrieved', {
     episodeId,
     audioBytes: audioBuffer.length,
@@ -954,7 +960,7 @@ export async function generateEpisodeUnifiedTTS(
   // 保存整段音频（调试用，也可用于后续直接使用）
   const audioDir = path.join(STORAGE_ROOT, 'audio')
   fs.mkdirSync(audioDir, { recursive: true })
-  const fullAudioFilename = `${uuid()}_episode${episodeId}.mp3`
+  const fullAudioFilename = `${uuid()}_episode${episodeId}.${format}`
   const fullAudioPathAbs = path.join(audioDir, fullAudioFilename)
   fs.writeFileSync(fullAudioPathAbs, audioBuffer)
   const fullAudioPath = `static/audio/${fullAudioFilename}`

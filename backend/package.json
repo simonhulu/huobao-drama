@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "node run-tsx.mjs watch src/index.ts",
     "start": "node run-tsx.mjs src/index.ts",
+    "start:mystery": "node run-tsx.mjs src/mystery-server.ts",
+    "start:science": "node run-tsx.mjs src/science-server.ts",
+    "start:nba": "node run-tsx.mjs src/nba-server.ts",
     "build": "tsc",
     "test": "TASK_WORKER_DISABLED=1 tsx --test \"src/**/*.test.ts\"",
     "db:generate": "drizzle-kit generate",
@@ -16,6 +19,9 @@
   "author": "",
   "license": "ISC",
   "type": "module",
+  "engines": {
+    "node": ">=25.6.1"
+  },
   "dependencies": {
     "@ai-sdk/google": "^3.0.53",
     "@ai-sdk/openai": "^4.0.7",
