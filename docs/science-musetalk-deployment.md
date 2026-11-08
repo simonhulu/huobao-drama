@@ -2,8 +2,9 @@
 
 ## 部署位置
 
-正式科普程序运行在 macOS 主机 `192.168.0.107`，使用 `root` 账户通过 SSH 登录维护：
-`ssh root@192.168.0.107`。不要使用本机用户名代替远端登录账户。
+正式科普程序运行在 macOS 主机 `192.168.0.107`，使用 `mac` 账户通过 SSH 登录维护：
+`ssh mac@192.168.0.107`。项目目录为 `/Volumes/wd3/huobao-drama`，
+`/Users/mac/huobao-drama` 是该目录的软链接。
 RTX 3090 运行 MuseTalk 和原有写作服务，是另一台 GPU 主机。
 本工作区的样片和检查不能替代另一台电脑上的更新、重启与验证。
 运行科普程序的电脑无需安装 PyTorch、MuseTalk 或 CUDA。
