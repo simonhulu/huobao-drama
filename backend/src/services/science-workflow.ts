@@ -101,9 +101,10 @@ export interface ScienceWorkflowOptions {
   prepareAssets?: typeof mediaTools.prepareScienceUploadAssets
   prepareVideo?: typeof import('./science-video-intro.js').prepareScienceVideoWithIntro
   prepareIntroVideo?: typeof import('./science-video-intro.js').prepareScienceVideoWithIntroOnly
-  presenterMode?: 'none' | 'sync'
+  presenterMode?: 'none' | 'sync' | 'musetalk'
   prepareIntroPreview?: typeof import('./science-video-intro.js').prepareScienceVideoIntroPreview
   preparePresenter?: typeof import('./science-presenter-video.js').prepareSciencePresenterVideo
+  prepareMusetalkPresenter?: typeof import('./science-musetalk-video.js').prepareScienceMusetalkVideo
   reviseUploadCovers?: typeof import('./social-auto-upload.js').updateSocialUploadVideoCovers
   rewrite?: typeof recreateScienceScript
   browser?: Pick<typeof huasheng, 'runHuashengBrowserJob'>
@@ -738,7 +739,35 @@ export class ScienceWorkflowService {
       const main = await intro.resolveScienceVideoIntroSource({ videoPath: this.localFile(id, job.mainVideoPath || job.videoPath), directory }, { signal })
       job = this.modify(id, { mainVideoPath: main.videoPath })
       let video: Awaited<ReturnType<typeof intro.prepareScienceVideoWithIntro>>
-      if (this.options.presenterMode === 'sync') {
+      const presenterMode = this.options.presenterMode ?? (process.env.SCIENCE_PRESENTER_MODE?.trim() || 'musetalk')
+      if (!['none', 'sync', 'musetalk'].includes(presenterMode)) throw new ScienceWorkflowError('SCIENCE_PRESENTER_MODE 必须为 musetalk 或 none')
+      if (presenterMode === 'musetalk') {
+        let presenter: { presenterPath: string; sourceSha256: string } | undefined
+        try {
+          this.report(id, '正在使用远程 MuseTalk 生成正文同步口型，复用缓存主播素材', 'export')
+          const generate = this.options.prepareMusetalkPresenter || (await import('./science-musetalk-video.js')).prepareScienceMusetalkVideo
+          presenter = await generate({ videoPath: main.videoPath, directory: path.join(this.directory(id), 'presenter-musetalk') },
+            { signal, report: message => this.report(id, message, 'export') })
+          signal.throwIfAborted()
+          if (presenter.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('MuseTalk 主播与正片版本不一致')
+        } catch (error) {
+          signal.throwIfAborted()
+          presenter = undefined
+          this.report(id, `MuseTalk 暂不可用，自动保留固定片头并完成正文：${safeMessage(error)}`, 'export')
+        }
+        if (presenter) {
+          const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
+          video = await prepare({ videoPath: main.videoPath, directory },
+            { signal, presenterPath: presenter.presenterPath, presenterFraming: 'closeup', report: message => this.report(id, message, 'export') })
+        } else {
+          const prepare = this.options.prepareIntroVideo || intro.prepareScienceVideoWithIntroOnly
+          video = await prepare({ videoPath: main.videoPath, directory },
+            { signal, report: message => this.report(id, message, 'export') })
+        }
+        signal.throwIfAborted()
+        if (video.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('视频合成与原正片版本不一致，已保留原任务')
+        this.modify(id, { presenterPath: presenter?.presenterPath })
+      } else if (presenterMode === 'sync') {
         if (!job.presenterPath || job.videoCompositionPending) {
           await this.prepareIntroPreview(id, signal)
           job = this.read(id)

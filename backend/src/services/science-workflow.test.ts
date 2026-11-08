@@ -39,7 +39,7 @@ function fixture(t: any, overrides: Partial<ScienceWorkflowOptions> = {}) {
     },
     inspectHuashengProject: async () => { calls.browserInspect++; throw new Error('导出窗口未响应，保留上次创作状态') },
   }
-  const options: ScienceWorkflowOptions = { root: path.join(root, 'jobs'), huashengAccounts: hs, baijiahaoAccounts: bjh, pollMs: 0, retryDelayMs: 0,
+  const options: ScienceWorkflowOptions = { root: path.join(root, 'jobs'), huashengAccounts: hs, baijiahaoAccounts: bjh, pollMs: 0, retryDelayMs: 0, presenterMode: 'none',
     prepareVideo: async input => ({ videoPath: input.videoPath, introSha256: 'a'.repeat(64), sourceSha256: 'b'.repeat(64) }),
     prepareIntroVideo: async input => ({ videoPath: input.videoPath, introSha256: 'a'.repeat(64), sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }),
     prepareIntroPreview: async input => ({ videoPath: input.videoPath, introSha256: 'a'.repeat(64), sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }),
@@ -116,7 +116,7 @@ function pendingHuasheng(h: ReturnType<typeof fixture>, id: string, patch: Recor
   return file
 }
 
-test('default science productions submit only the main narration and prepend the intro without any presenter or lip sync', async t => {
+test('intro-only science productions submit only the main narration and prepend the intro without any presenter or lip sync', async t => {
   const h = fixture(t), job = await prepared(h), order: string[] = []
   const greeting = '大家好，我是小鹭，你们的冷知识讲解员。'
   const mainScript = job.script
@@ -153,6 +153,69 @@ test('default science productions submit only the main narration and prepend the
   assert.equal(h.service.asset(job.id, 'video'), finalPath)
   const publicJob = h.service.detail(job.id) as unknown as Record<string, unknown>
   assert.equal(publicJob.mainVideoPath, undefined); assert.equal(publicJob.presenterPath, undefined)
+})
+
+test('new default science production uses remote MuseTalk once and composes the original main with a closeup circle', async t => {
+  const previous = process.env.SCIENCE_PRESENTER_MODE
+  delete process.env.SCIENCE_PRESENTER_MODE
+  t.after(() => { if (previous === undefined) delete process.env.SCIENCE_PRESENTER_MODE; else process.env.SCIENCE_PRESENTER_MODE = previous })
+  const h = fixture(t, { presenterMode: undefined }), job = await prepared(h)
+  const order: string[] = []
+  h.options.prepareIntroPreview = async () => assert.fail('MuseTalk must not render a full intermediate intro preview')
+  h.options.preparePresenter = async () => assert.fail('MuseTalk must not call the LatentSync runtime')
+  h.options.prepareIntroVideo = async () => assert.fail('a successful MuseTalk result must retain the circle')
+  h.options.prepareMusetalkPresenter = async input => {
+    order.push('musetalk')
+    assert.equal(fs.readFileSync(input.videoPath, 'utf8'), 'finished-video')
+    assert.equal(path.basename(input.directory), 'presenter-musetalk')
+    return { presenterPath: input.videoPath, sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+  }
+  h.options.prepareVideo = async (input, options) => {
+    order.push('compose')
+    assert.equal(options.presenterFraming, 'closeup')
+    assert.equal(options.presenterPath, input.videoPath)
+    assert.equal(fs.readFileSync(input.videoPath, 'utf8'), 'finished-video')
+    return { videoPath: input.videoPath, introSha256: 'a'.repeat(64), sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+  }
+  h.service.produce(job.id, true); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'completed')
+  assert.deepEqual(order, ['musetalk', 'compose'])
+  assert.equal(h.calls.produce, 1); assert.equal(h.calls.export, 1); assert.equal(h.calls.upload, 1)
+})
+
+test('a MuseTalk timeout falls back to intro-only delivery without blocking automatic production', async t => {
+  const h = fixture(t, { presenterMode: 'musetalk' }), job = await prepared(h)
+  let fallback = 0
+  h.options.prepareMusetalkPresenter = async () => { throw new Error('MuseTalk 已达到处理时限') }
+  h.options.prepareVideo = async () => assert.fail('failed lip-sync must not compose an unverified presenter')
+  const prepare = h.options.prepareIntroVideo!
+  h.options.prepareIntroVideo = async (input, options) => { fallback++; return prepare(input, options) }
+  h.service.produce(job.id, true); await h.service.waitForIdle()
+  const result = h.service.detail(job.id)
+  assert.equal(result.status, 'completed')
+  assert.equal(fallback, 1); assert.equal(h.calls.upload, 1)
+  assert.ok(result.logs.some(log => /MuseTalk.*自动保留固定片头/.test(log.message)))
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.root, 'jobs', job.id, 'job.json'), 'utf8')).presenterPath, undefined)
+})
+
+test('cancelling MuseTalk production never falls back to rendering or uploading', async t => {
+  const h = fixture(t, { presenterMode: 'musetalk' }), job = await prepared(h)
+  let started!: () => void
+  const generating = new Promise<void>(resolve => { started = resolve })
+  h.options.prepareMusetalkPresenter = async (_input, options) => {
+    started()
+    await new Promise<never>((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })
+    })
+    throw new Error('unreachable')
+  }
+  h.options.prepareVideo = async () => assert.fail('cancelled work must not compose a circle')
+  h.options.prepareIntroVideo = async () => assert.fail('cancelled work must not fall back')
+  h.service.produce(job.id, true)
+  await generating
+  h.service.cancel(job.id); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'paused')
+  assert.equal(h.calls.upload, 0)
 })
 
 test('a pending legacy lip-sync task resumes locally from its original main without inference or re-export', async t => {
