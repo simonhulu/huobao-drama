@@ -381,6 +381,19 @@ async def account_runtime(config, account_name, *, keep_browser=False):
             result = {"ready": False, "issue": "check_failed", "message": "百家号页面尚未就绪，尚未开始上传，请重新检查账号"}
             try:
                 progress("正在检查百家号登录状态，尚未开始上传", "account_check")
+                try:
+                    # The authenticated list avoids loading the dashboard app
+                    # just to check the same account's session before upload.
+                    response = await browser.contexts[0].request.get(
+                        "https://baijiahao.baidu.com/pcui/article/lists?currentPage=1&pageSize=10&collection=", timeout=15000)
+                    data = json.loads(await response.text()) if response.status == 200 else None
+                    if (isinstance(data, dict) and type(data.get("errno")) is int and data["errno"] == 0
+                            and isinstance(data.get("data"), dict) and isinstance(data["data"].get("list"), list)
+                            and isinstance(data["data"].get("page"), dict) and data["data"]["page"].get("currentPage") == 1):
+                        result = {"ready": True, "message": "百家号账号已登录，后台连接已就绪"}
+                        return result
+                except Exception:
+                    pass  # Network/login challenges still use the visible page checks.
                 await page.goto(HOMES["baijiahao"], wait_until="commit", timeout=15000)
                 deadline = time.monotonic() + 45
                 while time.monotonic() < deadline:

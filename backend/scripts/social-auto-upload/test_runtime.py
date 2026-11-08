@@ -107,16 +107,42 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
         manager.start = AsyncMock(return_value=SimpleNamespace(stop=AsyncMock()))
         return (None, None, lambda: manager, None, None, None)
 
-    async def named_account_check(self, page, **options):
+    async def named_account_check(self, page, *, api_response=None, **options):
         manager = MagicMock()
         manager.__aenter__ = AsyncMock(return_value=object())
         manager.__aexit__ = AsyncMock(return_value=False)
-        browser = SimpleNamespace(contexts=[SimpleNamespace(new_page=AsyncMock(return_value=page))])
+        context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+        if api_response is not None:
+            context.request = SimpleNamespace(get=AsyncMock(return_value=api_response))
+        browser = SimpleNamespace(contexts=[context])
         with patch.object(bridge, "load_engine", return_value=(None, None, lambda: manager, None, None, None)), \
                 patch.object(bridge, "connect_account_browser", AsyncMock(return_value=(browser, "http://127.0.0.1:9999", "digest"))), \
                 patch.object(account_browser, "close_idle_account_browser", AsyncMock()) as close:
             result = await bridge.account_runtime({}, "science_fixture", **options)
         return result, browser, close
+
+    async def test_authenticated_account_api_avoids_loading_the_dashboard(self):
+        page = AsyncMock()
+        response = SimpleNamespace(status=200, text=AsyncMock(return_value='{"errno":0,"data":{"list":[],"page":{"currentPage":1}}}'))
+        result, browser, close = await self.named_account_check(page, api_response=response, keep_browser=True)
+        self.assertTrue(result["ready"])
+        page.goto.assert_not_awaited()
+        browser.contexts[0].request.get.assert_awaited_once()
+        self.assertIn("/pcui/article/lists?", browser.contexts[0].request.get.call_args.args[0])
+        close.assert_not_awaited()
+
+    async def test_invalid_or_logged_out_account_api_falls_back_to_page(self):
+        for body in ('<html>login</html>', '{"errno":0}', '{"errno":1,"data":{}}',
+                     '{"errno":false,"data":{"list":[],"page":{"currentPage":1}}}'):
+            with self.subTest(body=body):
+                page = AsyncMock()
+                response = SimpleNamespace(status=200, text=AsyncMock(return_value=body))
+                with patch.object(bridge, "login_state", AsyncMock(return_value={"ready": False, "issue": "login_required"})):
+                    result, _, close = await self.named_account_check(page, api_response=response, keep_browser=True)
+                self.assertFalse(result["ready"])
+                self.assertEqual(result["issue"], "login_required")
+                page.goto.assert_awaited_once()
+                close.assert_awaited_once()
 
     async def test_upload_preflight_keeps_ready_account_browser_for_the_upload(self):
         page = AsyncMock()
