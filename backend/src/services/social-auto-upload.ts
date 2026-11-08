@@ -134,7 +134,9 @@ export async function runSocialUploadBridge<T>(action: string, input: Record<str
     const timeout = setTimeout(() => {
       timeoutError = new Error(action === 'inspect'
         ? '上传前环境检查超时，尚未开始上传，请重新检查平台状态'
-        : '上传步骤超时，本次操作未完成')
+        : action === 'inspect-account'
+          ? '百家号上传前账号检查超时，尚未开始上传；原登录和上传检查点已保留，请重试连接'
+          : '上传步骤超时，本次操作未完成')
       child.kill('SIGTERM')
       // Do not release the queue while this process may still operate Chrome.
       // The bridge lock also protects recovery from an orphan after a restart.
@@ -216,9 +218,9 @@ export async function syncHistorySocialUploadLogin(platform: 'baijiahao' | 'tenc
   } finally { historyRuntimeCache = null }
 }
 
-export async function inspectSocialUploadAccountRuntime(accountName: string): Promise<{ ready: boolean; message: string }> {
+export async function inspectSocialUploadAccountRuntime(accountName: string, options: SocialUploadProgressOptions = {}): Promise<{ ready: boolean; message: string }> {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(accountName)) throw new Error('百家号账号编号无效')
-  const result = await runBridge<{ ready: boolean; message: string }>('inspect-account', { accountName }, { timeoutMs: 75_000 })
+  const result = await runBridge<{ ready: boolean; message: string }>('inspect-account', { accountName, keepBrowser: true }, { ...options, timeoutMs: 180_000 })
   if (typeof result?.ready !== 'boolean' || typeof result?.message !== 'string') throw new Error('百家号账号检查结果无法识别')
   return result
 }

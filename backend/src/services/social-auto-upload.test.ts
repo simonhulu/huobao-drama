@@ -172,6 +172,7 @@ process.stdin.on('end', () => {
   const request = JSON.parse(fs.readFileSync(requestFile, 'utf8'))
   assert.equal(request.action, 'inspect-account')
   assert.equal(request.request.accountName, 'cba_first')
+  assert.equal(request.request.keepBrowser, true, 'the ready browser must be reused by the following upload')
   await assert.rejects(inspectSocialUploadAccountRuntime('../other'), /账号编号无效/)
 })
 

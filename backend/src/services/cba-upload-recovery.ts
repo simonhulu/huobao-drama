@@ -232,7 +232,7 @@ export async function recoverCbaUpload(payload: SocialUploadPayload, current: Cb
     if (ready) return
     const state = await readOnly('runtime', async () => {
       const value = snapshot.target === 'baijiahao-video' && snapshot.accountName
-        ? await options.runtime.inspectSocialUploadAccountRuntime(snapshot.accountName)
+        ? await options.runtime.inspectSocialUploadAccountRuntime(snapshot.accountName, { onProgress: options.onProgress })
         : await options.runtime.inspectSocialUploadRuntime(true).then(runtime => {
           const platform = runtime.platforms[snapshot.target === 'tencent-video' ? 'tencent' : 'baijiahao']
           return { ready: runtime.installed && platform.ready, message: platform.message || runtime.message }

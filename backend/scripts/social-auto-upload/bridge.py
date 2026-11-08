@@ -370,17 +370,28 @@ async def connect_upload_browser(playwright, config, payload, state=None):
     return await connect_platform_browser(playwright, endpoint, platform, config=config, cleanup_lock_held=True), endpoint, None
 
 
-async def account_runtime(config, account_name):
+async def account_runtime(config, account_name, *, keep_browser=False):
     validate_account_name(account_name)
     _, _, async_playwright, _, _, _ = load_engine()
     try:
         async with async_playwright() as playwright:
+            progress("正在连接所选百家号账号的后台浏览器，尚未开始上传", "browser_connect")
             browser, _, _ = await connect_account_browser(playwright, config, account_name)
             page = await browser.contexts[0].new_page()
+            result = {"ready": False, "issue": "check_failed", "message": "百家号页面尚未就绪，尚未开始上传，请重新检查账号"}
             try:
-                await page.goto(HOMES["baijiahao"], wait_until="domcontentloaded", timeout=30000)
-                for _ in range(8):
-                    result = await login_state(page, "baijiahao")
+                progress("正在检查百家号登录状态，尚未开始上传", "account_check")
+                await page.goto(HOMES["baijiahao"], wait_until="commit", timeout=15000)
+                deadline = time.monotonic() + 45
+                while time.monotonic() < deadline:
+                    try:
+                        result = await asyncio.wait_for(login_state(page, "baijiahao"),
+                                                        timeout=min(4, max(0.01, deadline - time.monotonic())))
+                    except TimeoutError:
+                        pass
+                    except Exception as error:
+                        if not re.search(r"Execution context was destroyed|Cannot find context with specified id", str(error)):
+                            raise
                     if result["ready"] or result.get("issue") in ("login_required", "verification_required"):
                         break
                     await asyncio.sleep(0.5)
@@ -390,9 +401,18 @@ async def account_runtime(config, account_name):
                     result["message"] = "账号登录已失效，请在“百家号账号”中重新扫码"
                 return result
             finally:
-                await page.close()
+                try:
+                    await asyncio.wait_for(page.close(), timeout=2)
+                except Exception:
+                    pass  # Cleanup cannot discard a confirmed login result.
                 from account_browser import close_idle_account_browser
-                await close_idle_account_browser(browser)
+                # The upload immediately reuses this process; closing it here
+                # races Chrome shutdown and forces another cold profile load.
+                if not keep_browser or not result["ready"]:
+                    try:
+                        await asyncio.wait_for(close_idle_account_browser(browser), timeout=5)
+                    except Exception:
+                        pass
     except Exception as error:
         message = str(error)[:400] if isinstance(error, (ValueError, RuntimeError)) else "百家号账号后台连接或检查失败，请重新检查账号"
         return {"ready": False, "message": message, "issue": "check_failed"}
@@ -4148,7 +4168,7 @@ async def main():
     elif action == "sync-history":
         result = await sync_history(request["config"], request["platform"])
     elif action == "inspect-account":
-        result = await account_runtime(request["config"], request["accountName"])
+        result = await account_runtime(request["config"], request["accountName"], keep_browser=request.get("keepBrowser") is True)
     elif action == "open":
         result = await open_login(request["config"], request["platform"])
     elif action == "review-session":

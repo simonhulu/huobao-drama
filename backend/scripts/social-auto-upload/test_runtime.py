@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+import account_browser
 
 
 spec = importlib.util.spec_from_file_location("runtime_bridge", Path(__file__).with_name("bridge.py"))
@@ -105,6 +106,84 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
         manager = MagicMock()
         manager.start = AsyncMock(return_value=SimpleNamespace(stop=AsyncMock()))
         return (None, None, lambda: manager, None, None, None)
+
+    async def named_account_check(self, page, **options):
+        manager = MagicMock()
+        manager.__aenter__ = AsyncMock(return_value=object())
+        manager.__aexit__ = AsyncMock(return_value=False)
+        browser = SimpleNamespace(contexts=[SimpleNamespace(new_page=AsyncMock(return_value=page))])
+        with patch.object(bridge, "load_engine", return_value=(None, None, lambda: manager, None, None, None)), \
+                patch.object(bridge, "connect_account_browser", AsyncMock(return_value=(browser, "http://127.0.0.1:9999", "digest"))), \
+                patch.object(account_browser, "close_idle_account_browser", AsyncMock()) as close:
+            result = await bridge.account_runtime({}, "science_fixture", **options)
+        return result, browser, close
+
+    async def test_upload_preflight_keeps_ready_account_browser_for_the_upload(self):
+        page = AsyncMock()
+        with patch.object(bridge, "login_state", AsyncMock(return_value={"ready": True, "message": "已登录"})):
+            result, _, close = await self.named_account_check(page, keep_browser=True)
+        self.assertTrue(result["ready"])
+        page.close.assert_awaited_once()
+        close.assert_not_awaited()
+
+    async def test_named_account_check_does_not_wait_for_all_page_resources(self):
+        page = AsyncMock()
+        async def navigate(url, *, wait_until, timeout):
+            if wait_until != "commit":
+                await asyncio.Event().wait()
+        page.goto.side_effect = navigate
+        with patch.object(bridge, "login_state", AsyncMock(return_value={"ready": True, "message": "已登录"})):
+            result, _, close = await asyncio.wait_for(self.named_account_check(page), 0.1)
+        self.assertTrue(result["ready"])
+        close.assert_awaited_once()
+
+    async def test_named_account_check_retries_redirect_and_hung_probe(self):
+        page = AsyncMock()
+        states = [TimeoutError(), RuntimeError("Execution context was destroyed"), {"ready": True, "message": "已登录"}]
+        with patch.object(bridge, "login_state", AsyncMock(side_effect=states)), \
+                patch.object(bridge.asyncio, "sleep", AsyncMock()):
+            result, _, _ = await self.named_account_check(page)
+        self.assertTrue(result["ready"])
+
+    async def test_hung_named_account_probe_is_cancelled_before_retrying(self):
+        page = AsyncMock()
+        calls = 0
+        probe_limits = []
+        wait_for = asyncio.wait_for
+
+        async def probe(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await asyncio.Event().wait()
+            return {"ready": True, "message": "已登录"}
+
+        async def bounded(awaitable, timeout):
+            probe_limits.append(timeout)
+            return await wait_for(awaitable, min(timeout, 0.02))
+
+        with patch.object(bridge, "login_state", probe), \
+                patch.object(bridge.asyncio, "sleep", AsyncMock()), \
+                patch.object(bridge.asyncio, "wait_for", bounded):
+            result, _, _ = await self.named_account_check(page)
+        self.assertTrue(result["ready"])
+        self.assertEqual(calls, 2)
+        self.assertLessEqual(probe_limits[0], 4)
+
+    async def test_named_account_cleanup_failure_cannot_discard_confirmed_login(self):
+        page = AsyncMock()
+        page.close.side_effect = RuntimeError("renderer disconnected")
+        with patch.object(bridge, "login_state", AsyncMock(return_value={"ready": True, "message": "已登录"})):
+            result, _, _ = await self.named_account_check(page)
+        self.assertTrue(result["ready"])
+
+    async def test_upload_preflight_still_cleans_up_an_expired_account(self):
+        page = AsyncMock()
+        with patch.object(bridge, "login_state", AsyncMock(return_value={"ready": False, "issue": "login_required"})):
+            result, browser, close = await self.named_account_check(page, keep_browser=True)
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["issue"], "login_required")
+        close.assert_awaited_once_with(browser)
 
     async def test_platform_checks_run_independently_in_parallel(self):
         started = set()
