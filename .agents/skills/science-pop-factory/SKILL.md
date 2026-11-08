@@ -11,7 +11,7 @@ The primary `/science-pop` content workflow now uses remote writing, Huasheng
 voice `1595608`, a separate fixed intro, and remote MuseTalk 1.5 for the body
 presenter circle. See `docs/science-musetalk-deployment.md` for deployment and
 the current behavior. The production application runs on the other Mac at
-`192.168.0.105`, maintained through `ssh root@192.168.0.105`. Commit and push changes, then synchronize
+`192.168.0.107`, maintained through `ssh root@192.168.0.107`. Commit and push changes, then synchronize
 and verify that host; a local update package alone does not finish deployment.
 Never assume this Mac's paths, dependencies or `.env` exist there. MuseTalk GPU
 inference runs only on the remote RTX 3090, reusing its existing PyTorch.
