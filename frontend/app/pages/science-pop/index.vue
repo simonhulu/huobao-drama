@@ -241,8 +241,13 @@ const queueFilters = computed(() => [
   { id: 'active', label: '进行中', count: jobs.value.filter(job => matchesQueueFilter(job, 'active')).length },
   { id: 'done', label: '已交付', count: jobs.value.filter(job => matchesQueueFilter(job, 'done')).length },
 ])
-const filteredJobs = computed(() => jobs.value.filter(job => matchesQueueFilter(job, queueFilter.value)
-  && `${job.id} ${job.title || ''} ${job.sourceUrl}`.toLowerCase().includes(search.value.trim().toLowerCase())))
+const filteredJobs = computed(() => {
+  const filtered = jobs.value.filter(job => matchesQueueFilter(job, queueFilter.value)
+    && `${job.id} ${job.title || ''} ${job.sourceUrl}`.toLowerCase().includes(search.value.trim().toLowerCase()))
+  return queueFilter.value === 'attention'
+    ? filtered.sort((a, b) => (Date.parse(b.updatedAt || b.createdAt) || 0) - (Date.parse(a.updatedAt || a.createdAt) || 0))
+    : filtered
+})
 const syncableJobs = computed(() => jobs.value.filter(job => job.projectUrl && !job.videoUrl && !job.hasUploadAttempt && !job.upload && job.stage !== 'upload'
   && !taskExecuting(job) && ['needs_attention', 'paused', 'waiting_remote', 'awaiting_export', 'retry_wait'].includes(job.status)))
 const tabs = [{ id: 'script', label: '文稿与账号' }, { id: 'output', label: '成片与上传' }, { id: 'log', label: '运行记录' }]

@@ -57,6 +57,24 @@ async function harness(t) {
   t.after(() => { app.unmount(); assert.equal(timers.size, 0); assert.equal(listeners.size, 0) })
   await flush(); return { s: app._instance.setupState, state, timers, listeners }
 }
+test('attention queue puts the most recently updated task first after refresh without changing selection or other queues', async t => {
+  const h = await harness(t)
+  h.state.overview.jobs = [
+    job('first', { status: 'needs_attention', updatedAt: '2026-11-08T13:00:00Z' }),
+    job('second', { status: 'needs_attention', updatedAt: '2026-11-08T14:00:00Z' }),
+    job('running', { status: 'running', updatedAt: '2026-11-08T15:00:00Z' }),
+  ]
+  await h.s.refresh()
+  h.s.queueFilter = 'attention'
+  assert.deepEqual(plain(h.s.filteredJobs.map(item => item.id)), ['second', 'first'])
+  h.state.overview.jobs[0].updatedAt = '2026-11-08T16:00:00Z'
+  await h.s.refresh()
+  assert.deepEqual(plain(h.s.filteredJobs.map(item => item.id)), ['first', 'second'])
+  assert.equal(h.s.selectedId, 'first')
+  h.s.queueFilter = 'all'
+  assert.deepEqual(plain(h.s.filteredJobs.map(item => item.id)), ['first', 'second', 'running'])
+  assert.deepEqual(plain(h.s.jobs.map(item => item.id)), ['first', 'second', 'running'])
+})
 test('unsaved edits survive polling and switching tasks', async t => {
   const h = await harness(t); h.s.editor.script = '保留我的人工改稿'; await h.s.refresh()
   assert.equal(h.s.editor.script, '保留我的人工改稿')
