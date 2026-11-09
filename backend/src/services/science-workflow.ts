@@ -830,7 +830,7 @@ export class ScienceWorkflowService {
       const presenterMode = this.options.presenterMode ?? (process.env.SCIENCE_PRESENTER_MODE?.trim() || 'musetalk')
       if (!['none', 'sync', 'musetalk'].includes(presenterMode)) throw new ScienceWorkflowError('SCIENCE_PRESENTER_MODE 必须为 musetalk 或 none')
       if (presenterMode === 'musetalk') {
-        let presenter: { presenterPath: string; sourceSha256: string } | undefined
+        let presenter: { presenterPath: string; sourceSha256: string }
         try {
           this.modify(id, { exportStep: 'presenter' })
           this.report(id, '正在使用远程 MuseTalk 生成正文同步口型，复用缓存主播素材', 'export')
@@ -841,22 +841,21 @@ export class ScienceWorkflowService {
           if (presenter.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('MuseTalk 主播与正片版本不一致')
         } catch (error) {
           signal.throwIfAborted()
-          presenter = undefined
-          this.report(id, `MuseTalk 暂不可用，自动保留固定片头并完成正文：${safeMessage(error)}`, 'export')
+          const message = safeMessage(error)
+          const failure = error as { status?: number; code?: string; cause?: { code?: string } }
+          const connection = `${message} ${failure?.cause?.code || failure?.code || ''}`
+          const retryable = !/不一致|不匹配|校验失败|缺失|改变|发生变化|不符合要求|mismatch/i.test(message)
+            && (uploadConnectionFailure(connection) || /fetch failed|terminated|ENOTFOUND|UND_ERR_|处理时限|尚未就绪/i.test(connection)
+              || failure?.status === 408 || failure?.status === 429 || failure?.status && failure.status >= 500 && failure.status <= 599)
+          throw new ScienceWorkflowError(`MuseTalk 主播尚未完成，已保留原正片和任务检查点，暂停合成及上传：${message}`, retryable ? 503 : 409, Boolean(retryable))
         }
         this.modify(id, { exportStep: 'compose' })
-        if (presenter) {
-          const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
-          video = await prepare({ videoPath: main.videoPath, directory },
-            { signal, presenterPath: presenter.presenterPath, presenterFraming: 'half-body', report: message => this.report(id, message, 'export'), onProgress })
-        } else {
-          const prepare = this.options.prepareIntroVideo || intro.prepareScienceVideoWithIntroOnly
-          video = await prepare({ videoPath: main.videoPath, directory },
-            { signal, report: message => this.report(id, message, 'export'), onProgress })
-        }
+        const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
+        video = await prepare({ videoPath: main.videoPath, directory },
+          { signal, presenterPath: presenter.presenterPath, presenterFraming: 'half-body', report: message => this.report(id, message, 'export'), onProgress })
         signal.throwIfAborted()
         if (video.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('视频合成与原正片版本不一致，已保留原任务')
-        this.modify(id, { presenterPath: presenter?.presenterPath })
+        this.modify(id, { presenterPath: presenter.presenterPath })
       } else if (presenterMode === 'sync') {
         if (!job.presenterPath || job.videoCompositionPending) {
           await this.prepareIntroPreview(id, signal)
@@ -1312,7 +1311,8 @@ export class ScienceWorkflowService {
       if (job.status === 'retry_wait') {
         if (!job.automaticRetry || job.automaticDelivery === false) continue
         try {
-          if (job.projectUrl) this.sync(job.id, { automatic: true })
+          if (job.videoPath) this.produce(job.id, job.autoUpload === true, { automatic: true })
+          else if (job.projectUrl) this.sync(job.id, { automatic: true })
           else if (!job.checkpoint || job.checkpoint === 'opening') this.produce(job.id, job.autoUpload === true, { automatic: true })
           else continue
           started.push(job.id)

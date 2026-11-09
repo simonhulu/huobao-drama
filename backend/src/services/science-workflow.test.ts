@@ -223,19 +223,121 @@ test('export substeps distinguish platform rendering, download and local composi
   assert.deepEqual(steps, ['platform', 'download', 'compose', 'covers'])
 })
 
-test('a MuseTalk timeout falls back to intro-only delivery without blocking automatic production', async t => {
+test('a MuseTalk timeout preserves its original checkpoints and automatically resumes before composition or upload', async t => {
   const h = fixture(t, { presenterMode: 'musetalk' }), job = await prepared(h)
-  let fallback = 0
-  h.options.prepareMusetalkPresenter = async () => { throw new Error('MuseTalk 已达到处理时限') }
-  h.options.prepareVideo = async () => assert.fail('failed lip-sync must not compose an unverified presenter')
-  const prepare = h.options.prepareIntroVideo!
-  h.options.prepareIntroVideo = async (input, options) => { fallback++; return prepare(input, options) }
+  const file = path.join(h.root, 'jobs', job.id, 'job.json'), order: string[] = []
+  const checkpoint = JSON.stringify({ requestId: 'original-gpu-job', audioSha256: 'a'.repeat(64) })
+  let presenterCalls = 0, presenterDirectory = '', mainPath = ''
+  h.options.prepareMusetalkPresenter = async input => {
+    order.push('musetalk')
+    assert.equal(fs.readFileSync(input.videoPath, 'utf8'), 'finished-video')
+    const checkpointPath = path.join(input.directory, 'musetalk.json')
+    if (++presenterCalls === 1) {
+      presenterDirectory = input.directory; mainPath = input.videoPath
+      fs.mkdirSync(input.directory, { recursive: true }); fs.writeFileSync(checkpointPath, checkpoint)
+      throw new Error('MuseTalk 已达到处理时限')
+    }
+    assert.equal(input.directory, presenterDirectory); assert.equal(input.videoPath, mainPath)
+    assert.equal(fs.readFileSync(checkpointPath, 'utf8'), checkpoint)
+    return { presenterPath: input.videoPath, sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+  }
+  h.options.prepareIntroVideo = async () => assert.fail('MuseTalk failure must never produce an intro-only fallback')
+  h.options.prepareVideo = async (input, options) => {
+    order.push('compose')
+    assert.equal(presenterCalls, 2); assert.equal(options.presenterFraming, 'half-body')
+    assert.equal(options.presenterPath, mainPath)
+    const videoPath = path.join(input.directory, 'half-body.mp4')
+    fs.mkdirSync(input.directory, { recursive: true })
+    fs.writeFileSync(videoPath, 'intro+half-body+finished-video')
+    return { videoPath, introSha256: 'a'.repeat(64), sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+  }
+  const prepare = h.options.prepareAssets!
+  h.options.prepareAssets = async (input, options) => { order.push('covers'); return prepare(input, options) }
+  h.service.produce(job.id, true); await h.service.waitForIdle()
+  const waiting = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(waiting.status, 'retry_wait'); assert.equal(waiting.failureKind, 'temporary')
+  assert.equal(waiting.stage, 'export'); assert.equal(waiting.exportStep, 'presenter')
+  assert.equal(waiting.automaticRetry.attempt, 1); assert.equal(waiting.automaticRetry.maxAttempts, 3)
+  assert.equal(waiting.videoPath, mainPath); assert.equal(waiting.mainVideoPath, mainPath)
+  assert.notEqual(waiting.videoCompositionPending, false)
+  assert.equal(waiting.presenterPath, undefined); assert.equal(waiting.coverAssets, undefined); assert.equal(waiting.uploadAttempt, undefined)
+  assert.equal(waiting.projectUrl, 'https://www.huasheng.cn/video/12345')
+  assert.deepEqual(waiting.exportTask, { taskId: 'task1', projectHash: 'a'.repeat(64) })
+  assert.deepEqual(order, ['musetalk']); assert.equal(h.calls.upload, 0)
+  assert.equal(fs.readFileSync(path.join(presenterDirectory, 'musetalk.json'), 'utf8'), checkpoint)
+  assert.deepEqual(h.service.runAutomaticExports(), [], 'recovery must respect its scheduled delay')
+  await h.service.stop()
+  const restored = new ScienceWorkflowService(h.options)
+  t.after(() => restored.stop())
+  fs.writeFileSync(file, JSON.stringify({ ...waiting, automaticRetry: { ...waiting.automaticRetry, nextRetryAt: new Date(0).toISOString() } }))
+  assert.deepEqual(restored.runAutomaticExports(), [job.id]); await restored.waitForIdle()
+  const completed = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(completed.status, 'completed', completed.message); assert.equal(completed.automaticRetry, undefined)
+  assert.equal(completed.projectUrl, waiting.projectUrl); assert.deepEqual(completed.exportTask, waiting.exportTask)
+  assert.equal(completed.mainVideoPath, mainPath); assert.equal(completed.presenterPath, mainPath)
+  assert.equal(completed.videoCompositionPending, false)
+  assert.deepEqual(order, ['musetalk', 'musetalk', 'compose', 'covers'])
+  assert.equal(h.calls.produce, 1); assert.equal(h.calls.export, 1); assert.equal(h.calls.downloadExport, 1)
+  assert.equal(h.calls.upload, 1); assert.equal(h.calls.save, 1)
+  assert.equal(h.payloads[0]?.videoPath, completed.videoPath)
+})
+
+for (const failure of [
+  new Error('fetch failed', { cause: { code: 'ECONNRESET' } }),
+  new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
+  new Error('MuseTalk 远程服务尚未就绪，请稍后继续原任务'),
+  ...[408, 429, 503].map(status => Object.assign(new Error(`MuseTalk 请求失败（HTTP ${status}），已保留原任务检查点`), { status })),
+]) test(`a transient MuseTalk failure waits for original-task recovery: ${failure.message}`, async t => {
+  const h = fixture(t, { presenterMode: 'musetalk' }), job = await prepared(h)
+  h.options.prepareMusetalkPresenter = async () => { throw failure }
+  h.options.prepareVideo = async () => assert.fail('failed lip-sync must not compose')
+  h.options.prepareIntroVideo = async () => assert.fail('failed lip-sync must not fall back')
+  h.options.prepareAssets = async () => assert.fail('failed lip-sync must not create covers')
   h.service.produce(job.id, true); await h.service.waitForIdle()
   const result = h.service.detail(job.id)
-  assert.equal(result.status, 'completed')
-  assert.equal(fallback, 1); assert.equal(h.calls.upload, 1)
-  assert.ok(result.logs.some(log => /MuseTalk.*自动保留固定片头/.test(log.message)))
-  assert.equal(JSON.parse(fs.readFileSync(path.join(h.root, 'jobs', job.id, 'job.json'), 'utf8')).presenterPath, undefined)
+  assert.equal(result.status, 'retry_wait'); assert.equal(result.exportStep, 'presenter')
+  assert.equal(result.automaticRetry?.attempt, 1); assert.equal(h.calls.upload, 0)
+})
+
+for (const failure of [
+  'MuseTalk 主播与正片版本不一致',
+  'MuseTalk 已绑定的正文驱动音频缺失或改变，已保留原任务检查点，请恢复该音频文件',
+  'MuseTalk 任务与正文音频、头像或模型版本不一致',
+  'MuseTalk 服务的模型、头像或帧率校验失败',
+]) test(`a MuseTalk identity failure blocks delivery and automatic retries: ${failure}`, async t => {
+  const h = fixture(t, { presenterMode: 'musetalk' }), job = await prepared(h)
+  h.options.prepareMusetalkPresenter = async input => {
+    if (failure === 'MuseTalk 主播与正片版本不一致') return { presenterPath: input.videoPath, sourceSha256: '0'.repeat(64) }
+    throw Object.assign(new Error(failure), { status: 503 })
+  }
+  h.options.prepareVideo = async () => assert.fail('unverified lip-sync must not compose')
+  h.options.prepareIntroVideo = async () => assert.fail('unverified lip-sync must not fall back')
+  h.options.prepareAssets = async () => assert.fail('unverified lip-sync must not create covers')
+  h.service.produce(job.id, true); await h.service.waitForIdle()
+  const result = h.service.detail(job.id)
+  assert.equal(result.status, 'needs_attention'); assert.equal(result.failureKind, 'action_required')
+  assert.equal(result.exportStep, 'presenter'); assert.equal(result.automaticRetry, undefined)
+  assert.deepEqual(h.service.runAutomaticExports(), []); assert.equal(h.calls.upload, 0)
+})
+
+test('persistent MuseTalk timeouts exhaust a bounded recovery budget without uploading or repeating the export', async t => {
+  const h = fixture(t, { presenterMode: 'musetalk' }), job = await prepared(h)
+  let attempts = 0
+  h.options.prepareMusetalkPresenter = async () => { attempts++; throw new Error('MuseTalk 已达到处理时限') }
+  h.options.prepareIntroVideo = async () => assert.fail('exhausted lip-sync must not fall back')
+  h.service.produce(job.id, true); await h.service.waitForIdle()
+  const file = path.join(h.root, 'jobs', job.id, 'job.json')
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(stored.status, 'retry_wait'); assert.equal(stored.automaticRetry.attempt, attempt)
+    fs.writeFileSync(file, JSON.stringify({ ...stored, automaticRetry: { ...stored.automaticRetry, nextRetryAt: new Date(0).toISOString() } }))
+    assert.deepEqual(h.service.runAutomaticExports(), [job.id]); await h.service.waitForIdle()
+  }
+  const result = h.service.detail(job.id)
+  assert.equal(attempts, 4); assert.equal(result.status, 'needs_attention'); assert.equal(result.automaticRetry, undefined)
+  assert.equal(result.exportStep, 'presenter'); assert.equal(result.failureKind, 'temporary')
+  assert.deepEqual(h.service.runAutomaticExports(), [])
+  assert.equal(h.calls.produce, 1); assert.equal(h.calls.export, 1); assert.equal(h.calls.downloadExport, 1); assert.equal(h.calls.upload, 0)
 })
 
 test('cancelling MuseTalk production never falls back to rendering or uploading', async t => {
