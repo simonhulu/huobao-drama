@@ -363,6 +363,34 @@ for (const dimensions of ['320x180', '300x200', '180x320']) test(`mobile feed pr
   assert.ok(presenterPixels > 500, 'the full presenter is visible in the actual encoded frame')
 })
 
+for (const dimensions of ['320x180', '180x320']) test(`larger half-body circle keeps its 30-percent diameter inside the mobile safe area at ${dimensions}`, async t => {
+  const f = await fixture(t)
+  const [width, height] = dimensions.split('x').map(Number) as [number, number]
+  await clip(f.videoPath, 'blue', 880, dimensions, 15, 48000, 2, 1.2)
+  await clip(f.presenterPath, 'yellow', 2200, '160x160', 15, 48000, 2, 1.3)
+  const result = await prepareScienceVideoWithIntro(f,
+    { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath, presenterFraming: 'half-body' })
+  const { stdout } = await exec('ffmpeg', ['-nostdin', '-v', 'error', '-ss', '1.35', '-i', result.videoPath,
+    '-frames:v', '1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'], { encoding: 'buffer' })
+  const cropWidth = Math.min(width, height * 1.5), cropLeft = (width - cropWidth) / 2
+  const diameter = Math.round(Math.min(width, height) * .30 / 2) * 2
+  const right = Math.ceil((cropLeft + cropWidth * .12) / 2) * 2
+  const bottom = Math.ceil(height * .18 / 2) * 2
+  const left = width - diameter - right, top = height - diameter - bottom
+  let minX = width, minY = height, maxX = -1, maxY = -1
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const index = (y * width + x) * 3
+    if (stdout[index]! < 170 || stdout[index + 1]! < 160) continue
+    minX = Math.min(minX, x); minY = Math.min(minY, y)
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y)
+    assert.ok(x >= cropLeft && x < cropLeft + cropWidth * .88, 'the larger circle clears feed cropping and right controls')
+    assert.ok(y < height * .82, 'the larger circle stays above the subtitle band')
+  }
+  assert.ok(Math.abs(minX - left) <= 1 && Math.abs(minY - top) <= 1, `larger circle begins at ${left},${top}, got ${minX},${minY}`)
+  assert.ok(maxX - minX + 1 >= diameter - 2 && maxY - minY + 1 >= diameter - 2,
+    `the encoded circle must span ${diameter}px rather than the old 25 percent: ${maxX - minX + 1}x${maxY - minY + 1}`)
+})
+
 test('a missing or too-short synchronized presenter is rejected instead of looping or substituting silence', async t => {
   const f = await fixture(t), previous = process.env.SCIENCE_PRESENTER_VIDEO_PATH
   delete process.env.SCIENCE_PRESENTER_VIDEO_PATH
@@ -460,6 +488,72 @@ test('closeup framing preserves the chin area and never reuses the zoomed presen
   assert.equal(manifest.entries.find((entry: any) => entry.videoPath === closeup.videoPath).presenterFraming, 'closeup')
 })
 
+test('half-body framing preserves the centered source body and both gestures with a separately bound cache', async t => {
+  const f = await fixture(t)
+  await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+    'color=yellow:s=200x160:r=15:d=1.3,drawbox=x=0:y=0:w=200:h=40:color=red:t=fill,'
+      + 'drawbox=x=70:y=110:w=60:h=50:color=lime:t=fill,'
+      + 'drawbox=x=40:y=65:w=25:h=35:color=cyan:t=fill,drawbox=x=135:y=65:w=25:h=35:color=magenta:t=fill',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-an', f.presenterPath])
+  const options = { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath }
+  const zoomed = await prepareScienceVideoWithIntro(f, { ...options, presenterFraming: 'head-and-shoulders' })
+  const closeup = await prepareScienceVideoWithIntro(f, { ...options, presenterFraming: 'closeup' })
+  const halfBody = await prepareScienceVideoWithIntro({ ...f, videoPath: zoomed.videoPath },
+    { ...options, presenterFraming: 'half-body' })
+  assert.notEqual(halfBody.videoPath, zoomed.videoPath)
+  assert.notEqual(halfBody.videoPath, closeup.videoPath)
+  assert.equal(halfBody.sourceSha256, zoomed.sourceSha256)
+  const body = await pixel(halfBody.videoPath, 1.35, { x: 237, y: 133, width: 4, height: 4 })
+  assert.ok(body[1]! > 170 && body[0]! < 70 && body[2]! < 70, `the lower torso remains visible: ${body}`)
+  const leftHand = await pixel(halfBody.videoPath, 1.35, { x: 219, y: 116, width: 4, height: 4 })
+  assert.ok(leftHand[0]! < 70 && leftHand[1]! > 170 && leftHand[2]! > 170, `the left gesture remains visible: ${leftHand}`)
+  const rightHand = await pixel(halfBody.videoPath, 1.35, { x: 249, y: 116, width: 4, height: 4 })
+  assert.ok(rightHand[0]! > 170 && rightHand[1]! < 70 && rightHand[2]! > 170, `the right gesture remains visible: ${rightHand}`)
+  assert.deepEqual(await prepareScienceVideoWithIntro({ ...f, videoPath: halfBody.videoPath },
+    { ...options, presenterFraming: 'half-body' }), halfBody)
+  const manifest = JSON.parse(await fs.readFile(path.join(f.directory, 'science-video-intro.json'), 'utf8'))
+  assert.equal(manifest.entries.find((entry: any) => entry.videoPath === halfBody.videoPath).presenterFraming, 'half-body')
+})
+
+test('half-body intro motion keeps the torso and both gestures while shrinking into the same safe circle', async t => {
+  const f = await fixture(t)
+  await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+    'color=yellow:s=640x360:r=24:d=0.6,drawbox=x=240:y=250:w=160:h=70:color=lime:t=fill,'
+      + 'drawbox=x=200:y=160:w=60:h=60:color=cyan:t=fill,drawbox=x=380:y=160:w=60:h=60:color=magenta:t=fill',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=32000:duration=0.6',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2', '-shortest', f.introPath])
+  const result = await prepareScienceVideoWithIntro(f,
+    { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath, presenterFraming: 'half-body' })
+  const body = await pixel(result.videoPath, .6, { x: 237, y: 133, width: 4, height: 4 })
+  assert.ok(body[1]! > 170 && body[0]! < 70 && body[2]! < 70, `intro motion retains the torso: ${body}`)
+  const leftHand = await pixel(result.videoPath, .6, { x: 220, y: 120, width: 3, height: 3 })
+  assert.ok(leftHand[0]! < 70 && leftHand[1]! > 170 && leftHand[2]! > 170, `intro motion retains the left gesture: ${leftHand}`)
+  const rightHand = await pixel(result.videoPath, .6, { x: 249, y: 123, width: 3, height: 3 })
+  assert.ok(rightHand[0]! > 170 && rightHand[1]! < 70 && rightHand[2]! > 170, `intro motion retains the right gesture: ${rightHand}`)
+})
+
+test('half-body layout upgrades cannot reuse an older smaller-circle cache', async t => {
+  const f = await fixture(t)
+  const options = { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath, presenterFraming: 'half-body' as const }
+  const first = await prepareScienceVideoWithIntro(f, options)
+  const manifestPath = path.join(f.directory, 'science-video-intro.json')
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'))
+  const entry = manifest.entries.find((entry: any) => entry.videoPath === first.videoPath)
+  const oldKey = createHash('sha256').update(JSON.stringify([5, first.sourceSha256, first.introSha256,
+    await digest(f.presenterPath), 'half-body'])).digest('hex')
+  const oldPath = path.join(f.directory, `science-with-intro-${oldKey}.mp4`)
+  if (oldPath !== first.videoPath) await fs.copyFile(first.videoPath, oldPath)
+  entry.videoPath = oldPath
+  delete entry.presenterLayoutVersion
+  await fs.writeFile(manifestPath, JSON.stringify(manifest))
+  const upgraded = await prepareScienceVideoWithIntro({ ...f, videoPath: oldPath }, options)
+  assert.notEqual(upgraded.videoPath, oldPath, 'an old half-body proof cannot authorize the enlarged-circle cache')
+  assert.equal(upgraded.sourceSha256, first.sourceSha256, 'the original main remains bound without another intro')
+  const updated = JSON.parse(await fs.readFile(manifestPath, 'utf8'))
+  assert.equal(updated.entries.find((entry: any) => entry.videoPath === upgraded.videoPath).presenterLayoutVersion, 2)
+  assert.deepEqual(await prepareScienceVideoWithIntro(f, options), upgraded)
+})
+
 test('presenter framing environment changes only presenter composites and explicit framing overrides it', async t => {
   const f = await fixture(t), previous = process.env.SCIENCE_PRESENTER_FRAMING
   t.after(() => { if (previous === undefined) delete process.env.SCIENCE_PRESENTER_FRAMING; else process.env.SCIENCE_PRESENTER_FRAMING = previous })
@@ -470,7 +564,12 @@ test('presenter framing environment changes only presenter composites and explic
   process.env.SCIENCE_PRESENTER_FRAMING = 'closeup'
   const closeup = await prepareScienceVideoWithIntro(f, options)
   assert.notEqual(closeup.videoPath, legacy.videoPath)
+  process.env.SCIENCE_PRESENTER_FRAMING = 'half-body'
+  const halfBody = await prepareScienceVideoWithIntro(f, options)
+  assert.notEqual(halfBody.videoPath, closeup.videoPath)
+  assert.notEqual(halfBody.videoPath, legacy.videoPath)
   assert.deepEqual(await prepareScienceVideoIntroPreview(f, options), preview)
+  assert.deepEqual(await prepareScienceVideoWithIntro(f, { ...options, presenterFraming: 'closeup' }), closeup)
   assert.deepEqual(await prepareScienceVideoWithIntro(f, { ...options, presenterFraming: 'head-and-shoulders' }), legacy)
   process.env.SCIENCE_PRESENTER_FRAMING = 'invalid-mode'
   assert.deepEqual(await prepareScienceVideoIntroPreview(f, options), preview)

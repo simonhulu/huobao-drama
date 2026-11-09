@@ -11,14 +11,15 @@ import { getVideoEncoderOptions } from './composition/video-encoder.js'
 const exec = promisify(execFile)
 const defaultIntroPath = fileURLToPath(new URL('../../../data/science-pop/assets/xiaolu-intro.mp4', import.meta.url))
 const VERSION = 5
+const HALF_BODY_LAYOUT_VERSION = 2
 
 export interface ScienceVideoIntroInput { videoPath: string; directory: string }
-export type SciencePresenterFraming = 'closeup' | 'head-and-shoulders'
+export type SciencePresenterFraming = 'closeup' | 'head-and-shoulders' | 'half-body'
 export interface ScienceVideoIntroProgress { percent: number; processedSeconds: number; totalSeconds: number; speed?: number }
 export interface ScienceVideoIntroOptions { signal: AbortSignal; report?: (message: string) => void; onProgress?: (progress: ScienceVideoIntroProgress) => void; introPath?: string; presenterPath?: string; presenterFraming?: SciencePresenterFraming }
 export type ScienceVideoIntroPreviewOptions = Omit<ScienceVideoIntroOptions, 'presenterPath' | 'presenterFraming'>
 export interface ScienceVideoIntroResult { videoPath: string; introSha256: string; sourceSha256: string }
-interface IntroRecord extends ScienceVideoIntroResult { sourcePath: string; outputSha256: string; presenterSha256?: string; presenterFraming?: SciencePresenterFraming; renderVersion?: number }
+interface IntroRecord extends ScienceVideoIntroResult { sourcePath: string; outputSha256: string; presenterSha256?: string; presenterFraming?: SciencePresenterFraming; presenterLayoutVersion?: number; renderVersion?: number }
 interface IntroManifest { version: typeof VERSION; entries: IntroRecord[] }
 interface VideoInfo {
   width: number; height: number; fps: string; duration: number; videoDuration: number; audio: boolean
@@ -48,7 +49,7 @@ async function readManifest(filename: string, directory: string): Promise<IntroM
       && typeof entry.videoPath === 'string' && path.dirname(path.resolve(entry.videoPath)) === directory
       && [entry.introSha256, entry.sourceSha256, entry.outputSha256].every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash))
       && (entry.presenterSha256 === undefined || /^[a-f0-9]{64}$/.test(entry.presenterSha256))
-      && (entry.presenterFraming === undefined || ['closeup', 'head-and-shoulders'].includes(entry.presenterFraming)))
+      && (entry.presenterFraming === undefined || ['closeup', 'head-and-shoulders', 'half-body'].includes(entry.presenterFraming)))
       .map((entry: IntroRecord) => ({ ...entry, renderVersion: entry.renderVersion ?? data.version }))
     return { version: VERSION, entries }
   } catch { return { version: VERSION, entries: [] } }
@@ -113,16 +114,17 @@ async function probeVideo(filename: string, signal: AbortSignal): Promise<VideoI
     ...(copyCompatible ? { copy: { timeScale: timeScale!, frames, colorOptions } } : {}) }
 }
 
-function movingIntroMask(width: number, height: number, diameter: number, left: number, top: number, border: number, duration: number): string {
+function movingIntroMask(width: number, height: number, diameter: number, left: number, top: number, border: number, duration: number, framing: SciencePresenterFraming): string {
   // Only the brief moving layer needs the per-pixel warp, not a full-resolution canvas.
   if (height > 360) {
     const ratio = 360 / height, reducedWidth = Math.ceil(width * ratio / 2) * 2
     return `scale=${reducedWidth}:360:flags=lanczos,`
-      + movingIntroMask(reducedWidth, 360, diameter * ratio, left * ratio, top * ratio, border * ratio, duration)
+      + movingIntroMask(reducedWidth, 360, diameter * ratio, left * ratio, top * ratio, border * ratio, duration, framing)
       + `,scale=${width}:${height}:flags=lanczos`
   }
-  const cropSize = Math.min(width, height) * .5
-  const cropY = Math.max(0, Math.min(height - cropSize, height * .28 - cropSize / 2))
+  const cropSize = Math.min(width, height) * (framing === 'half-body' ? 1 : .5)
+  const cropY = framing === 'half-body' ? (height - cropSize) / 2
+    : Math.max(0, Math.min(height - cropSize, height * .28 - cropSize / 2))
   // Inverse-map a moving crop onto a fixed canvas, so neither scaling nor masking can resize the timeline.
   const geometry = `st(0,clip(T/${duration},0,1));st(0,ld(0)*ld(0)*(3-2*ld(0)));`
     + `st(1,W+(${diameter}-W)*ld(0));st(2,H+(${diameter}-H)*ld(0));`
@@ -150,7 +152,7 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${main.fps},format=yuv420p,`
       + `tpad=stop_mode=clone:stop_duration=${media.duration + transition},trim=duration=${media.duration + (index === 0 ? transition : 0)},setpts=PTS-STARTPTS,fps=${main.fps},settb=AVTB[v${index}]`)
   const audio = includeAudio ? concatAudioFilter(intro, main) : []
-  const diameter = Math.min(width, height, Math.max(16, Math.round(Math.min(width, height) * .25 / 2) * 2))
+  const diameter = Math.min(width, height, Math.max(16, Math.round(Math.min(width, height) * (presenterFraming === 'half-body' ? .30 : .25) / 2) * 2))
   // Some mobile feeds center-crop landscape videos to 3:2; leave room for that crop,
   // the right-side controls, and the original subtitles in the bottom 18%.
   const feedWidth = Math.min(width, height * 1.5)
@@ -159,7 +161,7 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
   const left = width - diameter - right, top = height - diameter - bottom
   const border = Math.max(1, Math.round(Math.min(width, height) * .002))
   const radius = diameter / 2, distance = 'hypot(X-(W-1)/2,Y-(H-1)/2)'
-  const presenterCrop = presenterFraming === 'closeup'
+  const presenterCrop = presenterFraming === 'closeup' || presenterFraming === 'half-body'
     ? `crop=w='max(2,floor(min(iw,ih)/2)*2)':h=ow:x='floor((iw-ow)/4)*2':y='floor((ih-oh)/4)*2'`
     : `crop=w='max(2,floor(min(iw,ih)*0.64/2)*2)':h=ow:x='floor((iw-ow)/4)*2':y='floor(max(0,min(ih-oh,ih*0.36-oh/2))/2)*2'`
   if (presenterFraming) {
@@ -170,7 +172,7 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       `[intro-prefix]trim=duration=${start},setpts=PTS-STARTPTS,settb=AVTB[prefix]`,
       `[intro-motion]trim=start=${start}:end=${intro.duration},setpts=PTS-STARTPTS,fps=${main.fps},`
         + `tpad=stop_mode=clone:stop_duration=${handoff},trim=duration=${motion + handoff},format=rgba,`
-        + `${movingIntroMask(width, height, diameter, left, top, border, motion)},`
+        + `${movingIntroMask(width, height, diameter, left, top, border, motion, presenterFraming)},`
         + `fade=t=out:st=${motion}:d=${handoff}:alpha=1,settb=AVTB[moving]`,
       '[v1]split[main-first][main-body]',
       `[main-first]trim=end_frame=1,setpts=PTS-STARTPTS,fps=${main.fps},tpad=stop_mode=clone:stop_duration=${motion},`
@@ -340,7 +342,7 @@ async function copyBodyAfterIntro(introPath: string, sourcePath: string, tempora
 export async function prepareScienceVideoWithIntro(input: ScienceVideoIntroInput, options: ScienceVideoIntroOptions): Promise<ScienceVideoIntroResult> {
   options.signal.throwIfAborted()
   const framing = options.presenterFraming ?? process.env.SCIENCE_PRESENTER_FRAMING ?? 'head-and-shoulders'
-  if (framing !== 'closeup' && framing !== 'head-and-shoulders') throw new Error('主播取景模式无效，请使用 closeup 或 head-and-shoulders')
+  if (framing !== 'closeup' && framing !== 'head-and-shoulders' && framing !== 'half-body') throw new Error('主播取景模式无效，请使用 closeup、head-and-shoulders 或 half-body')
   const configuredPresenter = options.presenterPath || process.env.SCIENCE_PRESENTER_VIDEO_PATH
   if (!configuredPresenter) throw new Error('缺少与正文同步的完整主播视频，请先生成整段主播口播视频')
   return prepareScienceVideo(input, options, path.resolve(configuredPresenter), framing)
@@ -370,8 +372,10 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
   const manifest = await readManifest(manifestPath, directory)
   const resolved = await sourceFromManifest(inputPath, directory, manifest, inputSha256, signal)
   const sourcePath = resolved.videoPath, sourceSha256 = resolved.sourceSha256
+  const presenterLayoutVersion = presenterFraming === 'half-body' ? HALF_BODY_LAYOUT_VERSION : undefined
   const cached = manifest.entries.find(entry => entry.sourceSha256 === sourceSha256 && entry.introSha256 === introSha256
     && entry.presenterSha256 === presenterSha256 && entry.renderVersion === VERSION
+    && (presenterLayoutVersion === undefined || entry.presenterLayoutVersion === presenterLayoutVersion)
     && (!presenterPath || (entry.presenterFraming ?? 'head-and-shoulders') === presenterFraming))
   if (cached && await matchesHash(cached.videoPath, cached.outputSha256, signal)) {
     options.report?.('已复用固定片头成片')
@@ -383,7 +387,8 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
   if (presenter && presenter.videoDuration + .001 < main.videoDuration) throw new Error('同步主播视频时长不足，必须覆盖正文全程，不能循环补齐')
   const width = Math.ceil(main.width / 2) * 2, height = Math.ceil(main.height / 2) * 2
   const key = createHash('sha256').update(JSON.stringify([VERSION, sourceSha256, introSha256, presenterSha256,
-    ...(presenterFraming === 'closeup' ? [presenterFraming] : [])])).digest('hex')
+    ...(presenterFraming && presenterFraming !== 'head-and-shoulders' ? [presenterFraming] : []),
+    ...(presenterLayoutVersion === undefined ? [] : [presenterLayoutVersion])])).digest('hex')
   const outputPath = path.join(directory, `science-with-intro-${key}.mp4`)
   const temporary = path.join(directory, `.science-intro-${randomUUID()}.partial.mp4`)
   const temporaryManifest = path.join(directory, `.science-intro-${randomUUID()}.json.tmp`)
@@ -422,7 +427,7 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
     signal.throwIfAborted()
     await fs.rename(temporary, outputPath)
     committedOutput = true
-    const record: IntroRecord = { videoPath: outputPath, sourcePath, sourceSha256, introSha256, presenterSha256, presenterFraming, outputSha256, renderVersion: VERSION }
+    const record: IntroRecord = { videoPath: outputPath, sourcePath, sourceSha256, introSha256, presenterSha256, presenterFraming, presenterLayoutVersion, outputSha256, renderVersion: VERSION }
     const entries = manifest.entries.filter(entry => entry.videoPath !== outputPath)
     await fs.writeFile(temporaryManifest, JSON.stringify({ version: VERSION, entries: [...entries, record] }, null, 2), { signal })
     signal.throwIfAborted()

@@ -134,11 +134,26 @@ installation, Torch installation or model download is needed:
 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 /root/rivermind-data/musetalk-runtime/bin/python api_server.py \
   --root /root/rivermind-data/MuseTalk \
-  --reference /root/rivermind-data/musetalk-speed-20261107/reference-r3-25fps.mp4 \
+  --reference /root/rivermind-data/musetalk-reference-halfbody-20261109/presenter-halfbody-720-15fps.mp4 \
   --jobs /root/rivermind-data/musetalk-jobs \
   --host 127.0.0.1 --port 8789 --fps 15 \
   --preprocessing-module /root/rivermind-data/MuseTalk/preprocessing_onnx.py
 ```
+
+The production reference changed on 2026-11-09 to the user's
+`data/static/science-intro-preview/presenter.mp4`: a 1440x1440, 7.05-second
+half-body clip with natural hand gestures. The prepared reference retains the
+complete square composition at 720x720 and 15 FPS so gestures keep their original
+speed. This is more than twice the final circle size and avoids unnecessary
+full-frame conversion overhead at 1440x1440.
+Its SHA-256 is `cc8082a7b3ec151be801a92620f53be9659ff255f3bd83e1ab27f5e71248e087`.
+The durable GPU launcher is
+`/root/rivermind-data/musetalk-reference-halfbody-20261109/start-halfbody.sh`;
+the same directory retains source provenance and the previous launch command.
+The delivery protocol remains 360x360 at 15 FPS. Application composition uses
+`half-body`, retains the complete frame and displays a 324px circle at 1080p.
+The 2026-11-07 R3 benchmark above is historical and used the earlier closeup
+reference; its timing is not a measurement of this new reference.
 
 The runtime accepts either a Git checkout at the pinned commit or its official
 source archive. Archives do not need Git metadata: SHA-256 checks of the five

@@ -155,7 +155,7 @@ test('intro-only science productions submit only the main narration and prepend 
   assert.equal(publicJob.mainVideoPath, undefined); assert.equal(publicJob.presenterPath, undefined)
 })
 
-test('new default science production uses remote MuseTalk once and composes the original main with a closeup circle', async t => {
+test('new default science production uses remote MuseTalk once and composes the original main with a half-body circle', async t => {
   const previous = process.env.SCIENCE_PRESENTER_MODE
   delete process.env.SCIENCE_PRESENTER_MODE
   t.after(() => { if (previous === undefined) delete process.env.SCIENCE_PRESENTER_MODE; else process.env.SCIENCE_PRESENTER_MODE = previous })
@@ -174,7 +174,7 @@ test('new default science production uses remote MuseTalk once and composes the 
   h.options.prepareVideo = async (input, options) => {
     assert.equal(h.service.detail(job.id).exportStep, 'compose')
     order.push('compose')
-    assert.equal(options.presenterFraming, 'closeup')
+    assert.equal(options.presenterFraming, 'half-body')
     assert.equal(options.presenterPath, input.videoPath)
     assert.equal(fs.readFileSync(input.videoPath, 'utf8'), 'finished-video')
     return { videoPath: input.videoPath, introSha256: 'a'.repeat(64), sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }

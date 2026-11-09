@@ -846,7 +846,7 @@ export class ScienceWorkflowService {
         if (presenter) {
           const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
           video = await prepare({ videoPath: main.videoPath, directory },
-            { signal, presenterPath: presenter.presenterPath, presenterFraming: 'closeup', report: message => this.report(id, message, 'export'), onProgress })
+            { signal, presenterPath: presenter.presenterPath, presenterFraming: 'half-body', report: message => this.report(id, message, 'export'), onProgress })
         } else {
           const prepare = this.options.prepareIntroVideo || intro.prepareScienceVideoWithIntroOnly
           video = await prepare({ videoPath: main.videoPath, directory },
