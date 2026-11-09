@@ -57,6 +57,7 @@ async function fixture(t: any) {
       }))
     },
   } }
+  options.profile = { style: 'science-title-poster-v1', toolName: SCIENCE_COVER_TOOL, systemPrompt: '封面设计测试', imageBrief: '真实摄影', imageType: 'science_cover_base' }
   return { input, options, images, states, requests, executes, composed, calls: () => calls }
 }
 
@@ -78,6 +79,33 @@ test('strict-tool design generates independently composed posters, preserves ins
   await generateScienceCoverPosters(f.input, f.options)
   assert.equal(f.executes.length, 2, 'damaged output recomposes the saved independent base, with no paid image request')
   assert.deepEqual(f.composed, ['landscape', 'portrait', 'portrait'])
+})
+
+test('the real presenter is composited on both posters and changing its identity only recomposes the saved bases', async t => {
+  const f = await fixture(t), presenterPath = path.join(f.input.directory, 'presenter.png')
+  const photograph = async (background: string) => sharp({ create: { width: 330, height: 730, channels: 4, background: '#00000000' } })
+    .composite([{ input: await sharp({ create: { width: 300, height: 700, channels: 4, background } }).png().toBuffer(), left: 15, top: 15 }]).png().toFile(presenterPath)
+  await photograph('#00ff00')
+  Object.assign(f.input, { presenterPath })
+  const result = await generateScienceCoverPosters(f.input, f.options)
+  const sample = async (file: string, x: number, y: number) => [...await sharp(file).extract({ left: x, top: y, width: 1, height: 1 }).raw().toBuffer()]
+  assert.ok((await sample(result.landscapePath, 1130, 500))[1]! > 220, 'landscape must contain the actual presenter photograph')
+  assert.ok((await sample(result.portraitPath, 690, 800))[1]! > 220, 'portrait must contain the actual presenter photograph')
+  const checkpoint = () => fs.readFile(path.join(f.input.directory, 'poster-checkpoint.json'), 'utf8').then(JSON.parse)
+  assert.match((await checkpoint()).outputs.landscape.presenterSha256, /^[a-f0-9]{64}$/)
+  await photograph('#ff0000')
+  await generateScienceCoverPosters(f.input, f.options)
+  assert.ok((await sample(result.landscapePath, 1130, 500))[0]! > 220, 'a different presenter must invalidate composed output')
+  assert.equal(f.calls(), 1)
+  assert.equal(f.executes.length, 2, 'presenter changes must not regenerate paid background images')
+  assert.equal(f.composed.length, 4)
+})
+
+test('an explicit missing presenter cannot silently generate a cover without the host', async t => {
+  const f = await fixture(t)
+  Object.assign(f.input, { presenterPath: path.join(f.input.directory, 'missing-presenter.png') })
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /主播/)
+  assert.equal(f.requests.length, 0)
 })
 
 test('a failed portrait query resumes its saved provider job and never regenerates the finished landscape', async t => {

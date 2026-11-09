@@ -236,7 +236,7 @@ export async function inspectScienceUploadAssets(input: { videoPath: string; lan
 }
 export interface SciencePosterAssetsInput {
   videoPath: string; directory: string; title: string; script: string
-  sourceTitle?: string; instruction?: string; revision: number
+  sourceTitle?: string; instruction?: string; revision: number; presenterPath?: string
 }
 export async function prepareScienceUploadAssets(input: SciencePosterAssetsInput, options: {
   signal: AbortSignal
@@ -260,8 +260,18 @@ export async function prepareScienceUploadAssets(input: SciencePosterAssetsInput
   const videoSha256 = await sha256File(input.videoPath, options.signal)
   await fs.mkdir(input.directory, { recursive: true })
   const manifest = path.join(input.directory, 'upload-assets.json')
-  const inputDigest = createHash('sha256').update(JSON.stringify([videoSha256, input.title, input.script,
-    input.sourceTitle || '', input.instruction || '', input.revision, ...(options.coverStyle ? [options.coverStyle] : [])])).digest('hex')
+  const legacyInputs = [videoSha256, input.title, input.script,
+    input.sourceTitle || '', input.instruction || '', input.revision, ...(options.coverStyle ? [options.coverStyle] : [])]
+  const legacyInputDigest = createHash('sha256').update(JSON.stringify(legacyInputs)).digest('hex')
+  const sciencePoster = !options.coverStyle || options.coverStyle === 'science-title-poster-v1'
+  const { SCIENCE_COVER_COMPOSITION_VERSION, resolveScienceCoverPresenter } = await import('./science-cover-poster.js')
+  // Custom generators own their assets unless an explicit presenter is supplied.
+  const presenter = sciencePoster && (!options.generatePosters || input.presenterPath)
+    ? await resolveScienceCoverPresenter(input.presenterPath) : undefined
+  const compositionVersion = sciencePoster ? SCIENCE_COVER_COMPOSITION_VERSION : undefined
+  const inputDigest = sciencePoster ? createHash('sha256').update(JSON.stringify([
+    ...legacyInputs, compositionVersion, presenter?.sha256 || 'custom-generator',
+  ])).digest('hex') : legacyInputDigest
   const saved = await readJson(manifest)
   if (saved?.version === 2 && saved.inputDigest === inputDigest
     && await validCover(saved.landscapePath, 1280, 720, saved.landscapeSha256, options.signal)
@@ -269,11 +279,14 @@ export async function prepareScienceUploadAssets(input: SciencePosterAssetsInput
     return { videoSha256, landscapePath: saved.landscapePath, portraitPath: saved.portraitPath,
       landscapeSha256: saved.landscapeSha256, portraitSha256: saved.portraitSha256 }
   }
-  if (saved?.version === 2 && saved.inputDigest !== inputDigest) throw new Error('封面版本与当前文稿或指令不符，请重新生成新版本')
+  const legacyComposition = sciencePoster && saved?.version === 2 && saved.compositionVersion === undefined
+    && saved.inputDigest === legacyInputDigest
+  if (saved?.version === 2 && saved.inputDigest !== inputDigest && !legacyComposition) throw new Error('封面版本与当前文稿或指令不符，请重新生成新版本')
   const generate = options.generatePosters || (await import('./science-cover-poster.js')).generateScienceCoverPosters
-  const posters = await generate(input, { signal: options.signal, report: options.report })
+  const posters = await generate(presenter ? { ...input, presenterPath: presenter.path } : input, { signal: options.signal, report: options.report })
   options.signal.throwIfAborted()
   const assets = await inspectScienceUploadAssets({ videoPath: input.videoPath, ...posters }, options)
-  await writeJson(manifest, { version: 2, style: options.coverStyle || 'science-title-poster-v1', inputDigest, ...assets })
+  await writeJson(manifest, { version: 2, style: options.coverStyle || 'science-title-poster-v1', inputDigest,
+    ...(sciencePoster ? { compositionVersion, presenterSha256: presenter?.sha256 } : {}), ...assets })
   return assets
 }

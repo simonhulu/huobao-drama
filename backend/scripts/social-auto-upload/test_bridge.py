@@ -500,7 +500,7 @@ class BridgeSafetyTest(unittest.TestCase):
     def test_only_previously_source_verified_matching_covers_are_reused(self):
         page = MagicMock()
         page.evaluate = AsyncMock(return_value=[])
-        verified = {kind: {"fingerprint": "source-sha", "source_sha256_verified": "source-sha"} for kind in ("landscape", "portrait")}
+        verified = {kind: {"fingerprint": "source-sha", "source_sha256_verified": "source-sha", "preview": kind} for kind in ("landscape", "portrait")}
         with patch.object(bridge.Path, "read_bytes", return_value=b"image"):
             covers = asyncio.run(bridge.baijiahao_covers(page, {"landscapePath": "local", "portraitPath": "portrait"}, self.cover_helpers(), verified))
         page.locator.assert_not_called()
@@ -521,13 +521,14 @@ class BridgeSafetyTest(unittest.TestCase):
             clicked = True
         button.click = AsyncMock(side_effect=click)
         page.locator.return_value.nth.return_value.get_by_role.return_value = button
-        verified = {"landscape": {"fingerprint": "source-sha", "source_sha256_verified": "source-sha"}}
+        page.locator.return_value.evaluate_all = AsyncMock(return_value=[0])
+        verified = {"landscape": {"fingerprint": "source-sha", "source_sha256_verified": "source-sha", "preview": "landscape"}}
         checkpoints = []
         with patch.object(bridge.Path, "read_bytes", return_value=b"image"), patch.object(bridge.asyncio, "sleep", new=AsyncMock()):
             covers = asyncio.run(bridge.baijiahao_covers(page, {"landscapePath": "local", "portraitPath": "portrait"}, self.cover_helpers(), verified, checkpoints.append))
         button.click.assert_awaited_once()
         self.assertIn("portrait", checkpoints[0])
-        self.assertNotIn("landscape", checkpoints[0])
+        self.assertNotEqual(checkpoints[0].get("landscape", {}).get("status"), "uploaded")
         self.assertEqual(set(covers), {"layout", "portrait", "landscape"})
 
 

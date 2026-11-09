@@ -215,7 +215,7 @@ else{const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},process.argv.slice(2),{s
   })
   const running = prepareScienceVideoWithIntro(f, { signal: controller.signal, introPath: f.introPath, presenterPath: f.presenterPath })
   const rejected = assert.rejects(running, /abort|cancel/i)
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 500; attempt++) {
     try { pid = Number(await fs.readFile(pidFile, 'utf8')); break } catch {}
     await new Promise(resolve => setTimeout(resolve, 20))
   }
@@ -310,13 +310,13 @@ test('the intro visibly shrinks and travels into the lower-right circle before s
     `the same intro travels toward the lower right: ${JSON.stringify([early, middle, late])}`)
   const revealed = await pixel(result.videoPath, .533, { x: 80, y: 60, width: 4, height: 4 })
   assert.ok(revealed[2]! > 200 && revealed[0]! < 40, `the main is revealed behind the moving intro: ${revealed}`)
-  const circle = await pixel(result.videoPath, 1.35, { x: 288, y: 148, width: 8, height: 8 })
+  const circle = await pixel(result.videoPath, 1.35, { x: 235, y: 119, width: 8, height: 8 })
   assert.ok(circle[0]! + circle[1]! > 70, `presenter is visible in lower right: ${circle}`)
-  for (const point of [{ x: 268, y: 128 }, { x: 160, y: 145 }, { x: 290, y: 70 }]) {
+  for (const point of [{ x: 215, y: 99 }, { x: 160, y: 145 }, { x: 290, y: 70 }]) {
     const outside = await pixel(result.videoPath, 1.35, { ...point, width: 2, height: 2 })
     assert.ok(outside[2]! > 200 && outside[0]! < 40, `main remains outside circular window: ${outside}`)
   }
-  const crop = 'crop=46:46:269:129'
+  const crop = 'crop=46:46:216:100'
   const frame = async (timestamp: number) => (await exec('ffmpeg', ['-nostdin', '-v', 'error', '-ss', String(timestamp), '-i', result.videoPath,
     '-frames:v', '1', '-vf', crop, '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'], { encoding: 'buffer' })).stdout
   const first = await frame(1.2), later = await frame(1.6)
@@ -332,12 +332,35 @@ test('HD motion stays correctly framed while the final presenter and output reta
   const result = await prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath })
   const video = (await probe(result.videoPath)).streams.find((item: any) => item.codec_type === 'video')
   assert.deepEqual([video.width, video.height], [1280, 720])
-  const moving = await pixel(result.videoPath, .533, { x: 1096, y: 556, width: 8, height: 8 })
+  const moving = await pixel(result.videoPath, .533, { x: 914, y: 463, width: 8, height: 8 })
   assert.ok(moving[0]! > 200 && moving[2]! < 40, `the shrinking intro remains at its expected HD position: ${moving}`)
   const outside = await pixel(result.videoPath, .533, { x: 400, y: 200, width: 8, height: 8 })
   assert.ok(outside[2]! > 200 && outside[0]! < 40, `main is revealed outside the moving layer: ${outside}`)
-  const circle = await pixel(result.videoPath, 1.35, { x: 1164, y: 604, width: 8, height: 8 })
+  const circle = await pixel(result.videoPath, 1.35, { x: 956, y: 496, width: 8, height: 8 })
   assert.ok(circle[0]! + circle[1]! > 70, `full-size presenter remains visible in the final window: ${circle}`)
+})
+
+for (const dimensions of ['320x180', '300x200', '180x320']) test(`mobile feed preserves the full presenter above subtitles at ${dimensions}`, async t => {
+  const f = await fixture(t)
+  const [width, height] = dimensions.split('x').map(Number) as [number, number]
+  await clip(f.videoPath, 'blue', 880, dimensions, 15, 48000, 2, 1.2)
+  await clip(f.presenterPath, 'yellow', 2200, '160x160', 15, 48000, 2, 1.3)
+  const result = await prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath })
+  const video = (await probe(result.videoPath)).streams.find((item: any) => item.codec_type === 'video')
+  assert.deepEqual([video.width, video.height], [width, height], 'keep the original video aspect ratio')
+  const { stdout } = await exec('ffmpeg', ['-nostdin', '-v', 'error', '-ss', '1.35', '-i', result.videoPath,
+    '-frames:v', '1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'], { encoding: 'buffer' })
+  const cropWidth = Math.min(width, height * 1.5), cropLeft = (width - cropWidth) / 2
+  let presenterPixels = 0
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const index = (y * width + x) * 3
+    if (stdout[index]! < 170 || stdout[index + 1]! < 160) continue
+    presenterPixels++
+    assert.ok(x >= cropLeft && x < cropLeft + cropWidth, `the centered 3:2 feed crop must retain presenter pixel ${x},${y}`)
+    assert.ok(x < cropLeft + cropWidth * .88, 'presenter must clear the right-side player controls after cropping')
+    assert.ok(y < height * .82, 'presenter must clear the bottom subtitle band')
+  }
+  assert.ok(presenterPixels > 500, 'the full presenter is visible in the actual encoded frame')
 })
 
 test('a missing or too-short synchronized presenter is rejected instead of looping or substituting silence', async t => {
@@ -360,7 +383,7 @@ test('presenter byte changes invalidate the composite while keeping the original
   assert.ok(Math.abs(Number((await probe(changed.videoPath)).format.duration) - 1.8) < .2)
 })
 
-for (const legacyVersion of [1, 2, 3] as const) test(`version-${legacyVersion} composites recover the original main and upgrade their render without repeating the intro`, async t => {
+for (const legacyVersion of [1, 2, 3, 4] as const) test(`version-${legacyVersion} composites recover the original main and upgrade their render without repeating the intro`, async t => {
   const f = await fixture(t)
   await fs.mkdir(f.directory, { recursive: true })
   const oldOutput = path.join(f.directory, 'science-with-intro-' + '1'.repeat(64) + '.mp4')
@@ -380,10 +403,10 @@ for (const legacyVersion of [1, 2, 3] as const) test(`version-${legacyVersion} c
   assert.equal(upgraded.sourceSha256, await digest(f.videoPath))
   assert.ok(Math.abs(Number((await probe(upgraded.videoPath)).format.duration) - 1.8) < .2, 'upgrade does not prepend the intro twice')
   const manifest = JSON.parse(await fs.readFile(path.join(f.directory, 'science-video-intro.json'), 'utf8'))
-  assert.equal(manifest.version, 4)
+  assert.equal(manifest.version, 5)
   const current = manifest.entries.find((entry: any) => entry.videoPath === upgraded.videoPath)
   assert.equal(current.presenterSha256, await digest(f.presenterPath))
-  assert.equal(current.renderVersion, 4)
+  assert.equal(current.renderVersion, 5)
   assert.equal(manifest.entries.find((entry: any) => entry.videoPath === oldOutput).renderVersion, legacyVersion)
   assert.deepEqual(await resolveScienceVideoIntroSource({ videoPath: oldOutput, directory: f.directory }, { signal: signal() }),
     { videoPath: f.videoPath, sourceSha256: await digest(f.videoPath) })
@@ -410,9 +433,9 @@ test('the circular presenter is framed on the head and shoulders rather than the
     'color=yellow:s=160x160:r=15:d=1.3,drawbox=x=0:y=0:w=160:h=40:color=red:t=fill,drawbox=x=0:y=110:w=160:h=50:color=green:t=fill',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-an', f.presenterPath])
   const result = await prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath })
-  const shoulder = await pixel(result.videoPath, 1.35, { x: 290, y: 162, width: 4, height: 4 })
+  const shoulder = await pixel(result.videoPath, 1.35, { x: 237, y: 133, width: 4, height: 4 })
   assert.ok(shoulder[0]! > 170 && shoulder[1]! > 170 && shoulder[2]! < 60, `window retains the shoulder area rather than lower body: ${shoulder}`)
-  const head = await pixel(result.videoPath, 1.35, { x: 290, y: 136, width: 4, height: 4 })
+  const head = await pixel(result.videoPath, 1.35, { x: 237, y: 107, width: 4, height: 4 })
   assert.ok(head[0]! > 170 && head[1]! < 70, `head top stays inside the circular frame: ${head}`)
 })
 
@@ -426,11 +449,11 @@ test('closeup framing preserves the chin area and never reuses the zoomed presen
   const closeup = await prepareScienceVideoWithIntro({ ...f, videoPath: zoomed.videoPath }, { ...options, presenterFraming: 'closeup' })
   assert.notEqual(closeup.videoPath, zoomed.videoPath)
   assert.equal(closeup.sourceSha256, zoomed.sourceSha256)
-  const chin = await pixel(closeup.videoPath, 1.35, { x: 290, y: 162, width: 4, height: 4 })
+  const chin = await pixel(closeup.videoPath, 1.35, { x: 237, y: 133, width: 4, height: 4 })
   assert.ok(chin[1]! > 170 && chin[0]! < 70 && chin[2]! < 70, `full closeup keeps the lower face: ${chin}`)
-  const zoomedChin = await pixel(zoomed.videoPath, 1.35, { x: 290, y: 162, width: 4, height: 4 })
+  const zoomedChin = await pixel(zoomed.videoPath, 1.35, { x: 237, y: 133, width: 4, height: 4 })
   assert.ok(zoomedChin[0]! > 170 && zoomedChin[1]! > 170, 'legacy zoom excludes the closeup lower-face marker')
-  const forehead = await pixel(closeup.videoPath, 1.35, { x: 290, y: 134, width: 4, height: 4 })
+  const forehead = await pixel(closeup.videoPath, 1.35, { x: 237, y: 105, width: 4, height: 4 })
   assert.ok(forehead[0]! > 170 && forehead[1]! < 70, `closeup retains the upper face: ${forehead}`)
   assert.deepEqual(await prepareScienceVideoWithIntro(f, { ...options, presenterFraming: 'closeup' }), closeup)
   const manifest = JSON.parse(await fs.readFile(path.join(f.directory, 'science-video-intro.json'), 'utf8'))

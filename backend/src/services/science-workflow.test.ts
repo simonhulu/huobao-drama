@@ -1697,6 +1697,21 @@ test('upload never generates posters on demand and refuses legacy frame covers',
   assert.equal(generated, 1); assert.equal(h.calls.upload, 0)
 })
 
+test('unsubmitted legacy posters receive a new presenter revision without overwriting the original cover', async t => {
+  const h = fixture(t), job = await prepared(h)
+  h.service.produce(job.id); await h.service.waitForIdle()
+  const file = path.join(h.root, 'jobs', job.id, 'job.json')
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const originalPath = stored.coverAssets.landscapePath
+  stored.coverSourceDigest = createHash('sha256').update(JSON.stringify([stored.title, stored.script, stored.sourceTitle, stored.coverInstruction || ''])).digest('hex')
+  fs.writeFileSync(file, JSON.stringify(stored))
+  h.service.covers(job.id); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).coverRevision, 2)
+  assert.notEqual(h.service.asset(job.id, 'landscape-cover'), originalPath)
+  assert.equal(fs.existsSync(originalPath), true)
+  assert.equal(h.calls.upload, 0)
+})
+
 test('poster regeneration saves custom instructions and resumes a failed revision without losing the previous poster', async t => {
   const h = fixture(t), job = await prepared(h)
   h.service.produce(job.id); await h.service.waitForIdle()

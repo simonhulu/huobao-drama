@@ -10,7 +10,7 @@ import { getVideoEncoderOptions } from './composition/video-encoder.js'
 
 const exec = promisify(execFile)
 const defaultIntroPath = fileURLToPath(new URL('../../../data/science-pop/assets/xiaolu-intro.mp4', import.meta.url))
-const VERSION = 4
+const VERSION = 5
 
 export interface ScienceVideoIntroInput { videoPath: string; directory: string }
 export type SciencePresenterFraming = 'closeup' | 'head-and-shoulders'
@@ -43,7 +43,7 @@ async function matchesHash(filename: string, expected: string, signal: AbortSign
 async function readManifest(filename: string, directory: string): Promise<IntroManifest> {
   try {
     const data = JSON.parse(await fs.readFile(filename, 'utf8'))
-    if (![1, 2, 3, VERSION].includes(data.version) || !Array.isArray(data.entries)) throw new Error('Invalid intro manifest')
+    if (![1, 2, 3, 4, VERSION].includes(data.version) || !Array.isArray(data.entries)) throw new Error('Invalid intro manifest')
     const entries = data.entries.filter((entry: IntroRecord) => entry && typeof entry.sourcePath === 'string'
       && typeof entry.videoPath === 'string' && path.dirname(path.resolve(entry.videoPath)) === directory
       && [entry.introSha256, entry.sourceSha256, entry.outputSha256].every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash))
@@ -113,12 +113,12 @@ async function probeVideo(filename: string, signal: AbortSignal): Promise<VideoI
     ...(copyCompatible ? { copy: { timeScale: timeScale!, frames, colorOptions } } : {}) }
 }
 
-function movingIntroMask(width: number, height: number, diameter: number, margin: number, border: number, duration: number): string {
+function movingIntroMask(width: number, height: number, diameter: number, left: number, top: number, border: number, duration: number): string {
   // Only the brief moving layer needs the per-pixel warp, not a full-resolution canvas.
   if (height > 360) {
     const ratio = 360 / height, reducedWidth = Math.ceil(width * ratio / 2) * 2
     return `scale=${reducedWidth}:360:flags=lanczos,`
-      + movingIntroMask(reducedWidth, 360, diameter * ratio, margin * ratio, border * ratio, duration)
+      + movingIntroMask(reducedWidth, 360, diameter * ratio, left * ratio, top * ratio, border * ratio, duration)
       + `,scale=${width}:${height}:flags=lanczos`
   }
   const cropSize = Math.min(width, height) * .5
@@ -126,7 +126,7 @@ function movingIntroMask(width: number, height: number, diameter: number, margin
   // Inverse-map a moving crop onto a fixed canvas, so neither scaling nor masking can resize the timeline.
   const geometry = `st(0,clip(T/${duration},0,1));st(0,ld(0)*ld(0)*(3-2*ld(0)));`
     + `st(1,W+(${diameter}-W)*ld(0));st(2,H+(${diameter}-H)*ld(0));`
-    + `st(3,(W-${diameter}-${margin})*ld(0));st(4,(H-${diameter}-${margin})*ld(0));`
+    + `st(3,${left}*ld(0));st(4,${top}*ld(0));`
     + 'st(5,min(ld(1),ld(2))*ld(0)/2);'
     + 'st(6,abs(X-ld(3)-ld(1)/2)-(ld(1)/2-ld(5)));st(7,abs(Y-ld(4)-ld(2)/2)-(ld(2)/2-ld(5)));'
     + 'st(8,hypot(max(ld(6),0),max(ld(7),0))+min(max(ld(6),ld(7)),0)-ld(5));'
@@ -150,8 +150,14 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${main.fps},format=yuv420p,`
       + `tpad=stop_mode=clone:stop_duration=${media.duration + transition},trim=duration=${media.duration + (index === 0 ? transition : 0)},setpts=PTS-STARTPTS,fps=${main.fps},settb=AVTB[v${index}]`)
   const audio = includeAudio ? concatAudioFilter(intro, main) : []
-  const diameter = Math.min(width, Math.max(16, Math.round(height * .25 / 2) * 2))
-  const margin = Math.max(2, Math.round(height * .03)), border = Math.max(1, Math.round(height * .002))
+  const diameter = Math.min(width, height, Math.max(16, Math.round(Math.min(width, height) * .25 / 2) * 2))
+  // Some mobile feeds center-crop landscape videos to 3:2; leave room for that crop,
+  // the right-side controls, and the original subtitles in the bottom 18%.
+  const feedWidth = Math.min(width, height * 1.5)
+  const right = Math.ceil(((width - feedWidth) / 2 + feedWidth * .12) / 2) * 2
+  const bottom = Math.ceil(height * .18 / 2) * 2
+  const left = width - diameter - right, top = height - diameter - bottom
+  const border = Math.max(1, Math.round(Math.min(width, height) * .002))
   const radius = diameter / 2, distance = 'hypot(X-(W-1)/2,Y-(H-1)/2)'
   const presenterCrop = presenterFraming === 'closeup'
     ? `crop=w='max(2,floor(min(iw,ih)/2)*2)':h=ow:x='floor((iw-ow)/4)*2':y='floor((ih-oh)/4)*2'`
@@ -164,7 +170,7 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       `[intro-prefix]trim=duration=${start},setpts=PTS-STARTPTS,settb=AVTB[prefix]`,
       `[intro-motion]trim=start=${start}:end=${intro.duration},setpts=PTS-STARTPTS,fps=${main.fps},`
         + `tpad=stop_mode=clone:stop_duration=${handoff},trim=duration=${motion + handoff},format=rgba,`
-        + `${movingIntroMask(width, height, diameter, margin, border, motion)},`
+        + `${movingIntroMask(width, height, diameter, left, top, border, motion)},`
         + `fade=t=out:st=${motion}:d=${handoff}:alpha=1,settb=AVTB[moving]`,
       '[v1]split[main-first][main-body]',
       `[main-first]trim=end_frame=1,setpts=PTS-STARTPTS,fps=${main.fps},tpad=stop_mode=clone:stop_duration=${motion},`
@@ -177,7 +183,7 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       `[ring-input]format=rgba,geq=r=245:g=245:b=245:a='gte(${distance},${radius - border})*255'[ring]`,
       '[presenter-colors][ring]overlay=format=rgb[presenter-framed]',
       '[presenter-framed][presenter-mask]alphamerge[presenter]',
-      `[main-body][presenter]overlay=x=${width - diameter - margin}:y=${height - diameter - margin}:eof_action=pass:format=yuv420,`
+      `[main-body][presenter]overlay=x=${left}:y=${top}:eof_action=pass:format=yuv420,`
         + `format=yuv420p,fps=${main.fps},settb=AVTB[body]`,
       '[reveal][body]concat=n=2:v=1:a=0[underlay]',
       '[underlay][moving]overlay=x=0:y=0:eof_action=pass:repeatlast=0:format=yuv420,format=yuv420p,settb=AVTB[transition-body]',

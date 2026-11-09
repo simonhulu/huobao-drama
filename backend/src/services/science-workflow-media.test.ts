@@ -353,3 +353,36 @@ test('upload preparation rejects silent video before any cover can be attached',
   await assert.rejects(prepareScienceUploadAssets({ videoPath, directory: path.join(root, 'upload'), title: '冰', script: '冰的密度低。', revision: 1 }, { signal: signal() }), /视频画面和音轨/)
   await assert.rejects(fs.stat(path.join(root, 'upload', 'upload-assets.json')))
 })
+
+test('presenter covers upgrade a legacy manifest and bind reuse to the actual presenter identity', async t => {
+  const root = await directory(t), videoPath = path.join(root, 'final.mp4'), presenterPath = path.join(root, 'presenter.png')
+  await sampleVideo(videoPath)
+  await sharp({ create: { width: 320, height: 480, channels: 3, background: '#ffccaa' } }).png().toFile(presenterPath)
+  const input = { videoPath, presenterPath, directory: path.join(root, 'upload'), title: '冰为什么浮起来', script: '冰的密度比水低。', revision: 1 }
+  let generations = 0
+  const options = { signal: signal(), generatePosters: async (request: { presenterPath?: string }) => {
+    generations++
+    assert.equal(request.presenterPath, presenterPath)
+    const landscapePath = path.join(input.directory, 'landscape.jpg'), portraitPath = path.join(input.directory, 'portrait.jpg')
+    await sharp({ create: { width: 1280, height: 720, channels: 3, background: '#101010' } }).jpeg().toFile(landscapePath)
+    await sharp({ create: { width: 810, height: 1080, channels: 3, background: '#201010' } }).jpeg().toFile(portraitPath)
+    return { landscapePath, portraitPath }
+  } }
+  const first = await prepareScienceUploadAssets(input, options)
+  const manifest = path.join(input.directory, 'upload-assets.json')
+  const legacy = JSON.parse(await fs.readFile(manifest, 'utf8'))
+  legacy.inputDigest = hash(JSON.stringify([first.videoSha256, input.title, input.script, '', '', input.revision]))
+  delete legacy.compositionVersion
+  delete legacy.presenterSha256
+  await fs.writeFile(manifest, JSON.stringify(legacy))
+  await prepareScienceUploadAssets(input, options)
+  assert.equal(generations, 2, 'a legacy manifest must not hide the new presenter composition')
+  const upgraded = JSON.parse(await fs.readFile(manifest, 'utf8'))
+  assert.equal(upgraded.compositionVersion, 2)
+  assert.equal(upgraded.presenterSha256, createHash('sha256').update(await fs.readFile(presenterPath)).digest('hex'))
+  await prepareScienceUploadAssets(input, options)
+  assert.equal(generations, 2)
+  await sharp({ create: { width: 320, height: 480, channels: 3, background: '#112233' } }).png().toFile(presenterPath)
+  await assert.rejects(prepareScienceUploadAssets(input, options), /新版本/)
+  assert.equal(generations, 2, 'a changed identity cannot overwrite a bound cover revision')
+})

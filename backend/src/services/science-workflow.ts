@@ -19,6 +19,7 @@ import type { SocialUploadProgress, SocialUploadResult, SocialUploadReviewInput 
 import type { ScienceVideoIntroProgress } from './science-video-intro.js'
 import type * as mediaTools from './science-workflow-media.js'
 import { hasScienceTranscriptCheckpoint, releaseScienceSourceMedia } from './science-workflow-media.js'
+import { SCIENCE_COVER_COMPOSITION_VERSION } from './science-cover-poster.js'
 
 export const SCIENCE_BAIJIAHAO_TAG = '#热爆趣创赛#'
 export const SCIENCE_CREATION_DECLARATION = '个人观点，仅供参考'
@@ -781,7 +782,7 @@ export class ScienceWorkflowService {
     })
   }
   private coverContentDigest(job: StoredJob, instruction = job.coverInstruction || '') {
-    return digest(JSON.stringify([job.title, job.script, job.sourceTitle, instruction]))
+    return digest(JSON.stringify([job.title, job.script, job.sourceTitle, instruction, SCIENCE_COVER_COMPOSITION_VERSION]))
   }
   private async inspectPreparedCovers(id: string, signal: AbortSignal) {
     const job = this.read(id), assets = job.coverAssets

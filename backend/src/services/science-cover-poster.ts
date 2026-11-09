@@ -7,6 +7,9 @@ import sharp from 'sharp'
 import { z } from 'zod'
 import type { callTextModel, TextModelTool } from './ai.js'
 import type { composeCoverVariants } from './cover-image-composer.js'
+import { SCIENCE_COVER_COMPOSITION_VERSION, resolveScienceCoverPresenter, prepareScienceCoverPresenter, composeScienceCoverPresenter,
+  type ScienceCoverPresenter } from './science-cover-presenter.js'
+export { SCIENCE_COVER_COMPOSITION_VERSION, resolveScienceCoverPresenter } from './science-cover-presenter.js'
 
 export const SCIENCE_COVER_STYLE = 'science-title-poster-v1'
 export const SCIENCE_COVER_TOOL = 'submit_science_cover_design'
@@ -50,10 +53,10 @@ interface PosterCheckpoint {
   version: 1; style: string; inputHash: string; revision: number
   plan?: ScienceCoverPlan
   images: Partial<Record<FormatKey, ImageCheckpoint>>
-  outputs: Partial<Record<FormatKey, { sha256: string }>>
+  outputs: Partial<Record<FormatKey, { sha256: string; compositionHash?: string; presenterSha256?: string }>>
 }
 export interface SciencePosterInput {
-  title: string; script: string; sourceTitle?: string; instruction?: string; directory: string; revision: number
+  title: string; script: string; sourceTitle?: string; instruction?: string; directory: string; revision: number; presenterPath?: string
 }
 export interface SciencePosterOptions {
   signal: AbortSignal
@@ -200,6 +203,9 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
   if (activeDirectories.has(directory)) throw new Error('该版本封面正在生成，请勿重复提交')
   activeDirectories.add(directory)
   try {
+    const presenterSource = !options.profile || input.presenterPath ? await resolveScienceCoverPresenter(input.presenterPath) : undefined
+    const compositionHash = presenterSource ? hash(JSON.stringify([SCIENCE_COVER_COMPOSITION_VERSION, 'person-v3', presenterSource.sha256])) : undefined
+    let presenter: ScienceCoverPresenter | undefined
     await fs.mkdir(directory, { recursive: true })
     const checkpointPath = path.join(directory, 'poster-checkpoint.json')
     const inputHash = hash(JSON.stringify([style, input.revision, input.title, input.script, input.sourceTitle || '', input.instruction || '']))
@@ -218,14 +224,16 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
     for (const format of formats) {
       options.signal.throwIfAborted()
       const outputPath = path.join(directory, `cover-${format.key}.jpg`)
-      if (checkpoint.outputs[format.key] && await verifyImage(outputPath, checkpoint.outputs[format.key]!.sha256, format)) continue
+      if (checkpoint.outputs[format.key] && checkpoint.outputs[format.key]!.compositionHash === compositionHash
+        && await verifyImage(outputPath, checkpoint.outputs[format.key]!.sha256, format)) continue
       runtime ??= options.dependencies?.images || await defaultImageRuntime()
       let image = checkpoint.images[format.key]
       const restoredGenerationId = image?.generationId
       let retriedRejectedModel = false
       const prompt = `${format.key === 'landscape' ? plan.landscapePrompt : plan.portraitPrompt}\n${options.profile?.imageBrief || '独立拍摄的科普海报底图。真实摄影'}，主体为：${plan.subject}。禁止任何文字、字母、数字、logo、水印、标题、字幕、UI、边框或人物讲解小窗。${format.key === 'landscape'
         ? `${plan.landscapeTextSide === 'text-left' ? '左侧' : '右侧'}50%是干净暗背景供后期排字，主体在另一侧，占画面约一半。`
-        : '竖版3:4；上方45%是干净暗背景供后期排字，主体在下方55%，保持完整重要特征。'}`
+        : '竖版3:4；上方45%是干净暗背景供后期排字，主体在下方55%，保持完整重要特征。'}${presenterSource
+        ? `后期会加入真实主播半身照片，${format.key === 'landscape' ? plan.landscapeTextSide === 'text-left' ? '右下角约28%宽、58%高' : '左下角约28%宽、58%高' : '右下角约40%宽、46%高'}请保留背景空间，主题主体的重要辨识部位避开该区域，不要生成任何主持人。` : ''}`
       const createImage = async (config: ConfigBinding, model = config.models?.[0], rejectedModels?: ImageCheckpoint['rejectedModels']) => {
         options.signal.throwIfAborted()
         const created: ImageCheckpoint = { generationId: await runtime!.create({ prompt, size: format.size, frameType: format.frameType,
@@ -281,11 +289,18 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
       }
       options.signal.throwIfAborted()
       options.report?.(`正在排版${format.key === 'landscape' ? '横版' : '竖版'}标题海报`)
+      let composedBase = basePath
+      if (presenterSource) {
+        presenter ??= await prepareScienceCoverPresenter(presenterSource, options.signal)
+        composedBase = path.join(directory, `presenter-${format.key}-${compositionHash!.slice(0, 16)}.png`)
+        await composeScienceCoverPresenter(basePath, presenter, format, plan.landscapeTextSide, composedBase)
+        options.signal.throwIfAborted()
+      }
       const compose = options.dependencies?.compose || (await import('./cover-image-composer.js')).composeCoverVariants
       const [rendered] = await compose({ design: { main_title: plan.headlineLines.join('\n'), highlight_text: plan.highlight,
         headline_lines: plan.headlineLines.length as 2 | 3, thumbnail_layout: plan.landscapeTextSide,
         accent_color: '#FFE600', sub_title: '', kicker: options.profile?.kicker || '', episode_label: '' },
-        variants: [{ key: format.key, baseImagePath: basePath, width: format.width, height: format.height }], outputDir: directory })
+        variants: [{ key: format.key, baseImagePath: composedBase, width: format.width, height: format.height }], outputDir: directory })
       if (!rendered) throw new Error('标题海报排版没有返回图片')
       const temporary = `${outputPath}.${randomUUID()}.tmp`
       try {
@@ -293,7 +308,8 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
         if (!await verifyImage(temporary, undefined, format)) throw new Error('生成的标题海报尺寸不正确')
         await fs.rename(temporary, outputPath)
       } finally { await fs.rm(temporary, { force: true }) }
-      checkpoint.outputs[format.key] = { sha256: hash(await fs.readFile(outputPath)) }
+      checkpoint.outputs[format.key] = { sha256: hash(await fs.readFile(outputPath)),
+        ...(presenterSource ? { compositionHash, presenterSha256: presenterSource.sha256 } : {}) }
       await save()
       options.signal.throwIfAborted()
     }

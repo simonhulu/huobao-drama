@@ -21,6 +21,7 @@ class FinalCoverRecoveryTest(unittest.IsolatedAsyncioTestCase):
             verify_page=AsyncMock(side_effect=[RuntimeError(self.error), None]),
             _file_digest=lambda path: {"wide": "wide-sha", "tall": "tall-sha"}[path],
             _verify_metadata=AsyncMock(),
+            verify_upload=AsyncMock(),
         )
         self.dialogs = AsyncMock(return_value=[{"text": "竖版封面预览"}])
         self.confirm = AsyncMock(return_value=self.covers)
@@ -41,6 +42,30 @@ class FinalCoverRecoveryTest(unittest.IsolatedAsyncioTestCase):
             verified=self.covers, checkpoint=checkpoint, confirm_only=True)
         self.helpers._verify_metadata.assert_awaited_once_with(self.page, self.metadata)
         self.assertEqual(self.helpers.verify_page.await_count, 2)
+
+    async def test_transcoding_replaced_posters_are_restored_on_the_verified_original_video(self):
+        self.payload["videoPath"] = "original-video"
+        self.helpers.verify_page.side_effect = [RuntimeError("百家号封面与本次上传证明不一致，未保存或发表"), None]
+        await self.verify()
+        self.helpers.verify_upload.assert_awaited_once_with(self.page, "original-video", timeout=5)
+        self.helpers._verify_metadata.assert_awaited_once_with(self.page, self.metadata)
+        self.confirm.assert_awaited_once_with(self.page, self.payload, self.helpers,
+                                            verified=self.covers, checkpoint=None)
+
+    async def test_changed_video_never_receives_replacement_posters(self):
+        self.payload["videoPath"] = "original-video"
+        self.helpers.verify_page.side_effect = RuntimeError("百家号封面与本次上传证明不一致，未保存或发表")
+        self.helpers.verify_upload.side_effect = RuntimeError("视频指纹不一致")
+        with self.assertRaisesRegex(RuntimeError, "视频指纹不一致"):
+            await self.verify()
+        self.confirm.assert_not_awaited()
+
+    async def test_repeated_cover_reset_is_bounded_without_saving_or_publishing(self):
+        self.payload["videoPath"] = "original-video"
+        self.helpers.verify_page.side_effect = RuntimeError("百家号封面与本次上传证明不一致，未保存或发表")
+        with self.assertRaisesRegex(RuntimeError, "封面与本次上传证明不一致"):
+            await self.verify()
+        self.assertEqual(self.confirm.await_count, 2)
 
     async def test_recovery_returns_new_cover_proofs(self):
         updated = copy.deepcopy(self.covers)

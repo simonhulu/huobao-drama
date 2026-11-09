@@ -1,8 +1,11 @@
 """The current crop dialog must receive clicks, not merely occupy a rectangle."""
 
+import base64
+import hashlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+import numpy as np
 
 from playwright.async_api import async_playwright
 
@@ -50,9 +53,13 @@ class CoverDialogStackTest(unittest.IsolatedAsyncioTestCase):
         await self.dialogs()
         await self.page.locator("button").evaluate_all("nodes=>nodes.forEach(node=>node.style.pointerEvents='none')")
         self.assertEqual(len(await self.page.evaluate(self.helpers._READ_DIALOGS)), 2)
-        covers = {kind: {"status": "uploaded"} for kind in ("landscape", "portrait")}
+        pixels = np.zeros((64, 64, 3), dtype=np.uint8)
+        covers = {kind: {"status": "uploaded", "fingerprint": kind, "source_sha256_verified": kind, "preview": kind,
+                         "pixels_sha256": hashlib.sha256(pixels.tobytes()).hexdigest()}
+                  for kind in ("landscape", "portrait")}
         slots = {kind: {"src": kind} for kind in covers}
         with patch.object(self.helpers.base, "_verify_metadata", AsyncMock()) as metadata, \
+                patch.object(self.helpers.base, "_cover_pixels", AsyncMock(return_value=pixels)), \
                 patch.object(self.helpers, "_cover_slots", AsyncMock(return_value=slots)):
             await self.helpers.verify_page(self.page, {"description": "bound copy"}, covers)
         metadata.assert_awaited_once()
@@ -125,6 +132,8 @@ class CoverDialogStackTest(unittest.IsolatedAsyncioTestCase):
         }}
         snapshots = []
         with patch.object(self.helpers.base, "_file_digest", side_effect=lambda path: {"wide": "wide-sha", "tall": "tall-sha"}[path]), \
+                patch.object(bridge.Path, "read_bytes", autospec=True, side_effect=lambda file:
+                    base64.b64decode(sources["landscape" if str(file) == "wide" else "portrait"].split(",")[1])), \
                 patch.object(self.helpers.base, "_browser_digest", AsyncMock(side_effect=lambda page, url:
                     "wide-sha" if url == sources["landscape"] else "tall-sha")):
             result = await bridge.baijiahao_covers(self.page, {"landscapePath": "wide", "portraitPath": "tall"},

@@ -187,6 +187,14 @@ class BaijiahaoEditor:
         for kind in ("landscape", "portrait"):
             if covers.get(kind, {}).get("status") != "uploaded" or not slots[kind].get("src"):
                 raise RuntimeError("百家号横竖封面未设置完成，未保存")
+            proof = covers[kind]
+            if (not proof.get("fingerprint") or proof.get("source_sha256_verified") != proof["fingerprint"]
+                    or not proof.get("preview") or slots[kind]["src"] != proof["preview"]
+                    or not proof.get("pixels_sha256")):
+                raise RuntimeError("百家号封面与本次上传证明不一致，未保存或发表")
+            pixels = await self._cover_pixels(page, slots[kind]["src"])
+            if hashlib.sha256(pixels.tobytes()).hexdigest() != proof["pixels_sha256"]:
+                raise RuntimeError("百家号封面与本次上传证明不一致，未保存或发表")
 
 
 class TencentCovers:

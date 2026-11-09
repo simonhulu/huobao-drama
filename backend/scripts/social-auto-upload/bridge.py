@@ -598,10 +598,16 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
     for step_index, (kind, key, label, ratio) in enumerate(steps):
         filename = payload[key]
         digest = await asyncio.to_thread(helpers._file_digest, filename)
+        expected_pixels = None
         previous = result.get(kind) or (verified or {}).get(kind, {})
-        source_verified = previous.get("source_sha256_verified") == digest and previous.get("fingerprint") == digest
         dialogs = await baijiahao_cover_dialogs(page, helpers)
         slot = (await helpers._cover_slots(page))[kind]
+        source_verified = (previous.get("source_sha256_verified") == digest and previous.get("fingerprint") == digest
+                           and bool(previous.get("preview")) and previous["preview"] == slot.get("src"))
+        if source_verified and not dialogs:
+            expected_pixels = helpers._normalized_pixels(base64.b64encode(Path(filename).read_bytes()).decode())
+            difference = helpers._pixel_difference(expected_pixels, await helpers._cover_pixels(page, slot["src"]))
+            source_verified = difference["mae"] <= 3 and difference["rmse"] <= 5
         must_confirm = bool(dialogs) or not source_verified
         selected_now = False
         if not dialogs:
@@ -612,10 +618,13 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
                 await control.set_input_files(filename)
                 source_verified = True
                 selected_now = must_confirm = True
+        if expected_pixels is None:
+            expected_pixels = helpers._normalized_pixels(base64.b64encode(Path(filename).read_bytes()).decode())
         deadline = time.monotonic() + timeout
         clicks = 0
         last_click = 0
         waiting_for = "等待裁剪窗口打开"
+        confirmed_pixels = None
         while time.monotonic() < deadline:
             dialogs = await baijiahao_cover_dialogs(page, helpers)
             # A confirmed crop can reveal an older crop while its own preview finishes applying.
@@ -624,10 +633,19 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
             if not dialogs or (other_step and clicks > 0):
                 current = (await helpers._cover_slots(page))[kind]["src"]
                 waiting_for = "等待新封面预览加载" if clicks else "等待裁剪窗口打开"
-                if (current and source_verified and (not must_confirm or clicks > 0)
-                        and (not selected_now or current != slot["src"])):
+                if current and source_verified and (not must_confirm or clicks > 0):
+                    actual_pixels = await helpers._cover_pixels(page, current)
+                    difference = helpers._pixel_difference(expected_pixels, actual_pixels)
+                    crop_difference = helpers._pixel_difference(confirmed_pixels if confirmed_pixels is not None else expected_pixels, actual_pixels)
+                    if (difference["mae"] > 3 or difference["rmse"] > 5
+                            or crop_difference["mae"] > 3 or crop_difference["rmse"] > 5):
+                        waiting_for = "等待自定义封面应用到最终预览，当前仍为旧封面"
+                        await asyncio.sleep(0.5)
+                        continue
                     result[kind] = {"status": "uploaded", "preview": current, "fingerprint": digest,
                                     "source_sha256_verified": digest, "verification": "source_and_preview",
+                                    "pixels_sha256": hashlib.sha256(actual_pixels.tobytes()).hexdigest(),
+                                    "pixel_difference": difference,
                                     "confirmClicks": clicks + (previous.get("confirmClicks", 0) if not selected_now else 0)}
                     if checkpoint:
                         checkpoint(dict(result))
@@ -655,9 +673,15 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
                         raise RuntimeError("当前裁剪源图与本任务封面不一致，不能确认")
                     if source_matches:
                         source_verified = True
-                        # The source file is verified by SHA-256. The platform
-                        # is allowed to crop/recompress the preview, so pixel
-                        # equality is intentionally not a save prerequisite.
+                        # The source loads before the crop. Wait for both, or
+                        # the editor can confirm its stale automatic video frame.
+                        crop_pixels = await helpers._cover_pixels(page, preview["src"])
+                        difference = helpers._pixel_difference(expected_pixels, crop_pixels)
+                        if difference["mae"] > 3 or difference["rmse"] > 5:
+                            waiting_for = "源图已上传，等待裁剪预览更新为自定义封面"
+                            await asyncio.sleep(0.5)
+                            continue
+                        confirmed_pixels = crop_pixels
                         waiting_for = "等待裁剪确认生效、窗口关闭"
                         if time.monotonic() - last_click >= 2:
                             modal = page.locator('[role="dialog"]').nth(dialog["index"])
@@ -688,8 +712,17 @@ async def verify_baijiahao_page_after_covers(page, payload, helpers, metadata, c
             await helpers.verify_page(page, metadata, covers)
             return covers
         except RuntimeError as error:
-            if str(error) != "百家号封面弹窗尚未确认，未保存" or attempt == 2:
+            changed_cover = str(error) == "百家号封面与本次上传证明不一致，未保存或发表"
+            if str(error) != "百家号封面弹窗尚未确认，未保存" and not changed_cover or attempt == 2:
                 raise
+        if changed_cover:
+            # Initial transcoding can finish after custom covers and restore
+            # automatic frames. Rebind the same video before restoring posters.
+            await helpers.verify_upload(page, payload["videoPath"], timeout=5)
+            await helpers._verify_metadata(page, metadata)
+            progress("平台封面预览已回退，正在原视频上重新应用并核对横竖海报", "covers")
+            covers = await baijiahao_covers(page, payload, helpers, verified=covers, checkpoint=checkpoint)
+            continue
         # A crop may reappear while upload verification is waiting for videoV2 readiness.
         # Recover only the proven source on the bound page; never select another file here.
         dialogs = await baijiahao_cover_dialogs(page, helpers)
@@ -1457,7 +1490,7 @@ async def repair_optional_topic_description(page, payload, state, file, engine, 
     return {"repaired": True, "targetId": state["targetId"], "submitted": False}
 
 
-async def verify_staged(page, payload, state, engine):
+async def verify_staged(page, payload, state, engine, *, cover_checkpoint=None):
     from article_covers_v2 import verify_article_covers
     await verify_document(page, payload, state)
     _, _, _, bai_helpers, tencent_helpers, tencent_covers = engine
@@ -1466,7 +1499,14 @@ async def verify_staged(page, payload, state, engine):
         current_media = await bai_helpers.verify_upload(page, payload["videoPath"], timeout=5)
         if current_media.get("media_src") != details["media"].get("media_src"):
             raise RuntimeError("百家号编辑页视频在上传后已被替换，未保存")
-        await bai_helpers.verify_page(page, details["metadata"], details["covers"])
+        if cover_checkpoint is None:
+            await bai_helpers.verify_page(page, details["metadata"], details["covers"])
+        else:
+            def checkpoint(covers):
+                details["covers"] = covers
+                write_state(cover_checkpoint, state)
+            details["covers"] = await verify_baijiahao_page_after_covers(
+                page, payload, bai_helpers, details["metadata"], details["covers"], checkpoint)
         await verify_baijiahao_fields(page, payload, details.get("settings"))
     elif payload["target"] == "tencent-video":
         await tencent_helpers.verify_existing_video(page, payload["videoPath"])
@@ -2199,7 +2239,7 @@ async def publication_preflight(page, payload, state, engine, *, prepare_file=No
         raise RuntimeError("原上传素材已变化，不能发表")
     if prepare_file is not None and payload.get("target") == "baijiahao-video":
         await finish_staged_baijiahao_cover(page, payload, state, prepare_file, engine)
-    await verify_staged(page, payload, state, engine)
+    await verify_staged(page, payload, state, engine, cover_checkpoint=prepare_file)
     # Baijiahao's video editor blocks the publish handler before creating any
     # network request when this mandatory declaration is empty. Fill it during
     # preflight so the subsequent click is deterministic. This is an editor
@@ -2217,6 +2257,8 @@ async def publication_preflight(page, payload, state, engine, *, prepare_file=No
             # under settings for older readers and recovery diagnostics.
             details.update({key: value for key, value in settings.items() if key in ("creationDeclaration", "watermark")})
             write_state(prepare_file, state)
+        # Topic/declaration updates may rerender the editor after its first check.
+        await verify_staged(page, payload, state, engine, cover_checkpoint=prepare_file)
     await publication_button(page)
     return {"ready": True, "writes": bool(prepare_file and payload.get("target") == "baijiahao-video"),
             "targetId": state["result"]["targetId"]}
@@ -2629,6 +2671,8 @@ async def publication_preflight_saved(page, payload, state, engine, *, prepare_f
     await verify_baijiahao_fields(page, payload, state.get("details", {}).get("settings"))
     if prepare_file is not None:
         await prepare_publication_topics(page, payload, state, prepare_file)
+        await helpers._verify_metadata(page, state["details"]["metadata"])
+        await verify_saved_baijiahao_covers(page, payload, helpers)
     await publication_button(page)
     return {"ready": True, "writes": prepare_file is not None, "targetId": state["result"]["targetId"]}
 

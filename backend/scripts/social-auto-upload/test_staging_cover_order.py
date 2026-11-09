@@ -1,12 +1,14 @@
 """Custom posters unblock videoV2 readiness before the upload identity check."""
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+import numpy as np
 
 import bridge
 
@@ -27,6 +29,8 @@ class StagingCoverOrderTest(unittest.IsolatedAsyncioTestCase):
         self.covers = {"layout": "videoV2", **{
             kind: {"status": "uploaded", "preview": f"https://preview/{kind}",
                    "fingerprint": digest, "source_sha256_verified": digest,
+                   "pixels_sha256": hashlib.sha256(np.zeros((64, 64, 3), dtype=np.uint8).tobytes()).hexdigest(),
+                   "pixel_difference": {"mae": 0, "rmse": 0},
                    "verification": "source_and_preview", "confirmClicks": 1}
             for kind, digest in (("landscape", "wide-sha"), ("portrait", "tall-sha"))
         }}
@@ -192,11 +196,15 @@ class StagingCoverOrderTest(unittest.IsolatedAsyncioTestCase):
         page = SimpleNamespace(locator=MagicMock(side_effect=AssertionError("Must reuse existing covers")))
         helpers = SimpleNamespace(
             _file_digest=lambda path: {"wide.png": "wide-sha", "tall.png": "tall-sha"}[path],
+            _normalized_pixels=lambda _: np.zeros((64, 64, 3), dtype=np.uint8),
+            _cover_pixels=AsyncMock(return_value=np.zeros((64, 64, 3), dtype=np.uint8)),
+            _pixel_difference=lambda *args: {"mae": 0, "rmse": 0},
             _cover_slots=AsyncMock(return_value={
                 kind: {"src": previous[kind]["preview"]} for kind in ("landscape", "portrait")
             }),
         )
-        with patch.object(bridge, "baijiahao_cover_dialogs", AsyncMock(return_value=[])):
+        with patch.object(bridge, "baijiahao_cover_dialogs", AsyncMock(return_value=[])), \
+                patch.object(bridge.Path, "read_bytes", return_value=b"image"):
             reused = await self.real_cover_helper(page, self.payload, helpers, verified=previous)
         self.assertEqual(reused, previous)
         page.locator.assert_not_called()
