@@ -303,7 +303,7 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
       const [rendered] = await compose({ design: { main_title: plan.headlineLines.join('\n'), highlight_text: plan.highlight,
         headline_lines: plan.headlineLines.length as 2 | 3, thumbnail_layout: plan.landscapeTextSide,
         accent_color: '#FFE600', sub_title: '', kicker: options.profile?.kicker || '', episode_label: '' },
-        variants: [{ key: format.key, baseImagePath: composedBase, width: format.width, height: format.height }], outputDir: directory })
+        variants: [{ key: format.key, baseImagePath: composedBase, width: format.width, height: format.height }], outputDir: directory, signal: options.signal })
       if (!rendered) throw new Error('标题海报排版没有返回图片')
       const temporary = `${outputPath}.${randomUUID()}.tmp`
       try {

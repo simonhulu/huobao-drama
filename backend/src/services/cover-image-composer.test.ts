@@ -2,10 +2,76 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { test } from 'node:test'
+import { test, type TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
+import puppeteer, { type LaunchOptions } from 'puppeteer-core'
 import { buildCoverHtml, composeCoverImage, composeCoverVariants } from './cover-image-composer.js'
+
+async function stalledComposerFixture(t: TestContext) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'stalled-cover-composer-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const baseImagePath = path.join(directory, 'base.png')
+  await sharp({ create: { width: 32, height: 32, channels: 3, background: '#345678' } }).png().toFile(baseImagePath)
+  return { design: {}, variants: [{ key: 'portrait', baseImagePath, width: 32, height: 32 }], outputDir: directory }
+}
+
+test('a failed cover render escapes a stalled Chrome close and retains its original error', async t => {
+  const input = await stalledComposerFixture(t), original = new Error('cover font loading failed')
+  let closeStarted!: () => void, launchSignal: AbortSignal | undefined
+  const closing = new Promise<void>(resolve => { closeStarted = resolve })
+  let disconnected = false
+  t.mock.method(puppeteer, 'launch', async (options?: LaunchOptions) => {
+    launchSignal = options?.signal
+    return { newPage: async () => { throw original }, close: () => { closeStarted(); return new Promise(() => {}) },
+      disconnect: async () => { disconnected = true } } as any
+  })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let outcome: unknown
+  void composeCoverVariants(input).catch(error => { outcome = error })
+  await closing
+  t.mock.timers.tick(5001)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(outcome, original, 'a browser cleanup stall must not hide the render failure indefinitely')
+  assert.equal(launchSignal?.aborted, true, 'only this composer-owned Chrome is force-stopped')
+  assert.equal(disconnected, true)
+})
+
+test('a Chrome startup that never returns is bounded and aborts its owned process', async t => {
+  const input = await stalledComposerFixture(t)
+  let launchStarted!: () => void, launchSignal: AbortSignal | undefined
+  const starting = new Promise<void>(resolve => { launchStarted = resolve })
+  t.mock.method(puppeteer, 'launch', (options?: LaunchOptions) => {
+    launchSignal = options?.signal
+    launchStarted()
+    return new Promise(() => {})
+  })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let outcome: unknown
+  void composeCoverVariants(input).catch(error => { outcome = error })
+  await starting
+  t.mock.timers.tick(90_001)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.match(String(outcome), /封面排版.*超时/)
+  assert.equal(launchSignal?.aborted, true)
+})
+
+test('cancelling a stalled cover render closes its owned browser and preserves the cancellation', async t => {
+  const input = await stalledComposerFixture(t), controller = new AbortController(), reason = new Error('user stopped cover generation')
+  let renderStarted!: () => void, launchSignal: AbortSignal | undefined, closes = 0
+  const rendering = new Promise<void>(resolve => { renderStarted = resolve })
+  t.mock.method(puppeteer, 'launch', async (options?: LaunchOptions) => {
+    launchSignal = options?.signal
+    return { newPage: () => { renderStarted(); return new Promise(() => {}) }, close: async () => { closes++ } } as any
+  })
+  const result = composeCoverVariants({ ...input, signal: controller.signal })
+  const rejection = assert.rejects(result, error => error === reason)
+  await rendering
+  controller.abort(reason)
+  await rejection
+  assert.equal(launchSignal?.aborted, true)
+  assert.equal(closes, 1)
+})
 
 test('cover variants validate keys and dimensions before opening images or Chrome', async () => {
   const base = { key: 'cover', baseImagePath: '/nonexistent.png', width: 1280, height: 720 }

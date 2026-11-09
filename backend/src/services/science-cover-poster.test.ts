@@ -46,6 +46,7 @@ async function fixture(t: any) {
     },
     images,
     compose: async request => {
+      assert.equal(request.signal, options.signal)
       assert.equal(request.design.headline_lines, 3)
       assert.equal(request.design.main_title, '骆驼\n为什么\n这么耐渴？')
       assert.equal(request.design.highlight_text, '骆驼')

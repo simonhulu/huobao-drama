@@ -8,7 +8,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import puppeteer, { type Page } from 'puppeteer-core'
+import puppeteer, { type Browser, type Page } from 'puppeteer-core'
 import sharp from 'sharp'
 import { v4 as uuid } from 'uuid'
 import { readImageAsDataUrl } from '../utils/storage.js'
@@ -64,6 +64,7 @@ export interface CoverVariantsInput {
   design: CoverDesign
   variants: CoverVariant[]
   outputDir: string
+  signal?: AbortSignal
 }
 
 export interface ComposedCoverVariant {
@@ -88,6 +89,48 @@ function getChromeExecutablePath(): string {
   )
   if (fs.existsSync(linuxRemotion)) return linuxRemotion
   return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+}
+
+async function withCoverBrowser<T>(render: (browser: Browser) => Promise<T>, externalSignal?: AbortSignal): Promise<T> {
+  const executablePath = getChromeExecutablePath()
+  if (!fs.existsSync(executablePath)) throw new Error(`Chrome executable not found: ${executablePath}`)
+  const controller = new AbortController()
+  const signal = externalSignal ? AbortSignal.any([externalSignal, controller.signal]) : controller.signal
+  signal.throwIfAborted()
+  let browser: Browser | undefined, completed = false
+  let onAbort!: () => void
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  const deadline = setTimeout(() => controller.abort(new Error('封面排版浏览器超时，已停止本次浏览器并保留底图，请继续原任务')), 90_000)
+  try {
+    const result = await Promise.race([aborted, (async () => {
+      browser = await puppeteer.launch({ executablePath, headless: true, signal, timeout: 30_000, protocolTimeout: 30_000,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas',
+          '--disable-gpu', '--allow-file-access-from-files'] })
+      signal.throwIfAborted()
+      return render(browser)
+    })()])
+    completed = true
+    return result
+  } finally {
+    clearTimeout(deadline)
+    signal.removeEventListener('abort', onAbort)
+    if (browser) {
+      let closeDeadline: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([browser.close(), new Promise<never>((_resolve, reject) => {
+          closeDeadline = setTimeout(() => reject(new Error('封面排版浏览器关闭超时，已停止本次浏览器，请继续原任务')), 5000)
+        })])
+      } catch (error) {
+        // Puppeteer's launch signal kills only the isolated process group it created.
+        controller.abort(error)
+        void browser.disconnect().catch(() => {})
+        if (completed) throw error
+      } finally { clearTimeout(closeDeadline) }
+    } else controller.abort()
+  }
 }
 
 function escapeHtml(text: string): string {
@@ -408,26 +451,9 @@ export async function composeCoverVariants(input: CoverVariantsInput): Promise<C
       backgrounds.set(imagePath, `data:image/png;base64,${buffer.toString('base64')}`)
     }
   }
-  const executablePath = getChromeExecutablePath()
-  if (!fs.existsSync(executablePath)) {
-    throw new Error(`Chrome executable not found: ${executablePath}`)
-  }
   const outDir = path.resolve(input.outputDir)
   fs.mkdirSync(outDir, { recursive: true })
-  const browser = await puppeteer.launch({
-    executablePath,
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--allow-file-access-from-files',
-    ],
-  })
-
-  try {
+  return withCoverBrowser(async browser => {
     const page = await browser.newPage()
     const results: ComposedCoverVariant[] = []
     for (const variant of input.variants) {
@@ -442,9 +468,7 @@ export async function composeCoverVariants(input: CoverVariantsInput): Promise<C
       })
     }
     return results
-  } finally {
-    await browser.close()
-  }
+  }, input.signal)
 }
 
 export async function composeCoverImages(input: CoverComposerInput): Promise<CoverComposerResult> {
@@ -455,25 +479,7 @@ export async function composeCoverImages(input: CoverComposerInput): Promise<Cov
   const bg4x3 = readImageAsDataUrl(baseImage4x3Path)
   const bg3x4 = readImageAsDataUrl(baseImage3x4Path)
 
-  const executablePath = getChromeExecutablePath()
-  if (!fs.existsSync(executablePath)) {
-    throw new Error(`Chrome executable not found: ${executablePath}`)
-  }
-
-  const browser = await puppeteer.launch({
-    executablePath,
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--allow-file-access-from-files',
-    ],
-  })
-
-  try {
+  return withCoverBrowser(async browser => {
     const page4x3 = await browser.newPage()
     const page3x4 = await browser.newPage()
     const [cover4x3Url, cover3x4Url] = await Promise.all([
@@ -481,9 +487,7 @@ export async function composeCoverImages(input: CoverComposerInput): Promise<Cov
       renderOne(page3x4, design, bg3x4, 1080, 1440, outDir),
     ])
     return { cover4x3Url, cover3x4Url }
-  } finally {
-    await browser.close()
-  }
+  })
 }
 
 export async function composeCoverImage(input: SingleCoverComposerInput): Promise<string> {
@@ -491,29 +495,9 @@ export async function composeCoverImage(input: SingleCoverComposerInput): Promis
   fs.mkdirSync(outDir, { recursive: true })
 
   const bg = readImageAsDataUrl(input.baseImagePath)
-  const executablePath = getChromeExecutablePath()
-  if (!fs.existsSync(executablePath)) {
-    throw new Error(`Chrome executable not found: ${executablePath}`)
-  }
-
-  const browser = await puppeteer.launch({
-    executablePath,
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--allow-file-access-from-files',
-    ],
-  })
-
-  try {
+  return withCoverBrowser(async browser => {
     const page = await browser.newPage()
     const [width, height] = input.frameType === '4:3' ? [1440, 1080] : [1080, 1440]
     return await renderOne(page, input.design, bg, width, height, outDir)
-  } finally {
-    await browser.close()
-  }
+  })
 }
