@@ -144,6 +144,28 @@ else{const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},process.argv.slice(2),{s
   assert.fail('cancelled encoder must not survive its task')
 })
 
+test('a force-killed hardware encoder does not restart the entire render in software', async t => {
+  const f = await fixture(t)
+  const realFfmpeg = (await exec('which', ['ffmpeg'])).stdout.trim()
+  const bin = path.join(f.root, 'bin'), attempts = path.join(f.root, 'encoders.txt')
+  await fs.mkdir(bin)
+  const wrapper = `#!${process.execPath}\nconst fs=require('node:fs');const cp=require('node:child_process');
+const args=process.argv.slice(2);const encoder=args[args.indexOf('-c:v')+1];
+if(args.includes('-c:v'))fs.appendFileSync(${JSON.stringify(attempts)},encoder+'\\n');
+if(encoder==='h264_videotoolbox')process.kill(process.pid,'SIGKILL');
+else{const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},args,{stdio:'inherit'});process.exit(r.status??1)}\n`
+  await fs.writeFile(path.join(bin, 'ffmpeg'), wrapper, { mode: 0o700 })
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}${path.delimiter}${previousPath || ''}`
+  t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath })
+  t.mock.method(os, 'platform', () => 'darwin')
+  t.mock.method(os, 'arch', () => 'x64')
+  await assert.rejects(prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath }),
+    (error: any) => error.signal === 'SIGKILL')
+  assert.equal(await fs.readFile(attempts, 'utf8'), 'h264_videotoolbox\n')
+  assert.deepEqual(await fs.readdir(f.directory), [])
+})
+
 test('cancellation keeps original media and leaves no successful manifest or partial output', async t => {
   const f = await fixture(t), controller = new AbortController(), mainHash = await digest(f.videoPath)
   const reason = new Error('cancel intro preparation')

@@ -144,7 +144,6 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
   const diameter = Math.min(width, Math.max(16, Math.round(height * .25 / 2) * 2))
   const margin = Math.max(2, Math.round(height * .03)), border = Math.max(1, Math.round(height * .002))
   const radius = diameter / 2, distance = 'hypot(X-(W-1)/2,Y-(H-1)/2)'
-  const channel = (name: string) => `if(gte(${distance},${radius - border}),245,${name}(X,Y))`
   const presenterCrop = presenterFraming === 'closeup'
     ? `crop=w='max(2,floor(min(iw,ih)/2)*2)':h=ow:x='floor((iw-ow)/4)*2':y='floor((ih-oh)/4)*2'`
     : `crop=w='max(2,floor(min(iw,ih)*0.64/2)*2)':h=ow:x='floor((iw-ow)/4)*2':y='floor(max(0,min(ih-oh,ih*0.36-oh/2))/2)*2'`
@@ -162,12 +161,17 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       `[main-first]trim=end_frame=1,setpts=PTS-STARTPTS,fps=${main.fps},tpad=stop_mode=clone:stop_duration=${motion},`
         + `trim=duration=${motion},settb=AVTB[reveal]`,
       `[2:v:0]setpts=PTS-STARTPTS,${presenterCrop},scale=${diameter}:${diameter}:flags=lanczos,`
-        + `setsar=1,fps=${main.fps},trim=duration=${main.duration},format=rgba,`
-        + `geq=r='${channel('r')}':g='${channel('g')}':b='${channel('b')}':a='clip((${radius}-${distance})*255,0,255)'[presenter]`,
-      `[main-body][presenter]overlay=x=${width - diameter - margin}:y=${height - diameter - margin}:eof_action=pass:format=auto,`
+        + `setsar=1,fps=${main.fps},trim=duration=${main.duration},format=rgba[presenter-colors]`,
+      // Static geometry is evaluated for one frame; framesync reuses it for the moving presenter.
+      `color=c=0xf5f5f5:s=${diameter}x${diameter}:r=${main.fps}:d=1,trim=end_frame=1,split[mask-input][ring-input]`,
+      `[mask-input]format=gray,geq=lum='clip((${radius}-${distance})*255,0,255)'[presenter-mask]`,
+      `[ring-input]format=rgba,geq=r=245:g=245:b=245:a='gte(${distance},${radius - border})*255'[ring]`,
+      '[presenter-colors][ring]overlay=format=rgb[presenter-framed]',
+      '[presenter-framed][presenter-mask]alphamerge[presenter]',
+      `[main-body][presenter]overlay=x=${width - diameter - margin}:y=${height - diameter - margin}:eof_action=pass:format=yuv444,`
         + `format=yuv420p,fps=${main.fps},settb=AVTB[body]`,
       '[reveal][body]concat=n=2:v=1:a=0[underlay]',
-      '[underlay][moving]overlay=x=0:y=0:eof_action=pass:repeatlast=0:format=auto,format=yuv420p,settb=AVTB[transition-body]',
+      '[underlay][moving]overlay=x=0:y=0:eof_action=pass:repeatlast=0:format=yuv420,format=yuv420p,settb=AVTB[transition-body]',
       `[prefix][transition-body]concat=n=2:v=1:a=0,trim=duration=${intro.duration + main.duration},fps=${main.fps},format=yuv420p[v]`,
       ...audio,
     ].join(';')
@@ -200,6 +204,8 @@ async function encodeVideo(args: string[], finish: string[], width: number, heig
     await run(encoder)
   } catch (error) {
     signal.throwIfAborted()
+    const failure = error as { killed?: boolean; signal?: string }
+    if (failure.killed || failure.signal === 'SIGKILL') throw error
     if (!encoder.includes('h264_videotoolbox')) throw error
     await run(['-c:v', 'libx264', '-preset', 'fast', '-crf', '20'])
   }
