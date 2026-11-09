@@ -1679,6 +1679,28 @@ test('a cover failure preserves the downloaded video and local retry needs no pr
   assert.equal(h.calls.produce, 1); assert.equal(h.calls.export, 1); assert.equal(h.calls.downloadExport, 1); assert.equal(h.calls.upload, 0)
 })
 
+test('standalone cover preview stops stale automatic delivery until upload is explicitly requested', async t => {
+  const h = fixture(t), job = await prepared(h)
+  const { file } = legacyFinishedVideo(h, job.id)
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  fs.writeFileSync(file, JSON.stringify({ ...stored, autoUpload: true, automaticDelivery: true, automaticProduction: true,
+    automaticRetry: { attempt: 1, maxAttempts: 3, nextRetryAt: new Date(0).toISOString() },
+    uploadRetry: { attempt: 1, nextRetryAt: new Date(0).toISOString() } }))
+  h.service.covers(job.id); await h.service.waitForIdle()
+  const preview = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(preview.automaticDelivery, false)
+  assert.equal(preview.automaticProduction, false)
+  assert.equal(preview.automaticRetry, undefined)
+  assert.equal(preview.uploadRetry, undefined)
+  assert.deepEqual(h.service.runAutomaticExports(), [])
+  await h.service.waitForIdle()
+  assert.equal(h.calls.upload, 0)
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  h.service.upload(job.id); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'completed')
+  assert.equal(h.calls.upload, 1)
+})
+
 test('upload never generates posters on demand and refuses legacy frame covers', async t => {
   const h = fixture(t), job = await prepared(h)
   const { file } = legacyFinishedVideo(h, job.id)

@@ -776,6 +776,8 @@ export class ScienceWorkflowService {
       throw new ScienceWorkflowError('作品已提交或已发表，不能重新生成并替换封面')
     if (job.coverUploadRevision) throw new ScienceWorkflowError('原编辑页封面更换尚未完成，请先继续原上传任务，再生成下一版')
     return this.launch(id, async signal => {
+      // A standalone cover preview requires a new explicit delivery action.
+      this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined })
       await this.prepareCovers(id, signal, { ...request, regenerate })
       if (job.uploadAttempt && !regenerate && !job.coverRequest) {
         this.modify(id, { status: job.status, stage: job.stage, message: job.message, failureKind: job.failureKind })

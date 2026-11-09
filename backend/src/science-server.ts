@@ -5,16 +5,14 @@ import { Hono } from 'hono'
 import { createScienceWorkflowRoute } from './routes/science-workflow.js'
 import { getScienceWorkflowService } from './services/science-workflow.js'
 import { getScienceCollectionService } from './services/science-collection.js'
+import { startScienceAutomation } from './science-automation.js'
 
 const app = new Hono()
 app.get('/health', c => c.json({ status: 'ok', workspace: 'science-pop' }))
 app.route('/api/v1/science-pop/workflow', createScienceWorkflowRoute())
 const port = Number(process.env.SCIENCE_PORT || 5683)
 const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port }, () => {
-  if (process.env.TASK_WORKER_DISABLED !== '1') {
-    getScienceWorkflowService().startAutomaticExports()
-    getScienceCollectionService().startAutomaticRecovery()
-  }
+  startScienceAutomation()
   console.log(`Science workspace listening on http://127.0.0.1:${port}`)
 })
 let stopping = false

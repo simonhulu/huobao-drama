@@ -80,6 +80,7 @@ import { startHistoryDualProductionWorker } from './services/history-video-workf
 import { startHistoryFactoryWorker } from './services/history-factory.js'
 import { getScienceWorkflowService } from './services/science-workflow.js'
 import { getScienceCollectionService } from './services/science-collection.js'
+import { startScienceAutomation } from './science-automation.js'
 import { createStorageRoute } from './routes/storage.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -177,9 +178,8 @@ const historyMaintenanceWorker = process.env.TASK_WORKER_DISABLED === '1' ? unde
   : createHistoryWorkflowMaintenance({database:db.$client,hasSourceWorker:hasHistorySourceWorker,
     resumeCollection:resumeHistorySourceJob,onError:error=>console.error('[history-maintenance]',error)})
 historyMaintenanceWorker?.start()
+startScienceAutomation()
 if (process.env.TASK_WORKER_DISABLED !== '1') {
-  getScienceWorkflowService().startAutomaticExports()
-  getScienceCollectionService().startAutomaticRecovery()
   const imageWorkerConcurrency = Math.max(1, Number(process.env.IMAGE_TASK_WORKER_CONCURRENCY || 16))
   const generalWorkerConcurrency = Math.max(1, Number(process.env.GENERAL_TASK_WORKER_CONCURRENCY || process.env.TASK_WORKER_CONCURRENCY || 12))
 

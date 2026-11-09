@@ -130,7 +130,8 @@ export class HuashengAccountsService {
   }
   async readyBrowserConfig(accountName: string, options: { open?: boolean; signal?: AbortSignal } = {}): Promise<HuashengBrowserConfig> {
     options.signal?.throwIfAborted()
-    const account = await this.run(options.open ? 'login' : 'check', accountName, options.signal)
+    let account = await this.run('check', accountName, options.signal)
+    if (options.open && account.identityStatus === 'unavailable') account = await this.run('login', accountName, options.signal)
     options.signal?.throwIfAborted()
     if (account.status !== 'ready' || account.identityStatus !== 'verified' || !account.identity) throw Object.assign(new SocialUploadAccountError(account.message), {
       code: ['login_required', 'expired'].includes(account.status) ? 'login_required'

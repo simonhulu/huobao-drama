@@ -77,6 +77,50 @@ test('logged-in page without an official identity cannot be reported as a verifi
   assert.doesNotMatch(JSON.stringify(result), /SECRET|cookie=/)
 })
 
+test('production reuses a verified API session without initializing the login homepage', async t => {
+  const f = fixture(t), actions: string[] = []
+  const service = new HuashengAccountsService({ scope: 'history', stateRoot: path.join(f.root, 'healthy-session'),
+    legacyConfig: { endpoint: 'http://127.0.0.1:9243', profile: path.join(f.root, 'healthy-profile') },
+    driver: async action => {
+      actions.push(action)
+      if (action === 'login') throw new Error('Audits.enable timed out.')
+      return { status: 'ready', message: 'ready', identity: { uid: '1001', displayName: 'Original user' } }
+    } })
+  assert.equal((await service.readyBrowserConfig(HISTORY_HUASHENG_ACCOUNT, { open: true })).expectedUid, '1001')
+  assert.deepEqual(actions, ['check'])
+})
+
+test('production cannot open a browser to bypass a switched identity', async t => {
+  const f = fixture(t), actions: string[] = []
+  let uid = '1001'
+  const service = new HuashengAccountsService({ scope: 'history', stateRoot: path.join(f.root, 'switched-session'),
+    legacyConfig: { endpoint: 'http://127.0.0.1:9243', profile: path.join(f.root, 'switched-profile') },
+    driver: async action => {
+      actions.push(action)
+      return { status: 'ready', message: 'ready', identity: { uid, displayName: 'Current user' } }
+    } })
+  await service.check(HISTORY_HUASHENG_ACCOUNT)
+  uid = '3003'; actions.length = 0
+  await assert.rejects(service.readyBrowserConfig(HISTORY_HUASHENG_ACCOUNT, { open: true }), (error: any) => error.code === 'manual_review')
+  assert.deepEqual(actions, ['check'])
+  assert.equal(service.get(HISTORY_HUASHENG_ACCOUNT).identity?.uid, '1001')
+})
+
+test('production cannot open a browser to bypass another workspace identity binding', async t => {
+  const f = fixture(t), actions: string[] = []
+  await f.history.check(HISTORY_HUASHENG_ACCOUNT)
+  const service = new HuashengAccountsService({ scope: 'science', stateRoot: path.join(f.root, 'conflicting-session'),
+    peerStateRoot: path.join(f.root, 'history'),
+    driver: async action => {
+      actions.push(action)
+      return { status: 'ready', message: 'ready', identity: { uid: '1001', displayName: 'Other workspace user' } }
+    } })
+  const account = service.create({ label: 'Conflicting account' })
+  await assert.rejects(service.readyBrowserConfig(account.accountName, { open: true }), (error: any) => error.code === 'manual_review')
+  assert.deepEqual(actions, ['check'])
+  assert.equal(service.get(account.accountName).identity, null)
+})
+
 test('explicit production can reopen its own browser while passive checks preserve connection recovery codes', async t => {
   const f = fixture(t), actions: string[] = [], controller = new AbortController()
   const service = new HuashengAccountsService({ scope: 'history', stateRoot: path.join(f.root, 'reopen'),
@@ -89,9 +133,22 @@ test('explicit production can reopen its own browser while passive checks preser
     } })
   await assert.rejects(service.readyBrowserConfig(HISTORY_HUASHENG_ACCOUNT), (error: any) => error.code === 'browser_unavailable')
   assert.equal((await service.readyBrowserConfig(HISTORY_HUASHENG_ACCOUNT, { open: true, signal: controller.signal })).expectedUid, '1001')
-  assert.deepEqual(actions, ['check', 'login'])
+  assert.deepEqual(actions, ['check', 'check', 'login'])
   controller.abort()
   await assert.rejects(service.readyBrowserConfig(HISTORY_HUASHENG_ACCOUNT, { open: true, signal: controller.signal }), (error: Error) => error.name === 'AbortError')
+  assert.deepEqual(actions, ['check', 'check', 'login'])
+})
+
+test('production can open its login window when the read-only check finds an expired session', async t => {
+  const f = fixture(t), actions: string[] = []
+  const service = new HuashengAccountsService({ scope: 'history', stateRoot: path.join(f.root, 'expired-session'),
+    legacyConfig: { endpoint: 'http://127.0.0.1:9243', profile: path.join(f.root, 'expired-profile') },
+    driver: async action => {
+      actions.push(action)
+      if (action === 'check') throw new HuashengIdentityError('login_required', 'Login expired')
+      return { status: 'ready', message: 'ready', identity: { uid: '1001', displayName: 'Original user' } }
+    } })
+  assert.equal((await service.readyBrowserConfig(HISTORY_HUASHENG_ACCOUNT, { open: true })).expectedUid, '1001')
   assert.deepEqual(actions, ['check', 'login'])
 })
 
