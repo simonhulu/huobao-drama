@@ -1,4 +1,4 @@
-# Isolated MuseTalk 1.5 speed validation
+# Isolated MuseTalk 1.5 runtime
 
 `bootstrap.py` creates `/root/rivermind-data/musetalk-runtime` using the existing
 `/root/rivermind-data/latentsync-venv/bin/python` (Python 3.12). A `.pth` file in
@@ -14,7 +14,9 @@ compiled libraries are never installed by this script. Face preprocessing uses
 the vendored OpenAvatarChat ONNX implementation at commit
 [`8b7b3b45bca28ae9ab5fa72ee31bc03c5a99b08b`](https://github.com/HumanAIGC-Engineering/OpenAvatarChat/tree/8b7b3b45bca28ae9ab5fa72ee31bc03c5a99b08b),
 so this runtime does not require MMCV, MMDetection or MMPose. The official
-MuseTalk 1.5 UNet, VAE and audio-driven generation remain unchanged. This reuse
+MuseTalk 1.5 weights and upstream source remain unchanged. The optional measured
+audio lookahead selects later conditioning frames without moving the delivered
+soundtrack or body motion. This reuse
 setup has generated playable benchmark MP4s on the remote RTX 3090; upstream
 does not officially test this newer dependency combination.
 
@@ -97,8 +99,8 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4 \
   --audio /root/rivermind-data/musetalk-speed-20261107/narration-warmup.wav \
           /root/rivermind-data/musetalk-speed-20261107/narration-full.wav \
   --report /root/rivermind-data/musetalk-speed-20261107/new-report.json \
-  --fps 15 --encoding pipe --codec libx264 \
-  --preprocessing-module /root/rivermind-data/MuseTalk/preprocessing_onnx.py
+  --fps 25 --encoding pipe --codec libx264 \
+  --preprocessing-module /root/rivermind-data/MuseTalk/vendor/preprocessing_onnx.py
 ```
 
 The `pipe` path keeps official synthesis and face blending, then crops and
@@ -122,9 +124,10 @@ as the original job; duration checking alone cannot identify the wrong audio.
 `api_server.py` reuses the same loader and 360x360 direct-encoding path as the
 benchmark. Models and the R3 avatar remain loaded between jobs; one worker uses
 the GPU, with at most two additional queued jobs by default. Production defaults
-are 15 FPS, batch size 20, and `libx264`. The completed 536.256-second test used
-this path and took 358.701 seconds for MP4 export; upload, download, writing, TTS
-and final composition are additional work.
+are 25 FPS, FP16, batch size 20, and `libx264`. The historical 536.256-second
+test used 15 FPS and took 358.701 seconds for MP4 export; it is not a measurement
+of the current quality profile. Upload, download, writing, TTS and final
+composition are additional work.
 
 Copy `api_server.py`, `runtime.py` and the vendored preprocessing file together
 onto the GPU server. Start with the already prepared runtime; no new pip
@@ -134,26 +137,45 @@ installation, Torch installation or model download is needed:
 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 /root/rivermind-data/musetalk-runtime/bin/python api_server.py \
   --root /root/rivermind-data/MuseTalk \
-  --reference /root/rivermind-data/musetalk-reference-halfbody-20261109/presenter-halfbody-720-15fps.mp4 \
+  --reference /root/rivermind-data/musetalk-reference-halfbody-20261109/presenter-halfbody-720-25fps.mp4 \
   --jobs /root/rivermind-data/musetalk-jobs \
-  --host 127.0.0.1 --port 8789 --fps 15 \
-  --preprocessing-module /root/rivermind-data/MuseTalk/preprocessing_onnx.py
+  --host 127.0.0.1 --port 8789 --fps 25 --audio-lookahead-frames 2 \
+  --preprocessing-module /root/rivermind-data/MuseTalk/vendor/preprocessing_onnx.py
 ```
 
 The production reference changed on 2026-11-09 to the user's
 `data/static/science-intro-preview/presenter.mp4`: a 1440x1440, 7.05-second
 half-body clip with natural hand gestures. The prepared reference retains the
-complete square composition at 720x720 and 15 FPS so gestures keep their original
+complete square composition at 720x720 and native 25 FPS so gestures keep their original
 speed. This is more than twice the final circle size and avoids unnecessary
 full-frame conversion overhead at 1440x1440.
-Its SHA-256 is `cc8082a7b3ec151be801a92620f53be9659ff255f3bd83e1ab27f5e71248e087`.
+Its SHA-256 is `24061ae64e50f01b699c127cefa84d5d1add887e30ea42f55b480becdccd8bd2`.
 The durable GPU launcher is
 `/root/rivermind-data/musetalk-reference-halfbody-20261109/start-halfbody.sh`;
 the same directory retains source provenance and the previous launch command.
-The delivery protocol remains 360x360 at 15 FPS. Application composition uses
+The delivery protocol is 360x360 at 25 FPS. Application composition uses
 `half-body`, retains the complete frame and displays a 324px circle at 1080p.
 The 2026-11-07 R3 benchmark above is historical and used the earlier closeup
 reference; its timing is not a measurement of this new reference.
+
+The reference's actual frame rate is checked before loading CUDA models. A
+15 FPS reference must not be played at 25 FPS: resample from the original
+native source first. Every avatar ID includes a fingerprint of reference and
+preprocessing hashes, FPS, precision, crop margin, parsing mode, cheek widths,
+encoder and audio lookahead. All cached latent/frame/coordinate/mask cycles
+must be nonempty, equally long, and have valid face bounds.
+
+Quality options shared by API and benchmark are `--precision fp16|fp32`,
+`--extra-margin 0..64`, `--parsing-mode jaw|raw|neck`,
+`--left-cheek-width 0..128`, `--right-cheek-width 0..128`, and
+`--audio-lookahead-frames 0..5`. Defaults retain margin 10, jaw, cheeks 90/90,
+and lookahead 0. The deployed presenter explicitly uses lookahead 2 (80 ms at
+25 FPS), validated on two different narration passages. This shifts only the
+conditioning sequence, clamps its final frames, and preserves its length.
+It is presenter-specific calibration, not a universal default.
+Full FP32 and margin 20 did not improve synchronization in this experiment.
+See [research](../../../docs/musetalk-quality-research-20261109.md) and
+[measured validation](../../../docs/musetalk-quality-validation-20261109.md).
 
 The runtime accepts either a Git checkout at the pinned commit or its official
 source archive. Archives do not need Git metadata: SHA-256 checks of the five

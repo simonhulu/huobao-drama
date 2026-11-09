@@ -93,7 +93,9 @@ class JobServiceTests(unittest.TestCase):
 
     def test_complete_idempotent_job_and_result_binding(self):
         runner = FakeRunner()
+        runner.quality_config = {"audio_lookahead_frames": 2}
         service = self.service(runner)
+        self.assertEqual(service.health()["quality_config"], runner.quality_config)
         job_id = request_id("first")
         record, created = service.submit(job_id, FLAC)
         self.assertTrue(created)

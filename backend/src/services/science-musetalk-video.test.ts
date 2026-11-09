@@ -20,15 +20,15 @@ async function clip(filename: string, seconds: number, fps: number, audio: boole
     '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', ...(audio ? ['-c:a', 'aac'] : ['-an']), filename])
 }
 
-async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2) {
+async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2, remoteFps = 15) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'science-musetalk-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   const videoPath = path.join(root, 'main.mp4'), remote = path.join(root, 'remote.mp4'), directory = path.join(root, 'presenter')
   await clip(videoPath, mainDuration, 30, true)
-  await clip(remote, remoteDuration, 15, true)
+  await clip(remote, remoteDuration, remoteFps, true)
   const output = await fs.readFile(remote)
   const identity = { model: 'musetalk-v15', source_revision: '0a89dec45a0192b824e3cf4daf96c239440c5ed8',
-    avatar_id: 'xiaolu-r3-fixture', reference_sha256: '1'.repeat(64), fps: 15 }
+    avatar_id: 'xiaolu-r3-fixture', reference_sha256: '1'.repeat(64), fps: remoteFps }
   const state = { submissions: 0, retries: 0, deletes: 0, polls: 0, pending: false, wrongAudio: false, dropSubmission: false,
     loadingReads: 0, failedPoll: false, onPoll: undefined as (() => void) | undefined, onResult: undefined as (() => void) | undefined,
     jobs: new Map<string, any>(), uploaded: undefined as Buffer | undefined }
@@ -70,7 +70,7 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2)
   process.env.MUSETALK_API_URL = `http://127.0.0.1:${address.port}`
   process.env.MUSETALK_POLL_INTERVAL_MS = '1'
   process.env.MUSETALK_TIMEOUT_MS = '30000'
-  return { root, videoPath, directory, state }
+  return { root, videoPath, directory, state, identity }
 }
 
 async function gatedNormalization(t: TestContext, root: string) {
@@ -190,6 +190,24 @@ test('one full original narration is submitted, verified, normalized and cached 
   assert.deepEqual(await prepareScienceMusetalkVideo(f, { signal: signal() }), result)
   assert.equal((await fs.stat(audioPath)).mtimeMs, 1000, 'bound FLAC bytes are reused across deployments instead of re-encoding with a different FFmpeg version')
   assert.equal(f.state.submissions, 1)
+})
+
+test('native 25fps and a changed quality profile use separate results without overwriting the prior presenter', async t => {
+  const f = await fixture(t, 1.2, 1.2, 25)
+  f.identity.avatar_id = 'xiaolu-r4-quality-one'
+  const first = await prepareScienceMusetalkVideo(f, { signal: signal() })
+  const original = await fs.readFile(first.presenterPath)
+  const video = (await probe(first.presenterPath)).streams.find((item: any) => item.codec_type === 'video')
+  assert.equal(video.avg_frame_rate, '30/1')
+  assert.equal(f.state.submissions, 1)
+  f.identity.avatar_id = 'xiaolu-r4-quality-two'
+  const second = await prepareScienceMusetalkVideo(f, { signal: signal() })
+  assert.notEqual(second.presenterPath, first.presenterPath)
+  assert.equal(f.state.submissions, 2)
+  assert.equal(f.state.jobs.size, 2)
+  assert.deepEqual(await fs.readFile(first.presenterPath), original)
+  assert.deepEqual(await prepareScienceMusetalkVideo(f, { signal: signal() }), second)
+  assert.equal(f.state.submissions, 2)
 })
 
 test('an accepted submission with a lost response resumes by the same deterministic request id', async t => {

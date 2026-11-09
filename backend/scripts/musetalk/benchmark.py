@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import time
 
-from runtime import MODEL, SOURCE_REVISION, MuseTalkRuntime, file_hash, media_info, pipe_inference
+from runtime import MODEL, SOURCE_REVISION, MuseTalkRuntime, add_quality_arguments, file_hash, media_info, pipe_inference
 
 
 def main():
@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--audio", type=Path, nargs="+", required=True)
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--fps", type=int, choices=(15, 20, 25), default=25)
+    add_quality_arguments(parser)
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--encoding", choices=("png", "pipe"), default="png")
     parser.add_argument("--codec", choices=("libx264", "h264_nvenc"), default="libx264")
@@ -41,6 +41,7 @@ def main():
         "codec": args.codec if args.encoding == "pipe" else "libx264",
         "pipe_frame_size": [360, 360] if args.encoding == "pipe" else None,
         "source_revision": SOURCE_REVISION,
+        "audio_lookahead_frames": args.audio_lookahead_frames,
         "reference_sha256": file_hash(args.reference), "status": "loading", "runs": [],
     }
 
@@ -53,7 +54,10 @@ def main():
     started = time.perf_counter()
     try:
         runtime = MuseTalkRuntime(args.root, args.reference, args.fps, args.batch_size,
-                                  args.codec, args.preprocessing_module)
+                                  args.codec, args.preprocessing_module, precision=args.precision,
+                                  extra_margin=args.extra_margin, parsing_mode=args.parsing_mode,
+                                  left_cheek_width=args.left_cheek_width, right_cheek_width=args.right_cheek_width,
+                                  audio_lookahead_frames=args.audio_lookahead_frames)
         runtime.load()
         torch, upstream, avatar = runtime.torch, runtime.upstream, runtime.avatar
         report.update(runtime.load_metrics, avatar_id=runtime.identity["avatar_id"], status="running")

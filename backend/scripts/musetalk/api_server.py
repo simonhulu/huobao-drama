@@ -22,7 +22,7 @@ import sys
 import threading
 from urllib.parse import urlsplit
 
-from runtime import GenerationCancelled, MuseTalkRuntime, file_hash
+from runtime import GenerationCancelled, MuseTalkRuntime, add_quality_arguments, file_hash
 
 
 REQUEST_ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -141,6 +141,8 @@ class JobService:
             result = {"ok": self.status == "ready" and not self.stopping,
                       "status": self.status, **self.identity, "queue_depth": len(self.pending),
                       "active_job_id": self.active_id}
+            if hasattr(self.runner, "quality_config"):
+                result["quality_config"] = dict(self.runner.quality_config)
             if self.error:
                 result["error"] = self.error
             return result
@@ -445,7 +447,7 @@ def main():
     parser.add_argument("--jobs", type=Path, default=os.environ.get("MUSETALK_JOB_ROOT"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8789)
-    parser.add_argument("--fps", type=int, choices=(15, 20, 25), default=15)
+    add_quality_arguments(parser)
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--queue-size", type=int, default=2)
     parser.add_argument("--codec", choices=("libx264", "h264_nvenc"), default="libx264")
@@ -459,7 +461,10 @@ def main():
     except ValueError:
         parser.error("--host must be a loopback IP address")
     runner = MuseTalkRuntime(args.root, args.reference, args.fps, args.batch_size,
-                            args.codec, args.preprocessing_module)
+                            args.codec, args.preprocessing_module, precision=args.precision,
+                            extra_margin=args.extra_margin, parsing_mode=args.parsing_mode,
+                            left_cheek_width=args.left_cheek_width, right_cheek_width=args.right_cheek_width,
+                            audio_lookahead_frames=args.audio_lookahead_frames)
     service = JobService(args.jobs, runner, args.queue_size)
     server = APIServer((args.host, args.port), service)
 

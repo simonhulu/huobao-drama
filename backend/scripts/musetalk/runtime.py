@@ -3,6 +3,9 @@
 import hashlib
 import importlib.util
 import json
+import math
+from fractions import Fraction
+from numbers import Real
 import os
 from pathlib import Path
 import queue
@@ -23,6 +26,49 @@ SOURCE_FILES = {
     "musetalk/models/vae.py": "6ecde3f4417178d8a9de5ed6045e2a4832efa65189b10b0672cab68efe529d32",
     "musetalk/utils/blending.py": "f1be04977db7e6fa1551dfe66dfbdea1e2f32c8d237edaf5a75a0ca4ddd80b53",
 }
+PARSING_MODES = ("jaw", "raw", "neck")
+
+
+def add_quality_arguments(parser):
+    parser.add_argument("--fps", type=int, choices=(15, 20, 25), default=25)
+    parser.add_argument("--precision", choices=("fp16", "fp32"), default="fp16")
+    parser.add_argument("--extra-margin", type=int, default=10)
+    parser.add_argument("--parsing-mode", choices=PARSING_MODES, default="jaw")
+    parser.add_argument("--left-cheek-width", type=int, default=90)
+    parser.add_argument("--right-cheek-width", type=int, default=90)
+    parser.add_argument("--audio-lookahead-frames", type=int, choices=range(6), default=0)
+
+
+def apply_audio_lookahead(conditions, frames):
+    if frames == 0 or len(conditions) < 2:
+        return conditions
+    last = len(conditions) - 1
+    return conditions[[min(index + frames, last) for index in range(len(conditions))]]
+
+
+def validate_avatar(avatar):
+    names = ("input_latent_list_cycle", "frame_list_cycle", "coord_list_cycle",
+             "mask_list_cycle", "mask_coords_list_cycle")
+    lengths = {}
+    for name in names:
+        try:
+            lengths[name] = len(getattr(avatar, name))
+        except (AttributeError, TypeError) as error:
+            raise RuntimeError(f"Invalid MuseTalk avatar cache: missing cycle {name}") from error
+    if not all(lengths.values()) or len(set(lengths.values())) != 1:
+        raise RuntimeError(f"Invalid MuseTalk avatar cache: cycle lengths must match and be non-empty: {lengths}")
+    for index, (bbox, frame) in enumerate(zip(avatar.coord_list_cycle, avatar.frame_list_cycle)):
+        try:
+            height, width = frame.shape[:2]
+            valid = (len(bbox) == 4 and all(isinstance(value, Real) and math.isfinite(value)
+                                           and int(value) == value for value in bbox))
+            if valid:
+                x1, y1, x2, y2 = bbox
+                valid = 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height
+        except (AttributeError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise RuntimeError(f"Invalid MuseTalk avatar cache: invalid bbox at frame {index}: {bbox}")
 
 
 class GenerationCancelled(Exception):
@@ -60,6 +106,32 @@ def media_info(filename):
         check=True, capture_output=True, text=True, timeout=60,
     )
     return json.loads(result.stdout)
+
+
+def validate_reference_fps(reference, fps):
+    recovery = f"Resample the original reference to {fps} FPS before preparing the avatar."
+    try:
+        metadata = media_info(reference)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Cannot inspect the MuseTalk reference video. {recovery}") from error
+    streams = metadata.get("streams") if isinstance(metadata, dict) else None
+    video = next((stream for stream in streams if isinstance(stream, dict)
+                  and stream.get("codec_type") == "video"), None) if isinstance(streams, list) else None
+    rate = None
+    if video is not None:
+        for name in ("avg_frame_rate", "r_frame_rate"):
+            try:
+                candidate = Fraction(str(video.get(name)))
+            except (ValueError, ZeroDivisionError):
+                continue
+            if candidate > 0:
+                rate = candidate
+                break
+    if rate is None:
+        raise RuntimeError(f"MuseTalk reference has no video stream with a valid frame rate. {recovery}")
+    if abs(rate - fps) > Fraction(1, 100):
+        raise RuntimeError(f"MuseTalk reference frame rate {float(rate):g} FPS does not match {fps} FPS. {recovery}")
+    return float(rate)
 
 
 def check_cancelled(cancel):
@@ -197,20 +269,47 @@ def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None):
 class MuseTalkRuntime:
     """One model and cached avatar, reused serially by the HTTP worker."""
 
-    def __init__(self, root, reference, fps=15, batch_size=20, codec="libx264", preprocessing_module=None):
+    def __init__(self, root, reference, fps=25, batch_size=20, codec="libx264", preprocessing_module=None,
+                 *, precision="fp16", extra_margin=10, parsing_mode="jaw", left_cheek_width=90,
+                 right_cheek_width=90, audio_lookahead_frames=0):
         self.root = Path(root).resolve()
         self.reference = Path(reference).resolve()
         self.preprocessing_module = Path(preprocessing_module or
                                          Path(__file__).resolve().parent / "vendor/preprocessing_onnx.py").resolve()
-        if fps not in (15, 20, 25) or not 1 <= batch_size <= 64:
+        if type(fps) is not int or fps not in (15, 20, 25) or type(batch_size) is not int or not 1 <= batch_size <= 64:
             raise ValueError("FPS must be 15/20/25 and batch size must be 1-64")
         if codec not in ("libx264", "h264_nvenc"):
             raise ValueError("Unsupported encoder")
+        if precision not in ("fp16", "fp32"):
+            raise ValueError("Precision must be fp16 or fp32")
+        if parsing_mode not in PARSING_MODES:
+            raise ValueError(f"Parsing mode must be one of {PARSING_MODES}")
+        if type(extra_margin) is not int or not 0 <= extra_margin <= 64:
+            raise ValueError("Extra margin must be an integer between 0 and 64")
+        for name, value in (("Left cheek width", left_cheek_width), ("Right cheek width", right_cheek_width)):
+            if type(value) is not int or not 0 <= value <= 128:
+                raise ValueError(f"{name} must be an integer between 0 and 128")
+        if type(audio_lookahead_frames) is not int or not 0 <= audio_lookahead_frames <= 5:
+            raise ValueError("Audio lookahead frames must be an integer between 0 and 5")
         self.fps, self.batch_size, self.codec = fps, batch_size, codec
+        self.precision = precision
+        self.extra_margin, self.parsing_mode = extra_margin, parsing_mode
+        self.left_cheek_width, self.right_cheek_width = left_cheek_width, right_cheek_width
+        self.audio_lookahead_frames = audio_lookahead_frames
         reference_hash = file_hash(self.reference)
+        self.quality_config = {
+            "version": 1, "model": MODEL, "source_revision": SOURCE_REVISION,
+            "reference_sha256": reference_hash, "preprocessing_sha256": file_hash(self.preprocessing_module),
+            "fps": fps, "precision": precision, "extra_margin": extra_margin,
+            "parsing_mode": parsing_mode, "left_cheek_width": left_cheek_width,
+            "right_cheek_width": right_cheek_width, "codec": codec,
+            "audio_lookahead_frames": audio_lookahead_frames,
+        }
+        profile_hash = hashlib.sha256(json.dumps(self.quality_config, sort_keys=True,
+                                                separators=(",", ":")).encode("ascii")).hexdigest()
         self.identity = {
             "model": MODEL, "source_revision": SOURCE_REVISION,
-            "avatar_id": f"xiaolu-r3-{reference_hash[:12]}",
+            "avatar_id": f"xiaolu-r4-{profile_hash[:24]}",
             "reference_sha256": reference_hash, "fps": fps,
         }
         self.torch = self.upstream = self.avatar = None
@@ -220,6 +319,7 @@ class MuseTalkRuntime:
         if self.avatar is not None:
             return
         started = time.perf_counter()
+        self.load_metrics["reference_fps"] = validate_reference_fps(self.reference, self.fps)
         validate_source(self.root)
         os.chdir(self.root)
         os.environ.setdefault("TORCH_HOME", str(self.root / "models/.torch"))
@@ -246,10 +346,11 @@ class MuseTalkRuntime:
             raise RuntimeError("MuseTalk requires the production CUDA GPU")
         torch.set_num_threads(4)
         torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = self.precision != "fp32"
+        torch.backends.cudnn.allow_tf32 = self.precision != "fp32"
         torch.manual_seed(1247)
         upstream.args = SimpleNamespace(
-            version="v15", extra_margin=10, parsing_mode="jaw",
+            version="v15", extra_margin=self.extra_margin, parsing_mode=self.parsing_mode,
             audio_padding_length_left=2, audio_padding_length_right=2, skip_save_images=False,
         )
         upstream.device = torch.device("cuda:0")
@@ -257,12 +358,20 @@ class MuseTalkRuntime:
             unet_model_path="models/musetalkV15/unet.pth",
             unet_config="models/musetalkV15/musetalk.json", device=upstream.device,
         )
-        upstream.pe = upstream.pe.half().to(upstream.device)
-        upstream.vae.vae = upstream.vae.vae.half().to(upstream.device).eval()
-        upstream.unet.model = upstream.unet.model.half().to(upstream.device).eval()
+        weight_dtype = torch.float16 if self.precision == "fp16" else torch.float32
+        upstream.pe = upstream.pe.to(device=upstream.device, dtype=weight_dtype).eval()
+        upstream.vae.vae = upstream.vae.vae.to(device=upstream.device, dtype=weight_dtype).eval()
+        upstream.unet.model = upstream.unet.model.to(device=upstream.device, dtype=weight_dtype).eval()
         upstream.timesteps = torch.tensor([0], device=upstream.device)
         upstream.weight_dtype = upstream.unet.model.dtype
-        upstream.audio_processor = upstream.AudioProcessor(feature_extractor_path="models/whisper")
+        lookahead_frames = self.audio_lookahead_frames
+
+        class RuntimeAudioProcessor(upstream.AudioProcessor):
+            def get_whisper_chunk(self, *args, **kwargs):
+                conditions = super().get_whisper_chunk(*args, **kwargs)
+                return apply_audio_lookahead(conditions, lookahead_frames)
+
+        upstream.audio_processor = RuntimeAudioProcessor(feature_extractor_path="models/whisper")
         upstream.whisper = WhisperModel.from_pretrained("models/whisper").to(
             device=upstream.device, dtype=upstream.weight_dtype,
         ).eval()
@@ -280,7 +389,8 @@ class MuseTalkRuntime:
                            model_pth="./models/face-parse-bisent/79999_iter.pth"):
                 return super().model_init(resnet_path, model_pth)
 
-        upstream.fp = RuntimeFaceParsing(left_cheek_width=90, right_cheek_width=90)
+        upstream.fp = RuntimeFaceParsing(left_cheek_width=self.left_cheek_width,
+                                        right_cheek_width=self.right_cheek_width)
         torch.cuda.synchronize()
         self.load_metrics.update(model_load_seconds=time.perf_counter() - started,
                                  gpu=torch.cuda.get_device_name(0), torch_version=torch.__version__)
@@ -290,9 +400,14 @@ class MuseTalkRuntime:
             raise RuntimeError(f"Incomplete avatar preparation needs recovery: {cached}")
         before = time.perf_counter()
         avatar = upstream.Avatar(self.identity["avatar_id"], str(self.reference), 0, self.batch_size, preparing)
+        try:
+            validate_avatar(avatar)
+        except RuntimeError as error:
+            raise RuntimeError(f"{error}; rebuild the avatar cache at {cached}") from error
         torch.cuda.synchronize()
         self.load_metrics.update(avatar_prepared=preparing,
-                                 avatar_load_or_prepare_seconds=time.perf_counter() - before)
+                                 avatar_load_or_prepare_seconds=time.perf_counter() - before,
+                                 quality_config=self.quality_config)
         self.torch, self.upstream, self.avatar = torch, upstream, avatar
 
     def generate(self, audio, output, cancel):
