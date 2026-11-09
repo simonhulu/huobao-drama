@@ -1727,6 +1727,43 @@ test('standalone cover preview stops stale automatic delivery until upload is ex
   assert.equal(h.calls.upload, 1)
 })
 
+test('batch upload cover preparation preserves delivery across service shutdown and restart', { timeout: 5000 }, async t => {
+  const h = fixture(t), job = await prepared(h), prepare = h.options.prepareAssets!
+  const { file, videoPath } = legacyFinishedVideo(h, job.id)
+  pendingHuasheng(h, job.id, { status: 'ready', stage: 'covers', productionCompleted: true,
+    collectionId: `science-batch-${randomUUID()}`, autoUpload: true, automaticDelivery: true, automaticProduction: false })
+  let entered!: () => void
+  const preparing = new Promise<void>(resolve => { entered = resolve })
+  h.options.prepareAssets = async (_input, options) => {
+    entered()
+    await new Promise<void>((_, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+    throw new Error('unreachable')
+  }
+  const batch = h.service.runBatchJob(job.id, 'upload', new AbortController().signal)
+  const interrupted = assert.rejects(batch, /已停止本机执行/)
+  await preparing
+  await h.service.stop(); await interrupted
+  const paused = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(paused.status, 'paused')
+  assert.equal(paused.automaticDelivery, true)
+  assert.equal(paused.autoUpload, true)
+  assert.equal(h.calls.upload, 0)
+  h.options.prepareAssets = prepare
+  const restarted = new ScienceWorkflowService(h.options)
+  t.after(() => restarted.stop())
+  assert.deepEqual(restarted.runAutomaticExports(), [job.id])
+  await restarted.waitForIdle()
+  const completed = restarted.detail(job.id), saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.upload?.submitted, true)
+  assert.equal(completed.projectUrl, paused.projectUrl)
+  assert.equal(saved.videoPath, videoPath)
+  assert.equal(saved.coverRevision, paused.coverRequest.revision)
+  assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport, 0)
+  assert.equal(h.calls.upload, 1)
+  assert.deepEqual(restarted.runAutomaticExports(), [])
+})
+
 test('upload never generates posters on demand and refuses legacy frame covers', async t => {
   const h = fixture(t), job = await prepared(h)
   const { file } = legacyFinishedVideo(h, job.id)

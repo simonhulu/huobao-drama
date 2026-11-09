@@ -766,7 +766,7 @@ export class ScienceWorkflowService {
       this.report(id, '固定片头已拼接；视频合成尚未完成，请继续原制作任务', 'export')
     })
   }
-  covers(id: string, input: z.infer<typeof scienceCoversSchema> = {}) {
+  covers(id: string, input: z.infer<typeof scienceCoversSchema> = {}, options: { automatic?: boolean } = {}) {
     const request = scienceCoversSchema.parse(input), job = this.read(id)
     if (job.status === 'running') return this.publicJob(job)
     if (job.videoCompositionPending) throw new ScienceWorkflowError('请先继续制作，完成视频合成后再生成封面')
@@ -777,7 +777,7 @@ export class ScienceWorkflowService {
     if (job.coverUploadRevision) throw new ScienceWorkflowError('原编辑页封面更换尚未完成，请先继续原上传任务，再生成下一版')
     return this.launch(id, async signal => {
       // A standalone cover preview requires a new explicit delivery action.
-      this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined })
+      if (!options.automatic) this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined })
       await this.prepareCovers(id, signal, { ...request, regenerate })
       if (job.uploadAttempt && !regenerate && !job.coverRequest) {
         this.modify(id, { status: job.status, stage: job.stage, message: job.message, failureKind: job.failureKind })
@@ -1429,7 +1429,8 @@ export class ScienceWorkflowService {
     }
     if (!job.videoUrl || job.videoCompositionPending) job = await run(() => this.produce(id, mode === 'upload'))
     if (!job.videoUrl) throw new ScienceWorkflowError('华生成片尚未下载完成')
-    if ((!job.landscapeCoverUrl || !job.portraitCoverUrl) && (mode === 'videos' || !job.hasUploadAttempt)) job = await run(() => this.covers(id))
+    if ((!job.landscapeCoverUrl || !job.portraitCoverUrl) && (mode === 'videos' || !job.hasUploadAttempt))
+      job = await run(() => this.covers(id, {}, { automatic: mode === 'upload' }))
     if (mode === 'upload' && !(job.status === 'completed' && job.upload?.submitted === true && job.upload.saved === false)) job = await run(() => this.upload(id))
     if (mode === 'upload' && !(job.status === 'completed' && job.upload?.submitted === true && job.upload.saved === false
       && job.upload.accountName === job.baijiahaoAccountName))
