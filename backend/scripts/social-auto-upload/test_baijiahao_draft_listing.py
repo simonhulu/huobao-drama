@@ -15,6 +15,15 @@ SECOND_ID = "1880033273757903971"
 
 
 class BaijiahaoFreshRecordTest(unittest.TestCase):
+    def test_record_title_uses_the_same_normalization_as_publication_matching(self):
+        attempted = bridge.datetime(2026, 10, 25, 21, 21, tzinfo=bridge.ZoneInfo('Asia/Shanghai')).timestamp()
+        row = {'title': 'Caf\u00e9 原视频标题 #话题#', 'record': {'created_at': '2026-10-25 21:21:01'}}
+        expected = 'Cafe\u0301\u200b 原视频标题 \n#话题#\n\n'
+        self.assertEqual(bridge.draft_text(row['title']), bridge.draft_text(expected))
+        self.assertTrue(listing._fresh_row(row, expected, attempted))
+        row['title'] += '续篇'
+        self.assertFalse(listing._fresh_row(row, expected, attempted))
+
     def test_api_creation_time_is_used_when_display_time_is_omitted_or_rounded(self):
         attempted = bridge.datetime(2026, 10, 25, 21, 21, tzinfo=bridge.ZoneInfo('Asia/Shanghai')).timestamp()
         for displayed in ('刚刚', '2026-10-25 21:21', '2026-10-25 21:20:00'):
@@ -209,6 +218,29 @@ class BaijiahaoDraftListingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diagnostic['pagesScanned'], 1)
         self.assertEqual(self.requests, [('', '', 1)])
         self.assertEqual(await self.page.evaluate('writes'), 0)
+
+    async def test_multiline_publication_description_matches_the_existing_list_record(self):
+        description = '原视频标题 \n#热爆趣创赛#\n\n'
+        self.pages = [[record(title=bridge.draft_text(description), kind='video', status='publish')]]
+        self.fail_search = True
+        with patch.object(listing, 'STEP_TIMEOUT', 500):
+            candidate, _, diagnostic = await listing.locate_baijiahao_draft(
+                self.page, title=description, attempted_at=self.attempted_at, target='baijiahao-video',
+                match=bridge.matching_publication, collection='')
+        self.assertEqual(candidate['id'], FIRST_ID)
+        self.assertEqual(diagnostic['pagesScanned'], 1)
+        self.assertEqual(self.requests, [('', '', 1)])
+        self.assertEqual(await self.page.evaluate('writes'), 0)
+
+    async def test_multiline_title_search_matches_the_single_line_input_request(self):
+        description = '原视频标题 \n#热爆趣创赛#\n\n'
+        title = bridge.draft_text(description)
+        self.pages = [[record(title=title)]]
+        with patch.object(listing, 'STEP_TIMEOUT', 500):
+            candidate, _, diagnostic = await self.locate(title=description)
+        self.assertEqual(candidate['id'], FIRST_ID)
+        self.assertEqual(diagnostic['pagesScanned'], 1)
+        self.assertEqual(self.requests[-1], ('draft', title[:30], 1))
 
     async def test_real_empty_is_not_found(self):
         self.pages = [[]]

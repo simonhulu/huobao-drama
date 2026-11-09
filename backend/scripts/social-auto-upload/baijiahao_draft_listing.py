@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+import unicodedata
 from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
@@ -120,6 +121,10 @@ async def _load(page, action, *, search, number, collection="draft"):
     return snapshot, total, count
 
 
+def _title_text(value):
+    return re.sub(r"\s+", " ", re.sub(r"[\u200b-\u200f\ufeff]", "", unicodedata.normalize("NFC", str(value or "")))).strip()
+
+
 def _fresh_row(row, title, attempted_at):
     """An unknown ID needs the full title and a dated time after this save began.
 
@@ -127,7 +132,7 @@ def _fresh_row(row, title, attempted_at):
     Those are insufficient when returning the first matching page. Minute-only
     labels cannot establish this boundary; known IDs do not need this filter.
     """
-    if str(row.get("title") or "").strip() != title.strip():
+    if _title_text(row.get("title")) != _title_text(title):
         return False
     # The visible card time changes from creation time to release/update time
     # after moderation. The API record is authoritative when it is present;
@@ -157,7 +162,7 @@ async def locate_baijiahao_draft(page, *, title, attempted_at, target, expected_
     pages and changing collection totals are not prerequisites for that proof.
     pagesScanned counts distinct completed draft pages; rowsScanned counts IDs.
     """
-    search = "" if expected_id is not None else title[:30]
+    search = "" if expected_id is not None else _title_text(title)[:30]
     diagnostic = {"outcome": "incomplete", "pagesScanned": 0, "rowsScanned": 0}
     seen, scanned = set(), set()
 
