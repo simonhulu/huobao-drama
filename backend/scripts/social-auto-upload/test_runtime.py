@@ -123,10 +123,13 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_authenticated_account_api_avoids_loading_the_dashboard(self):
         page = AsyncMock()
-        response = SimpleNamespace(status=200, text=AsyncMock(return_value='{"errno":0,"data":{"list":[],"page":{"currentPage":1}}}'))
+        response = SimpleNamespace(status=200, text=AsyncMock(return_value='{"errno":0,"data":{"list":[],"page":{"currentPage":1}}}'), dispose=AsyncMock())
         result, browser, close = await self.named_account_check(page, api_response=response, keep_browser=True)
         self.assertTrue(result["ready"])
+        browser.contexts[0].new_page.assert_not_awaited()
         page.goto.assert_not_awaited()
+        page.close.assert_not_awaited()
+        response.dispose.assert_awaited_once()
         browser.contexts[0].request.get.assert_awaited_once()
         self.assertIn("/pcui/article/lists?", browser.contexts[0].request.get.call_args.args[0])
         close.assert_not_awaited()
@@ -185,7 +188,8 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
             return {"ready": True, "message": "已登录"}
 
         async def bounded(awaitable, timeout):
-            probe_limits.append(timeout)
+            if getattr(awaitable, "cr_code", None) is probe.__code__:
+                probe_limits.append(timeout)
             return await wait_for(awaitable, min(timeout, 0.02))
 
         with patch.object(bridge, "login_state", probe), \

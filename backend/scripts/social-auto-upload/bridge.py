@@ -378,16 +378,18 @@ async def account_runtime(config, account_name, *, keep_browser=False):
         async with async_playwright() as playwright:
             progress("正在连接所选百家号账号的后台浏览器，尚未开始上传", "browser_connect")
             browser, _, _ = await connect_account_browser(playwright, config, account_name)
-            page = await browser.contexts[0].new_page()
+            page = None
             result = {"ready": False, "issue": "check_failed", "message": "百家号页面尚未就绪，尚未开始上传，请重新检查账号"}
             try:
                 progress("正在检查百家号登录状态，尚未开始上传", "account_check")
+                response = None
                 try:
                     # The authenticated list avoids loading the dashboard app
                     # just to check the same account's session before upload.
-                    response = await browser.contexts[0].request.get(
-                        "https://baijiahao.baidu.com/pcui/article/lists?currentPage=1&pageSize=10&collection=", timeout=15000)
-                    data = json.loads(await response.text()) if response.status == 200 else None
+                    response = await asyncio.wait_for(browser.contexts[0].request.get(
+                        "https://baijiahao.baidu.com/pcui/article/lists?currentPage=1&pageSize=10&collection=",
+                        timeout=15000, max_redirects=0), timeout=15)
+                    data = json.loads(await asyncio.wait_for(response.text(), timeout=15)) if response.status == 200 else None
                     if (isinstance(data, dict) and type(data.get("errno")) is int and data["errno"] == 0
                             and isinstance(data.get("data"), dict) and isinstance(data["data"].get("list"), list)
                             and isinstance(data["data"].get("page"), dict) and data["data"]["page"].get("currentPage") == 1):
@@ -395,6 +397,13 @@ async def account_runtime(config, account_name, *, keep_browser=False):
                         return result
                 except Exception:
                     pass  # Network/login challenges still use the visible page checks.
+                finally:
+                    if response is not None:
+                        try:
+                            await asyncio.wait_for(response.dispose(), timeout=2)
+                        except Exception:
+                            pass
+                page = await asyncio.wait_for(browser.contexts[0].new_page(), timeout=15)
                 await page.goto(HOMES["baijiahao"], wait_until="commit", timeout=15000)
                 # A cold external-disk profile can render after the first four seconds.
                 deadline = time.monotonic() + 45
@@ -416,10 +425,11 @@ async def account_runtime(config, account_name, *, keep_browser=False):
                     result["message"] = "账号登录已失效，请在“百家号账号”中重新扫码"
                 return result
             finally:
-                try:
-                    await asyncio.wait_for(page.close(), timeout=2)
-                except Exception:
-                    pass  # Cleanup cannot discard a confirmed login result.
+                if page is not None:
+                    try:
+                        await asyncio.wait_for(page.close(), timeout=2)
+                    except Exception:
+                        pass  # Cleanup cannot discard a confirmed login result.
                 from account_browser import close_idle_account_browser
                 # The upload immediately reuses this process; closing it here
                 # races Chrome shutdown and forces another cold profile load.
