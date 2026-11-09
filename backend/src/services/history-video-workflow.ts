@@ -79,12 +79,13 @@ export async function startHistoryDualProduction(sourceId:number, options:{retry
     huasheng_error=NULL,motion_error=NULL WHERE source_id=? AND script_sha256=?`).run(sourceId,job.scriptSha256)
   if(options.huashengBlockedReason)sql.prepare(`UPDATE history_dual_production SET huasheng_state='failed',huasheng_error=?
     WHERE source_id=? AND script_sha256=? AND huasheng_state<>'completed'`).run(options.huashengBlockedReason,sourceId,job.scriptSha256)
-  void runHistoryDualProductionPass().catch(error=>console.error('[history-dual-production]',errorText(error)))
+  void runHistoryDualProductionPass({sourceIds:[sourceId]}).catch(error=>console.error('[history-dual-production]',errorText(error)))
   return {job,production:historyDualProduction(sourceId).find(item=>item.script_sha256===job.scriptSha256)}
 }
 let running:Promise<void>|undefined
 type ProductionFactory=Pick<ReturnType<typeof getHistoryFactory>,'production'|'startFromSource'|'startEpisode'>
 interface ProductionDependencies {
+  sourceIds?:number[];
   queue?:Pick<HistoryHuashengService,'produce'|'getJob'|'checkProduction'>;
   factory?:ProductionFactory; exporter?:Pick<HistoryHuashengExportService,'enqueue'>;
   deliverCompletedMotion?:(job:MotionJob,factory:ProductionFactory,assertCurrent:()=>void)=>Promise<void>;
@@ -104,24 +105,37 @@ async function deliverCompletedMotion(job:MotionJob,factory:ProductionFactory,as
   factory.production.write(job)
 }
 export function runHistoryDualProductionPass(dependencies:ProductionDependencies={}):Promise<void> {
-  if(running)return running
+  const requested=dependencies.sourceIds
+  if(requested!==undefined && (!Array.isArray(requested) || requested.length>100 || requested.some(id=>!Number.isSafeInteger(id)||id<1))) {
+    return Promise.reject(new HuashengQueueError('制作需要明确选择至多 100 个有效文稿编号 sourceIds',400))
+  }
+  const sourceIds=requested===undefined ? undefined : [...new Set(requested)]
+  if(sourceIds?.length===0 || sourceIds===undefined && process.env.HISTORY_HUASHENG_WORKER_DISABLED==='1')return Promise.resolve()
+  if(running && sourceIds===undefined)return running
+  const previous=running
+  const scope=sourceIds ? `AND source_id IN (${sourceIds.map(()=>'?').join(',')})` : ''
+  const limit=sourceIds ? '' : 'LIMIT 50'
+  // Explicit requests must each get their own pass when the automatic loop is disabled.
   running=(async()=>{
+    if(previous)await previous.catch(()=>{})
     ensureHistoryDualProductionSchema(sql)
     const hasExportJobs=!!sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_huasheng_export_jobs'").get()
-    const rows=sql.prepare(`SELECT * FROM history_dual_production WHERE huasheng_state IN ('pending','started') OR motion_state IN ('pending','started') ORDER BY updated_at,created_at LIMIT 50`).all() as ProductionRow[]
+    const rows=sql.prepare(`SELECT * FROM history_dual_production WHERE (huasheng_state IN ('pending','started') OR motion_state IN ('pending','started')) ${scope} ORDER BY updated_at,created_at ${limit}`).all(...(sourceIds || [])) as ProductionRow[]
     // Reconcile failed projections separately so old failures cannot consume
     // the admission slots for accepted work. This only follows the original job.
     rows.push(...sql.prepare(`SELECT * FROM history_dual_production
       WHERE motion_state='failed' AND motion_job_id IS NOT NULL
         AND huasheng_state NOT IN ('pending','started') AND next_check_at<=?
-      ORDER BY next_check_at,created_at LIMIT 50`).all(Date.now()) as ProductionRow[])
+        ${scope}
+      ORDER BY next_check_at,created_at ${limit}`).all(Date.now(),...(sourceIds || [])) as ProductionRow[])
     // Older projections completed at export admission. Reconcile only their
     // original tasks so a missing delivery remains visible and recoverable.
     rows.push(...sql.prepare(`SELECT * FROM history_dual_production
       WHERE production_mode='dual' AND huasheng_state IN ('completed','failed')
         AND motion_state NOT IN ('pending','started') AND next_check_at<=?
         AND NOT (motion_state='failed' AND motion_job_id IS NOT NULL)
-      ORDER BY next_check_at,updated_at LIMIT 50`).all(Date.now()) as ProductionRow[])
+        ${scope}
+      ORDER BY next_check_at,updated_at ${limit}`).all(Date.now(),...(sourceIds || [])) as ProductionRow[])
     if(!rows.length)return
     const sources=new Map(rows.map(row=>[row.source_id,getHistorySource(row.source_id)]))
     const currentStates=new Map(getHistoryProductionStates(sql,[...sources.values()].filter(source=>!!source)
@@ -278,7 +292,8 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
         sql.prepare('UPDATE history_dual_production SET updated_at=? WHERE source_id=? AND script_sha256=?').run(new Date().toISOString(),...key)
       }
     }
-  })().finally(()=>{running=undefined})
+  })().finally(()=>{if(running===pass)running=undefined})
+  const pass=running
   return running
 }
 export function startHistoryDualProductionWorker() {

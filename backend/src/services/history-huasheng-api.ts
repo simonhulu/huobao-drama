@@ -69,10 +69,11 @@ export async function createHuashengProjectApiClient(input: HuashengBrowserInput
   try { session = await (options.session || readHuashengCreationSession)(input) }
   catch (error) {
     input.signal.throwIfAborted()
-    const login = error instanceof Error && /登录|账号/.test(error.message)
+    const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+    const login = code === 'login_required' || code !== 'retryable' && error instanceof Error && /登录|账号/.test(error.message)
     const failure = new HuashengApiError(login ? 'login_required' : 'browser_unavailable',
       login ? '花生账号未登录，无法读取接口会话' : '花生接口会话尚未就绪，已保留任务和配音设置', !login)
-    if (!login && error && typeof error === 'object' && (error as { code?: string }).code === 'retryable') failure.retryable = true
+    if (!login && code === 'retryable') failure.retryable = true
     throw failure
   }
   let mutationDispatched = false

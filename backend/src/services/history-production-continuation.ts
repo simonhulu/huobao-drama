@@ -117,7 +117,12 @@ export function createHistoryProductionContinuationHandler(overrides: Partial<Co
     startProduction: async (...args) => (await import('./history-video-workflow.js')).startHistoryDualProduction(...args),
     continueVideo: async (...args) => (await import('./history-video-publication.js')).continueHistoryVideoPublication(...args),
     continueExport: async id => (await import('./history-huasheng-export.js')).getHistoryHuashengExportService().resume(id),
-    startBackfill: async sourceIds => (await import('./history-video-workflow.js')).queueHistoryRefinedBackfill(sourceIds),
+    startBackfill: async sourceIds => {
+      const workflow=await import('./history-video-workflow.js')
+      const result=workflow.queueHistoryRefinedBackfill(sourceIds)
+      if(process.env.HISTORY_HUASHENG_WORKER_DISABLED==='1')await workflow.runHistoryDualProductionPass({sourceIds})
+      return result
+    },
     ...overrides,
   }
   return {

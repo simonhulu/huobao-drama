@@ -11,7 +11,8 @@ CONTENT_URL = "https://baijiahao.baidu.com/builder/rc/content"
 ROW = ".client_pages_content_v2_components_articleItem"
 MAX_PAGES = 50
 TIME_BUDGET = 120
-STEP_TIMEOUT = 15000
+# Cold browser profiles on the external disk need longer to synchronize API rows and DOM.
+STEP_TIMEOUT = 45000
 
 
 class BaijiahaoDraftListingError(RuntimeError):

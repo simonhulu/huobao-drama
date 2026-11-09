@@ -17,14 +17,11 @@ import { Opening30Demo, OPENING_30_DURATION } from "./Opening30Demo";
 import { Opening30GridDemo, OPENING_30_GRID_DURATION } from "./Opening30GridDemo";
 import { TemporalGridEpisode } from "./TemporalGridEpisode";
 import { NarrativeEpisode } from "./NarrativeEpisode";
-import {
-  NarrativeStoryboardPilot,
-  calculateNarrativeStoryboardPilotMetadata,
-} from "./NarrativeStoryboardPilot";
+
 import { GridStoryPreview } from "./GridStoryPreview";
 import { DharmaEpisode } from "./DharmaEpisode";
-import { DharmaComicEpisode } from "./DharmaComicPrototype";
-import { DharmaTextOverlay } from "./DharmaTextOverlay";
+
+
 import {
   MagnatesEditorial,
   MagnatesEditorialPreview,
@@ -78,23 +75,7 @@ function calculateMetadata<
 const RemotionRoot: React.FC = () => {
   return (
     <>
-      <Composition
-        id="DharmaTextOverlay"
-        component={DharmaTextOverlay}
-        durationInFrames={450}
-        fps={30}
-        width={1280}
-        height={720}
-        defaultProps={{
-          durationInFrames: 450,
-          fps: 30,
-          width: 1280,
-          height: 720,
-          subtitles: [],
-          quotes: [],
-        }}
-        calculateMetadata={calculateMetadata}
-      />
+      
       <Composition
         id="BlackTitleIntro"
         component={BlackTitleIntro}
@@ -310,22 +291,7 @@ const RemotionRoot: React.FC = () => {
         calculateMetadata={calculateMetadata}
       />
 
-      <Composition
-        id="NarrativeStoryboardPilot"
-        component={NarrativeStoryboardPilot}
-        durationInFrames={30}
-        fps={30}
-        width={1280}
-        height={720}
-        defaultProps={{
-          durationMs: 1000,
-          audioSrc: null,
-          captions: [],
-          sequences: [],
-          shots: [],
-        }}
-        calculateMetadata={calculateNarrativeStoryboardPilotMetadata}
-      />
+      
 
       <Composition
         id="GridStoryPreview"
@@ -358,109 +324,7 @@ const RemotionRoot: React.FC = () => {
         calculateMetadata={calculateMetadata}
       />
 
-      <Composition
-        id="DharmaComicEpisode"
-        component={DharmaComicEpisode}
-        durationInFrames={465}
-        fps={30}
-        width={1280}
-        height={720}
-        defaultProps={{
-          variant: "progressive_five",
-          durationInFrames: 465,
-          audio: "dharma-assets/ce1674d59583bc92dbc9.mp3",
-          narrationEndFrame: 463,
-          narrationWindows: [{ startFrame: 0, endFrame: 463 }],
-          bgm: {
-            src: "dharma-assets/46a08e047f7553417871.mp3",
-            volume: 0.0374,
-            narrationVolume: 0.0187,
-            fadeInSec: 3,
-            fadeOutSec: 5,
-            loopCrossfadeSec: 4,
-            sourceDurationSec: 542.772245,
-          },
-          segments: [{
-            kind: "image",
-            src: "dharma-assets/a5d8724ec958a61760ee.png",
-            startFrame: 0,
-            durationInFrames: 465,
-            move: "push",
-            treatment: "surreal_dream",
-            shotFunction: "narrative_illustration",
-          }],
-          quotes: [],
-          subtitles: [
-            { text: "活得最通透的人，", startSec: 0, endSec: 1.6168421052631576 },
-            { text: "在亲情关系里往往最冷。", startSec: 1.6168421052631576, endSec: 3.94 },
-            { text: "不是冷暴力的冷，", startSec: 3.94, endSec: 5.483529411764706 },
-            { text: "不是不管不问的冷。", startSec: 5.483529411764706, endSec: 7.32 },
-            { text: "是父母一句抱怨不会让他失眠，", startSec: 7.32, endSec: 9.865454545454545 },
-            { text: "孩子一次考试不会让他崩溃，", startSec: 9.865454545454545, endSec: 12.22909090909091 },
-            { text: "兄弟的不理解不会让他心如刀割的冷。", startSec: 12.22909090909091, endSec: 15.42 },
-          ],
-          panels: [
-            {
-              src: "dharma-assets/35ceb7380792bd615aef.png",
-              focusX: 49,
-              focusY: 50,
-              emphasisStartFrame: 0,
-            },
-            {
-              src: "dharma-assets/8b1e1e3e68d6b6cd0ebd.png",
-              focusX: 35,
-              focusY: 48,
-              emphasisStartFrame: 118,
-              bubble: {
-                kind: "caption",
-                text: "仍然回应，也仍然照顾",
-                x: 58,
-                y: 7,
-              },
-            },
-            {
-              src: "dharma-assets/5e274874203892acbf4d.png",
-              focusX: 38,
-              focusY: 48,
-              emphasisStartFrame: 220,
-              bubble: {
-                kind: "speech",
-                text: "你就不能替家里想想？",
-                x: 4,
-                y: 7,
-                tail: "left",
-              },
-            },
-            {
-              src: "dharma-assets/015505356e176c9ad03c.png",
-              focusX: 50,
-              focusY: 48,
-              emphasisStartFrame: 296,
-              bubble: {
-                kind: "speech",
-                text: "我没考好……",
-                x: 56,
-                y: 7,
-                tail: "right",
-              },
-            },
-            {
-              src: "dharma-assets/985166e6a5bd79240504.png",
-              focusX: 50,
-              focusY: 48,
-              emphasisStartFrame: 367,
-              bubble: {
-                kind: "speech",
-                text: "你根本不懂我。",
-                x: 55,
-                y: 7,
-                tail: "right",
-              },
-            },
-          ],
-        }}
-        calculateMetadata={calculateMetadata}
-      />
+      
 
       <Composition
         id="MagnatesEditorial"

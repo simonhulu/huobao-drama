@@ -120,7 +120,7 @@ async function readHuashengAttestedSession(input: Omit<ProjectInput, 'projectUrl
   input.signal.addEventListener('abort', abort, { once: true })
   try {
     input.signal.throwIfAborted()
-    page = await createHuashengTemporaryPage(browser, input.signal)
+    page = await createHuashengTemporaryPage(browser, input.signal, { background: false })
     input.signal.throwIfAborted()
     let fields: { ra: string; bs: string; fv: string } | undefined
     page.on('request', (request: HTTPRequest) => {
@@ -135,7 +135,11 @@ async function readHuashengAttestedSession(input: Omit<ProjectInput, 'projectUrl
     while (!fields && Date.now() < until) {
       input.signal.throwIfAborted()
       await page.evaluate(async (projectId: string) => {
-        await fetch(`/api/v2/innovideo/project/info?pid=${projectId}`, { credentials: 'include', signal: AbortSignal.timeout(5000) }).catch(() => {})
+        // The site's initializing fetch wrapper can ignore the request's AbortSignal.
+        await Promise.race([
+          fetch(`/api/v2/innovideo/project/info?pid=${projectId}`, { credentials: 'include', signal: AbortSignal.timeout(5000) }).catch(() => {}),
+          new Promise<void>(resolve => setTimeout(resolve, 5500)),
+        ])
       }, pid)
       if (!fields) await delay(400, undefined, { signal: input.signal })
     }

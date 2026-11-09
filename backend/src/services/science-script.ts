@@ -137,7 +137,7 @@ export const SCIENCE_PLAN_TOOL_NAME = 'submit_science_plan'
 export const SCIENCE_SCRIPT_TOOL_NAME = 'submit_science_script'
 
 const scienceScriptSchema = z.object({ title: text.max(60), script: text.max(80_000) }).strict()
-const sciencePassageSchema = scienceScriptSchema.extend({ script: z.string().trim().min(0).max(80_000) })
+const sciencePassageSchema = scienceScriptSchema.extend({ title: text, script: z.string().trim().min(0).max(80_000) })
 
 function outputTool(name: string, description: string, schema: z.ZodObject): TextModelTool {
   const { $schema: _dialect, ...parameters } = z.toJSONSchema(schema)

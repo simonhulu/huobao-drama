@@ -1,7 +1,7 @@
 # Historical Visual Style Library
 
 This library turns the local study set in
-`/Users/zhangshijie/Downloads/画面风格学习` into production rules for the
+`/Users/mac/Downloads/画面风格学习` into production rules for the
 Remotion history factory. It is a source-derived operating reference, not a
 bag of creator names. Runtime prompts use observable camera, light, color,
 blocking, material, and film-response rules.

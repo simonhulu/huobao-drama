@@ -395,6 +395,7 @@ async def account_runtime(config, account_name, *, keep_browser=False):
                 except Exception:
                     pass  # Network/login challenges still use the visible page checks.
                 await page.goto(HOMES["baijiahao"], wait_until="commit", timeout=15000)
+                # A cold external-disk profile can render after the first four seconds.
                 deadline = time.monotonic() + 45
                 while time.monotonic() < deadline:
                     try:

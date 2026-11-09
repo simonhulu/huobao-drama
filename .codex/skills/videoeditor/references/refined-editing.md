@@ -81,7 +81,7 @@ ffmpeg -v error -n -i /绝对路径/原旁白.wav \
 
 ## 3. 选声音并冻结素材
 
-本用户已明确授权 `/Users/zhangshijie/Downloads/2174款剪映音效库`，不重复索要授权。候选入口是 [local-sfx-palette.json](local-sfx-palette.json)，选中了才用，不默认全部加载。用户此前认可的是该本地库版；Kenney 游戏音效不是本流程的备用素材。
+本用户已明确授权 `/Users/mac/Downloads/2174款剪映音效库`，不重复索要授权。候选入口是 [local-sfx-palette.json](local-sfx-palette.json)，选中了才用，不默认全部加载。用户此前认可的是该本地库版；Kenney 游戏音效不是本流程的备用素材。
 
 先听候选的音色、有效起音、时长与衰减，再结合声画选取。文件名/分类不能替代试听；扩展名可能与真实编码不同，用 ffprobe 验证。头部静默可裁；不硬砍尾音来塞满短镜头。长音不适合就换短音或留白。不要按“钱、奏折、门”等词机械加拟音，历史人物情绪也不等于到处用搞笑声。
 

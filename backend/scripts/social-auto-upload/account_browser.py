@@ -72,7 +72,8 @@ async def cleanup_stale_baijiahao_pages(config, endpoint, *, account_name=None):
         "node", str(Path(__file__).with_name("stale_pages.mjs")),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     try:
-        output, _ = await asyncio.wait_for(process.communicate(json.dumps(request).encode()), timeout=12)
+        # Cold checkpoint scans on an external disk can exceed the browser-only timeout.
+        output, _ = await asyncio.wait_for(process.communicate(json.dumps(request).encode()), timeout=45)
         if process.returncode != 0 or len(output) > 256 * 1024:
             raise ValueError("cleanup failed")
         result = json.loads(output)
@@ -307,7 +308,9 @@ async def connect_account_browser(playwright, config, account_name, expected_dig
             context = browser.contexts[0]
             # The persistent profile retains refreshed login cookies. Reopening
             # an idle browser must not overwrite them with the old import.
-            if not state.get("initialized"):
+            # A migrated macOS profile can lose every cookie when encryption is unavailable.
+            # Restore only an empty restarted named session; preserve refreshed profile cookies.
+            if not state.get("initialized") or (fresh and name not in HISTORY_ACCOUNTS and not await context.cookies()):
                 await context.add_cookies(storage["cookies"])
             # Storage state from SAU may include localStorage as well as cookies.
             # The init script belongs to this live context and persists across

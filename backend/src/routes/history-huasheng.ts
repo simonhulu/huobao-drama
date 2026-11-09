@@ -100,7 +100,8 @@ export function createHistoryHuashengRoute(options: HistoryHuashengRouteOptions 
     const ids = produceCommand.parse(await c.req.json()).jobIds
     const result = await queue().produce(ids, { dual: !options.service })
     if (!options.service) {
-      void (await import('../services/history-video-workflow.js')).runHistoryDualProductionPass()
+      const sourceIds=result.results.map(item=>item.sourceId).filter((id):id is number=>typeof id==='number' && id>0)
+      void (await import('../services/history-video-workflow.js')).runHistoryDualProductionPass({sourceIds})
         .catch(error => console.error('[history-huasheng] Dual production pass failed:', error instanceof Error ? error.message : error))
     }
     return result
@@ -110,7 +111,7 @@ export function createHistoryHuashengRoute(options: HistoryHuashengRouteOptions 
     if(options.refineCompleted)return options.refineCompleted(sourceIds)
     const workflow=await import('../services/history-video-workflow.js')
     const result=workflow.queueHistoryRefinedBackfill(sourceIds)
-    void workflow.runHistoryDualProductionPass()
+    void workflow.runHistoryDualProductionPass({sourceIds})
       .catch(error=>console.error('[history-huasheng] Refined backfill pass failed:',error instanceof Error ? error.message : error))
     return result
   },202))

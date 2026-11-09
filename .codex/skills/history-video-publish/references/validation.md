@@ -6,7 +6,7 @@
 
 - 脚本：`http://localhost:3013/history-scripts?script=1`，来源 ID 为 1，不是 episode ID。
 - 稿件 revision：`dc2f4ee9f1814470d28be64526857c50052633c0fe3969a63b9ed20ddfae6c5c`。
-- 成片：`/Users/zhangshijie/Downloads/古人吃饭有多野？砒霜兑酒、尿泡虾米，古代造假比现代还猛.mp4`。
+- 成片：`/Users/mac/Downloads/古人吃饭有多野？砒霜兑酒、尿泡虾米，古代造假比现代还猛.mp4`。
 - 视频 SHA256：`c3b647871f658df6dc1aa611d1f0b21fb7edbe1df4b16e45aab991761361cd43`；1920x1080、30fps、293.739 秒，H264/AAC。未转码、未替换原视频水印。
 - 素材包：项目根 `data/history-video-publish/history-1-e3bd7d29166a1a9800e1/`。正文、来源审稿信息、视频指纹和三张检查帧均已保存。
 - 关联由用户指定；仅检查开头、中间、结尾画面与主题，不等于逐字核验。

@@ -249,14 +249,15 @@ export async function closeHuashengTemporaryPage(browser: Browser, page: Page): 
 }
 
 // Ownership is recorded before creation: CDP can time out after Chrome creates the tab.
-export async function createHuashengTemporaryPage(browser: Browser, signal?: AbortSignal): Promise<Page> {
+export async function createHuashengTemporaryPage(browser: Browser, signal?: AbortSignal,
+  options: { background?: boolean } = {}): Promise<Page> {
   signal?.throwIfAborted()
   const session = await preparationStep(browser.target().createCDPSession(), signal, 5000, value => value.detach())
   const owned: TemporaryTarget = { url: `about:blank#huobao-huasheng-${randomUUID()}` }
   let creation: Promise<{ targetId: string }> | undefined
   try {
     signal?.throwIfAborted()
-    creation = session.send('Target.createTarget', { url: owned.url, background: true }, { timeout: 5000 })
+    creation = session.send('Target.createTarget', { url: owned.url, background: options.background ?? true }, { timeout: 5000 })
     const created = await preparationStep(creation, signal, 5500)
     owned.targetId = created.targetId
     const target = await preparationStep(browser.waitForTarget(target => target.type() === 'page' && target.url() === owned.url, { timeout: 5000 }), signal, 5500)

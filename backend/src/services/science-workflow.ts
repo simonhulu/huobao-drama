@@ -350,7 +350,7 @@ export class ScienceWorkflowService {
         && (current.automaticProduction || current.automaticDelivery) && current.automaticDelivery !== false
         && (resumableWriting || ['produce', 'export'].includes(current.stage)) && !(current.exportDispatched && !current.exportTask)
       if (!controller.signal.aborted && temporary && current.stage === 'upload' && current.automaticDelivery !== false) {
-        this.scheduleUploadRetry(id, safeMessage(error), false)
+        this.scheduleUploadRetry(id, safeMessage(error))
       } else if (canResume && attempt < 3) {
         const automaticRetry = { attempt: attempt + 1, maxAttempts: 3, nextRetryAt: new Date(Date.now() + (qualityRevision ? 5000 : Math.min(300_000, 30_000 * 2 ** attempt))).toISOString() }
         this.modify(id, { status: 'retry_wait', retry: undefined, automaticRetry, failureKind: 'temporary' })
@@ -957,14 +957,14 @@ export class ScienceWorkflowService {
     this.modify(id, { autoUpload: true, automaticDelivery: true })
     return this.launch(id, signal => this.uploadVideo(id, signal))
   }
-  private scheduleUploadRetry(id: string, message: string, restart: boolean) {
+  private scheduleUploadRetry(id: string, message: string) {
     const job = this.read(id), attempt = (job.uploadRetryCount || 0) + 1
     const waitMs = Math.min(300_000, 30_000 * 2 ** Math.min(attempt - 1, 4))
     this.modify(id, { status: 'retry_wait', stage: 'upload', autoUpload: true, automaticDelivery: true,
       automaticRetry: undefined, uploadRetry: { attempt, nextRetryAt: new Date(Date.now() + waitMs).toISOString() },
-      uploadRetryCount: attempt, uploadRestartPending: restart || job.uploadRestartPending, failureKind: 'temporary' })
+      uploadRetryCount: attempt, uploadRestartPending: undefined, failureKind: 'temporary' })
     const reason = message.replace(/；(?:已保留原检查点，不重复上传或保存|.*不重复上传).*$/, '')
-    this.report(id, `未取得明确的上传结果，${Math.ceil(waitMs / 1000)} 秒后自动${restart ? '重传' : '重试上传'}（第 ${attempt} 次）：${reason}`)
+    this.report(id, `未取得明确的上传结果，${Math.ceil(waitMs / 1000)} 秒后自动重试上传（第 ${attempt} 次）：${reason}`)
   }
   private uploadAttemptForReview(id: string) {
     const job = this.read(id), attempt = job.uploadAttempt
@@ -1033,6 +1033,13 @@ export class ScienceWorkflowService {
   }
   private async uploadVideoForAccount(id: string, signal: AbortSignal) {
     let job = this.read(id)
+    // Older workers may have scheduled a replacement after an ambiguous publication.
+    if (job.uploadRestartPending) {
+      this.modify(id, { status: 'needs_attention', stage: 'upload', failureKind: 'action_required',
+        automaticRetry: undefined, uploadRetry: undefined, uploadRestartPending: undefined })
+      this.report(id, '原发表结果尚未确认，已停止自动重传；请先只读核对原账号的发表记录，保留原上传检查点')
+      return
+    }
     this.modify(id, { status: 'running' })
     this.report(id, '正在核对原账号的百家号发表任务', 'upload')
     const assets = await this.inspectPreparedCovers(id, signal)
@@ -1063,34 +1070,6 @@ export class ScienceWorkflowService {
       currentInputDigest = digest(JSON.stringify([job.baijiahaoAccountName, job.title, job.script, ...hashes]))
     } catch { signal.throwIfAborted() /* Missing files still permit read-only reconciliation of an earlier platform draft. */ }
     const runtime = this.options.uploadRuntime || await import('./social-auto-upload.js')
-    if (job.uploadRestartPending) {
-      if (currentInputDigest !== attempt.inputDigest || attempt.fingerprint !== attempt.inputDigest)
-        throw new ScienceWorkflowError('原上传素材或文稿已变化，不能自动重传')
-      if (!runtime.resetSocialUploadAttempt) throw new ScienceWorkflowError('上传运行时不支持自动重传，请更新服务')
-      let reset: Awaited<ReturnType<NonNullable<typeof runtime.resetSocialUploadAttempt>>>
-      try { reset = await runtime.resetSocialUploadAttempt(attempt.payload!, { allowDuplicateSubmission: true }) }
-      catch (error) {
-        const message = safeMessage(error)
-        if (!uploadRequiresAction(message) && (uploadConnectionFailure(message) || /正在运行|正在执行|already.running|account.*busy/i.test(message)))
-          throw new ScienceWorkflowError(message, 503, true)
-        throw error
-      }
-      if (reset.result) {
-        if (reset.result.accountName !== job.baijiahaoAccountName || !reset.result.submitted || reset.result.saved !== false)
-          throw new ScienceWorkflowError('原任务回执与绑定账号或发表方式不一致，不能继续')
-        this.modify(id, { upload: reset.result, uploadAttempt: { ...attempt, status: 'saved', result: reset.result },
-          status: 'completed', stage: 'completed', uploadRetry: undefined, uploadRestartPending: undefined, failureKind: undefined })
-        this.report(id, reset.result.published ? '已发表并核验所选百家号账号的作品' : '已提交百家号，等待平台审核')
-        return
-      }
-      signal.throwIfAborted()
-      const payload = { ...attempt.payload!, jobId: `${id}-baijiahao-retry-${randomUUID()}` }
-      job = this.modify(id, { upload: null, uploadRestartPending: undefined,
-        uploadHistory: [...(job.uploadHistory || []), { attempt, archivedAt: new Date().toISOString() }].slice(-50),
-        uploadAttempt: { id: payload.jobId, target: payload.target, accountName: payload.accountName,
-          fingerprint: attempt.fingerprint, inputDigest: attempt.inputDigest, status: 'queued', dispatched: false, payload } })
-      this.report(id, '已保留上次上传记录，正在用原账号和原素材重新上传')
-    }
     const activeAttempt = this.read(id).uploadAttempt!, attemptPayload = activeAttempt.payload!
     let result: CbaUploadRecoveryCurrent['result'] | undefined
     let recoveryMessage: string | undefined
@@ -1128,13 +1107,13 @@ export class ScienceWorkflowService {
       recoveryMessage = recovered.message
       signal.throwIfAborted()
       if (!(result?.submitted && result.saved === false)) {
-        if (recovered.decision === 'busy' || uploadConnectionFailure(recovered.message) && !uploadRequiresAction(recovered.message)) {
-          this.scheduleUploadRetry(id, recovered.message, false); return
+        if (recovered.decision !== 'uncertain'
+          && (recovered.decision === 'busy' || uploadConnectionFailure(recovered.message) && !uploadRequiresAction(recovered.message))) {
+          this.scheduleUploadRetry(id, recovered.message); return
         }
-        if (recovered.decision === 'uncertain' && recovered.restartable && !uploadRequiresAction(recovered.message)) {
-          this.scheduleUploadRetry(id, recovered.message, true); return
-        }
-        this.modify(id, { uploadAttempt: { ...this.read(id).uploadAttempt!, status: 'blocked' } })
+        if (recovered.decision === 'uncertain') {
+          recoveryMessage = `${recovered.message}；请先只读核对原账号的发表记录，保留原上传检查点，不自动重传`
+        } else this.modify(id, { uploadAttempt: { ...this.read(id).uploadAttempt!, status: 'blocked' } })
       }
     }
     signal.throwIfAborted()
