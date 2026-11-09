@@ -30,7 +30,8 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2)
   const identity = { model: 'musetalk-v15', source_revision: '0a89dec45a0192b824e3cf4daf96c239440c5ed8',
     avatar_id: 'xiaolu-r3-fixture', reference_sha256: '1'.repeat(64), fps: 15 }
   const state = { submissions: 0, retries: 0, deletes: 0, polls: 0, pending: false, wrongAudio: false, dropSubmission: false,
-    loadingReads: 0, failedPoll: false, onPoll: undefined as (() => void) | undefined, jobs: new Map<string, any>(), uploaded: undefined as Buffer | undefined }
+    loadingReads: 0, failedPoll: false, onPoll: undefined as (() => void) | undefined, onResult: undefined as (() => void) | undefined,
+    jobs: new Map<string, any>(), uploaded: undefined as Buffer | undefined }
   const server = createServer(async (request, response) => {
     try {
       const send = (data: unknown) => { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(data)) }
@@ -52,7 +53,7 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2)
       if (match && job) {
         if (request.method === 'DELETE') { state.deletes++; if (job.status !== 'completed') job.status = 'cancelled'; send(job); return }
         if (match[2] === '/retry' && request.method === 'POST') { state.retries++; job.status = 'completed'; send(job); return }
-        if (match[2] === '/result') { response.setHeader('Content-Type', 'video/mp4'); response.end(output); return }
+        if (match[2] === '/result') { state.onResult?.(); response.setHeader('Content-Type', 'video/mp4'); response.end(output); return }
         state.polls++; state.onPoll?.()
         if (state.failedPoll) { response.writeHead(500); response.end(); return }
         send(state.wrongAudio ? { ...job, audio_sha256: '0'.repeat(64) } : job); return
@@ -71,6 +72,74 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2)
   process.env.MUSETALK_TIMEOUT_MS = '30000'
   return { root, videoPath, directory, state }
 }
+
+async function gatedNormalization(t: TestContext, root: string) {
+  const realFfmpeg = (await exec('which', ['ffmpeg'])).stdout.trim()
+  const bin = path.join(root, 'bin'), started = path.join(root, 'normalization.started'), release = path.join(root, 'normalization.release')
+  await fs.mkdir(bin)
+  const wrapper = `#!${process.execPath}\nconst fs=require('node:fs'),cp=require('node:child_process');const args=process.argv.slice(2);
+const run=()=>{const result=cp.spawnSync(${JSON.stringify(realFfmpeg)},args,{stdio:'inherit'});process.exit(result.status??1)};
+if(args.includes('-n')&&args.includes('libx264')){fs.writeFileSync(${JSON.stringify(started)},String(process.pid));
+const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(timer);run()}},10)}else run();\n`
+  await fs.writeFile(path.join(bin, 'ffmpeg'), wrapper, { mode: 0o700 })
+  const previousPath = process.env.PATH
+  t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath })
+  process.env.PATH = `${bin}${path.delimiter}${previousPath || ''}`
+  return { release: () => fs.writeFile(release, ''), started: async () => {
+    for (let attempt = 0; attempt < 500; attempt++) {
+      try { await fs.access(started); return } catch {}
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    assert.fail('the real normalization subprocess must start')
+  } }
+}
+
+function remoteBudget(t: TestContext) {
+  const controller = new AbortController(), budgets: number[] = []
+  const timeout = AbortSignal.timeout.bind(AbortSignal)
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    budgets.push(milliseconds)
+    return milliseconds === 30_000 ? controller.signal : timeout(milliseconds)
+  })
+  return { expire: () => controller.abort(new DOMException('remote budget expired', 'TimeoutError')), budgets }
+}
+
+test('a completed remote result still downloads when its remote service budget expires', async t => {
+  const f = await fixture(t), budget = remoteBudget(t)
+  f.state.onResult = budget.expire
+  const result = await prepareScienceMusetalkVideo(f, { signal: signal() })
+  assert.ok((await fs.stat(result.presenterPath)).size > 0)
+  assert.ok(budget.budgets.includes(5 * 60_000), 'local postprocessing gets its own bounded budget')
+  assert.equal(f.state.submissions, 1); assert.equal(f.state.deletes, 0)
+})
+
+test('remote service budget expiry during normalization cannot discard a completed presenter', async t => {
+  const f = await fixture(t), budget = remoteBudget(t), gate = await gatedNormalization(t, f.root)
+  const running = prepareScienceMusetalkVideo(f, { signal: signal() })
+  const completed = assert.doesNotReject(running)
+  await gate.started()
+  budget.expire()
+  await gate.release()
+  await completed
+  const result = await running
+  assert.ok((await fs.stat(result.presenterPath)).size > 0)
+  assert.equal(f.state.submissions, 1); assert.equal(f.state.deletes, 0)
+})
+
+test('parent cancellation still stops normalization and resumes the completed remote job without resubmitting', async t => {
+  const f = await fixture(t), controller = new AbortController(), gate = await gatedNormalization(t, f.root)
+  const running = prepareScienceMusetalkVideo(f, { signal: controller.signal })
+  const stopped = assert.rejects(running, /cancel|abort/i)
+  await gate.started()
+  controller.abort(new Error('cancel local normalization'))
+  await stopped
+  assert.equal(f.state.deletes, 1)
+  assert.equal([...f.state.jobs.values()][0].status, 'completed')
+  await gate.release()
+  const result = await prepareScienceMusetalkVideo(f, { signal: signal() })
+  assert.ok((await fs.stat(result.presenterPath)).size > 0)
+  assert.equal(f.state.submissions, 1); assert.equal(f.state.retries, 0)
+})
 
 test('one full original narration is submitted, verified, normalized and cached without a local reference file', async t => {
   const f = await fixture(t)
@@ -171,7 +240,7 @@ test('cancellation releases the remote GPU job and a subsequent invocation expli
   assert.equal(f.state.retries, 1)
 })
 
-test('a total time budget stops polling and sends cancellation instead of leaving expensive work running', async t => {
+test('the remote service time budget stops polling and sends cancellation instead of leaving expensive work running', async t => {
   const f = await fixture(t)
   f.state.pending = true
   process.env.MUSETALK_TIMEOUT_MS = '1000'

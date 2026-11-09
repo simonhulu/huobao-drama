@@ -162,7 +162,7 @@ function validateJob(value: any, checkpoint: Checkpoint): RemoteJob {
 /** Generate one full-narration presenter using a cached avatar on the remote GPU. */
 export async function prepareScienceMusetalkVideo(input: { videoPath: string; directory: string }, options: ScienceMusetalkVideoOptions): Promise<{ presenterPath: string; sourceSha256: string }> {
   options.signal.throwIfAborted()
-  const signal = AbortSignal.any([options.signal, AbortSignal.timeout(positive('MUSETALK_TIMEOUT_MS', 10 * 60_000))])
+  let signal = AbortSignal.any([options.signal, AbortSignal.timeout(positive('MUSETALK_TIMEOUT_MS', 10 * 60_000))])
   const directory = path.resolve(input.directory), source = path.resolve(input.videoPath)
   await fs.mkdir(directory, { recursive: true })
   const lockPath = path.join(directory, '.musetalk.lock')
@@ -261,9 +261,14 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       }
       await delay(positive('MUSETALK_POLL_INTERVAL_MS', 3000), undefined, { signal })
     }
+    // Completed GPU work must not lose its local download/normalization budget.
+    // Give long narrations up to real-time postprocessing, bounded to 5-60 minutes.
+    const postprocessTimeoutMs = Math.min(60 * 60_000, Math.max(5 * 60_000, Math.ceil(main.duration * 1000)))
+    signal = AbortSignal.any([options.signal, AbortSignal.timeout(postprocessTimeoutMs)])
+    options.report?.('MuseTalk 口型已完成，正在下载并校验主播视频')
     const raw = path.join(work, 'remote.mp4'), temporary = path.join(work, `.${randomUUID()}.mp4`)
     try {
-      const response = await request(`${jobUrl}/result`, {}, 180_000)
+      const response = await request(`${jobUrl}/result`, {}, postprocessTimeoutMs)
       if (!response.body) throw new Error('MuseTalk 没有返回口型视频')
       await pipeline(Readable.fromWeb(response.body as any), createWriteStream(raw), { signal })
       if (!validHash(completed.result_sha256) || await fileHash(raw, signal) !== completed.result_sha256) throw new Error('MuseTalk 输出视频校验失败')
@@ -271,13 +276,13 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       if (Math.abs(remote.duration - main.duration) > .15 || Number(remote.video.width) !== 360 || Number(remote.video.height) !== 360) {
         throw new Error('MuseTalk 输出时长或尺寸不符合要求，不能冻结或循环补齐正文')
       }
-      await exec('ffmpeg', ['-nostdin', '-v', 'error', '-i', raw, '-f', 'null', '-'], { signal, timeout: 180_000 })
+      await exec('ffmpeg', ['-nostdin', '-v', 'error', '-i', raw, '-f', 'null', '-'], { signal, timeout: postprocessTimeoutMs })
       options.report?.('正在规范主播视频帧率，保留正文原声')
       const targetFrames = Math.max(1, Math.round(main.duration * main.rate))
       // Older Intel VideoToolbox can reject 360px sessions even when 1080p encoding works.
       await exec('ffmpeg', ['-nostdin', '-v', 'error', '-n', '-i', raw, '-an', '-vf',
         `setpts=PTS-STARTPTS,fps=${main.fps},tpad=stop_mode=clone:stop_duration=0.15,trim=end_frame=${targetFrames},setsar=1`,
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-threads', '2', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', temporary], { signal, timeout: 180_000 })
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-threads', '2', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', temporary], { signal, timeout: postprocessTimeoutMs })
       const normalized = await media(temporary, signal)
       if (normalized.audio || normalized.duration + .001 < main.duration || Math.abs(normalized.duration - main.duration) > .08) throw new Error('MuseTalk 主播规范化时长校验失败')
       if (await fileHash(source, signal) !== sourceSha256) throw new Error('MuseTalk 生成期间正文文件发生变化，请继续原任务核对')
