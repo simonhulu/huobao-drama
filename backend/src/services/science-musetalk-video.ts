@@ -9,7 +9,6 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { getVideoEncoderOptions } from './composition/video-encoder.js'
 
 const exec = promisify(execFile)
 const MODEL = 'musetalk-v15'
@@ -275,9 +274,10 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       await exec('ffmpeg', ['-nostdin', '-v', 'error', '-i', raw, '-f', 'null', '-'], { signal, timeout: 180_000 })
       options.report?.('正在规范主播视频帧率，保留正文原声')
       const targetFrames = Math.max(1, Math.round(main.duration * main.rate))
+      // This small 360px clip avoids scarce VideoToolbox sessions used by full-size renders.
       await exec('ffmpeg', ['-nostdin', '-v', 'error', '-n', '-i', raw, '-an', '-vf',
         `setpts=PTS-STARTPTS,fps=${main.fps},tpad=stop_mode=clone:stop_duration=0.15,trim=end_frame=${targetFrames},setsar=1`,
-        ...getVideoEncoderOptions({ width: 360, height: 360 }), '-pix_fmt', 'yuv420p', '-movflags', '+faststart', temporary], { signal, timeout: 180_000 })
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-threads', '2', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', temporary], { signal, timeout: 180_000 })
       const normalized = await media(temporary, signal)
       if (normalized.audio || normalized.duration + .001 < main.duration || Math.abs(normalized.duration - main.duration) > .08) throw new Error('MuseTalk 主播规范化时长校验失败')
       if (await fileHash(source, signal) !== sourceSha256) throw new Error('MuseTalk 生成期间正文文件发生变化，请继续原任务核对')

@@ -104,6 +104,25 @@ test('an accepted submission with a lost response resumes by the same determinis
   assert.equal(f.state.retries, 1)
 })
 
+test('presenter normalization succeeds when the Mac hardware encoder cannot open a compression session', async t => {
+  if (os.platform() !== 'darwin') { t.skip('VideoToolbox is macOS-specific'); return }
+  const f = await fixture(t)
+  const realFfmpeg = (await exec('which', ['ffmpeg'])).stdout.trim()
+  const bin = path.join(f.root, 'bin'), wrapper = path.join(bin, 'ffmpeg')
+  await fs.mkdir(bin)
+  await fs.writeFile(wrapper, '#!/bin/sh\nfor arg; do\n  if [ "$arg" = "h264_videotoolbox" ]; then\n    echo "cannot create compression session: -12903" >&2\n    exit 1\n  fi\ndone\nexec '
+    + "'" + realFfmpeg.replace(/'/g, "'\\''") + "'" + ' "$@"\n', { mode: 0o700 })
+  const previousPath = process.env.PATH
+  t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath })
+  process.env.PATH = `${bin}${path.delimiter}${previousPath || ''}`
+  const result = await prepareScienceMusetalkVideo(f, { signal: signal() })
+  const video = (await probe(result.presenterPath)).streams.find((item: any) => item.codec_type === 'video')
+  assert.equal(video.codec_name, 'h264')
+  assert.equal(video.avg_frame_rate, '30/1')
+  assert.equal(f.state.submissions, 1)
+  assert.equal(f.state.deletes, 0)
+})
+
 test('model startup can finish before the first full-narration submission', async t => {
   const f = await fixture(t); f.state.loadingReads = 1
   await prepareScienceMusetalkVideo(f, { signal: signal() })
