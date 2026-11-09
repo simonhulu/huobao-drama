@@ -52,7 +52,7 @@ test('closes a stuck old editor through the browser session and opens blank firs
   assert.deepEqual(h.calls[1].params, {url: 'about:blank', background: true});
 });
 
-test('repeated cleanup leaves one fresh blank and preserves a checkpoint-bound blank', async t => {
+test('repeated cleanup removes spare blanks while preserving a checkpoint-bound blank', async t => {
   const inventory = [target('EDITOR1'), {targetId: 'OLD_BLANK', type: 'page', url: 'about:blank'},
     {targetId: 'BOUND_BLANK', type: 'page', url: 'about:blank'}];
   const h = await fixture(t, inventory, [{phase: 'opening', targetId: 'BOUND_BLANK'}]);
@@ -78,11 +78,37 @@ test('repeated cleanup leaves one fresh blank and preserves a checkpoint-bound b
   inventory.push(target('EDITOR2'));
   assert.deepEqual((await h.run()).closedTargetIds, ['EDITOR2', 'FRESH1']);
   assert.deepEqual(inventory.map(item => item.targetId), ['BOUND_BLANK', 'FRESH2']);
+  const spare = await h.run();
+  assert.equal(spare.createdTargetId, null);
+  assert.deepEqual(spare.closedTargetIds, ['FRESH2']);
+  assert.deepEqual(inventory.map(item => item.targetId), ['BOUND_BLANK']);
   const idle = await h.run();
   assert.equal(idle.createdTargetId, null);
   assert.deepEqual(idle.closedTargetIds, []);
   assert.equal(sequence, 2);
   assert.equal(h.calls.some(call => call.method === 'Target.closeTarget' && call.params.targetId === 'BOUND_BLANK'), false);
+});
+
+test('closes an unbound blank without replacing it when active task pages remain', async t => {
+  const h = await fixture(t, [
+    target('DRAGON', '/builder/rc/clue'), target('AROWANA'),
+    {targetId: 'STUCK_BLANK', type: 'page', url: 'about:blank'},
+  ], [
+    {phase: 'publish_requested', targetId: 'DRAGON'},
+    {phase: 'staged', targetId: 'AROWANA'},
+  ]);
+  const result = await h.run();
+  assert.deepEqual(result.closedTargetIds, ['STUCK_BLANK']);
+  assert.equal(result.createdTargetId, null);
+  assert.equal(result.preservedCount, 2);
+  assert.deepEqual(h.calls.map(call => call.method), ['Target.getTargets', 'Target.closeTarget', 'disconnect']);
+});
+
+test('keeps an idle blank when no protected task page remains', async t => {
+  const h = await fixture(t, [{targetId: 'IDLE_BLANK', type: 'page', url: 'about:blank'}]);
+  const result = await h.run();
+  assert.deepEqual(result.closedTargetIds, []);
+  assert.equal(result.createdTargetId, null);
 });
 
 test('preserves all active and uncertain checkpoint targets, including nested editors', async t => {
@@ -143,6 +169,17 @@ test('malformed checkpoints preserve unknown editors but allow stale read-only l
   assert.deepEqual(result.closedTargetIds, ['LIST']);
   assert.equal(result.malformedCheckpoints, 1);
   assert.equal(result.preservedCount, 1);
+});
+
+test('malformed checkpoints preserve possibly bound blank pages during other cleanup', async t => {
+  const h = await fixture(t, [
+    target('EDITOR'), target('LIST', '/builder/rc/clue'),
+    {targetId: 'POSSIBLY_BOUND_BLANK', type: 'page', url: 'about:blank'},
+  ], ['{broken']);
+  const result = await h.run();
+  assert.deepEqual(result.closedTargetIds, ['LIST']);
+  assert.equal(result.malformedCheckpoints, 1);
+  assert.equal(result.preservedCount, 2);
 });
 
 test('a per-target close error does not stop cleanup of other eligible pages', async t => {

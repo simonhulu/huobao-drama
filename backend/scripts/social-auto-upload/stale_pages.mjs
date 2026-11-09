@@ -104,7 +104,7 @@ export async function cleanupStalePages(endpoint, options, connect = puppeteer.c
     for (const target of targetInfos) {
       if (target.type !== 'page' || typeof target.targetId !== 'string') continue;
       if (target.url === 'about:blank') {
-        if (preserved.has(target.targetId)) outcome.preservedCount++;
+        if (preserved.has(target.targetId) || checkpoint.malformedCheckpoints) outcome.preservedCount++;
         else oldBlankTargets.push(target.targetId);
         continue;
       }
@@ -117,10 +117,12 @@ export async function cleanupStalePages(endpoint, options, connect = puppeteer.c
         outcome.preservedCount++;
       } else candidates.push(target.targetId);
     }
-    if (!candidates.length) return outcome;
-    const replacement = await bounded(() => session.send('Target.createTarget', {url: 'about:blank', background: true}));
-    if (typeof replacement.targetId !== 'string' || !replacement.targetId) throw new Error('Replacement browser page was not created');
-    outcome.createdTargetId = replacement.targetId;
+    if (!candidates.length && (!oldBlankTargets.length || !outcome.preservedCount)) return outcome;
+    if (candidates.length) {
+      const replacement = await bounded(() => session.send('Target.createTarget', {url: 'about:blank', background: true}));
+      if (typeof replacement.targetId !== 'string' || !replacement.targetId) throw new Error('Replacement browser page was not created');
+      outcome.createdTargetId = replacement.targetId;
+    }
     for (const targetId of [...candidates, ...oldBlankTargets]) {
       if (Date.now() >= deadline) { outcome.timedOut = true; break; }
       try {
