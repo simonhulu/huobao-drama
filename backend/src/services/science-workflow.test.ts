@@ -2408,6 +2408,50 @@ test('a nonzero export progress advance resets the stall clock without requestin
   assert.equal(h.calls.export, 0)
 })
 
+for (const progress of [0, 97, 100]) test(`a recovered export stalled at ${progress}% keeps polling its original task until download is ready`, async t => {
+  const h = fixture(t), job = await prepared(h)
+  const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
+  const lastProgressAt = new Date(Date.now() - 6 * 60_000).toISOString()
+  const deadlineAt = new Date(Date.now() + 80 * 60_000).toISOString()
+  const file = pendingHuasheng(h, job.id, { productionCompleted: true, exportDispatched: true, exportTask,
+    exportRecovery: { ...exportTask, deadlineAt, lastProgress: progress, lastProgressAt,
+      retryDispatchedAt: lastProgressAt, ...(progress === 0 ? { zeroSince: lastProgressAt } : {}) } })
+  let checks = 0
+  h.options.exportApi = { ...h.options.exportApi!, inspectHuashengExport: async input => {
+    assert.equal(input.taskId, exportTask.taskId); assert.equal(input.projectHash, exportTask.projectHash)
+    const recovery = JSON.parse(fs.readFileSync(file, 'utf8')).exportRecovery
+    assert.equal(recovery.lastProgressAt, lastProgressAt, 'polling must not invent progress')
+    assert.equal(recovery.deadlineAt, deadlineAt, 'polling must not extend the original deadline')
+    return ++checks <= 3 ? { progress, url: null, filename: null }
+      : { progress: 100, url: 'https://fixture.invalid/video.mp4', filename: null }
+  } }
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(checks, 4); assert.equal(h.calls.export, 0); assert.equal(h.calls.downloadExport, 1)
+  assert.equal(h.service.detail(job.id).logs.filter(log => log.message.includes('原导出已自动重试一次')).length, 1,
+    'the waiting diagnostic is persisted once rather than logged on every poll')
+})
+
+test('a recovered stalled export stops only at its unchanged original polling deadline', async t => {
+  const h = fixture(t), job = await prepared(h)
+  const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
+  let now = Date.now()
+  const lastProgressAt = new Date(now - 6 * 60_000).toISOString(), deadlineAt = new Date(now + 1000).toISOString()
+  const file = pendingHuasheng(h, job.id, { productionCompleted: true, exportDispatched: true, exportTask,
+    exportRecovery: { ...exportTask, deadlineAt, lastProgress: 97, lastProgressAt, retryDispatchedAt: lastProgressAt } })
+  t.mock.method(Date, 'now', () => now)
+  let checks = 0
+  h.options.exportApi = { ...h.options.exportApi!, inspectHuashengExport: async () => {
+    checks++; now += 400
+    return { progress: 97, url: null, filename: null }
+  } }
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(checks, 3); assert.equal(h.calls.export, 0); assert.equal(h.calls.downloadExport, 0)
+  assert.match(h.service.detail(job.id).message, /90 分钟/)
+  const recovery = JSON.parse(fs.readFileSync(file, 'utf8')).exportRecovery
+  assert.equal(recovery.deadlineAt, deadlineAt); assert.equal(recovery.lastProgressAt, lastProgressAt)
+})
+
 test('a nonzero stalled recovery remains single-dispatch after an uncertain response and resume', async t => {
   const h = fixture(t), job = await prepared(h)
   const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
@@ -2417,8 +2461,8 @@ test('a nonzero stalled recovery remains single-dispatch after an uncertain resp
   h.options.exportApi = { ...h.options.exportApi!,
     createHuashengExport: async input => { posts++; await input.onDispatched?.(); throw new HuashengExportApiError('result_uncertain', '原恢复响应未知') },
     inspectHuashengExport: async () => {
-      if (++checks > 4) throw new Error('nonzero export recovery was not stopped')
-      return { progress: 42, url: null, filename: null }
+      return ++checks > 4 ? { progress: 100, url: 'https://fixture.invalid/video.mp4', filename: null }
+        : { progress: 42, url: null, filename: null }
     },
   }
   h.service.produce(job.id, false); await h.service.waitForIdle()
@@ -2426,8 +2470,8 @@ test('a nonzero stalled recovery remains single-dispatch after an uncertain resp
   h.options.exportStallMs = 0
   h.service.produce(job.id, false); await h.service.waitForIdle()
   assert.equal(posts, 1)
-  assert.match(h.service.detail(job.id).message, /重试.*42%/)
-  assert.equal(h.calls.downloadExport, 0)
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(h.calls.downloadExport, 1)
 })
 
 test('stalled export recovery dispatch is persisted and never replayed after an uncertain response or resume', async t => {
@@ -2442,16 +2486,16 @@ test('stalled export recovery dispatch is persisted and never replayed after an 
       throw new HuashengExportApiError('result_uncertain', '重试响应未知')
     },
     inspectHuashengExport: async () => {
-      if (++checks > 4) throw new Error('stalled export was never stopped')
-      return { progress: 0, url: null, filename: null }
+      return ++checks > 4 ? { progress: 100, url: 'https://fixture.invalid/video.mp4', filename: null }
+        : { progress: 0, url: null, filename: null }
     },
   }
   h.service.produce(job.id, false); await h.service.waitForIdle()
   assert.equal(posts, 1)
   h.service.produce(job.id, false); await h.service.waitForIdle()
   assert.equal(posts, 1)
-  assert.match(h.service.detail(job.id).message, /重试.*0%/)
-  assert.equal(h.calls.downloadExport, 0)
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(h.calls.downloadExport, 1)
 })
 
 test('stalled export recovery never replaces a different returned task or project version', async t => {
@@ -2519,12 +2563,13 @@ test('progress followed by zero never clears a previous export recovery dispatch
     exportRecovery: { ...exportTask, zeroSince: new Date(0).toISOString(), retryDispatchedAt: new Date(0).toISOString() } })
   let checks = 0
   h.options.exportApi = { ...h.options.exportApi!, inspectHuashengExport: async () => {
-    if (++checks > 2) throw new Error('stalled export was never stopped')
-    return { progress: checks === 1 ? 97 : 0, url: null, filename: null }
+    return ++checks > 2 ? { progress: 100, url: 'https://fixture.invalid/video.mp4', filename: null }
+      : { progress: checks === 1 ? 97 : 0, url: null, filename: null }
   } }
   h.service.produce(job.id, false); await h.service.waitForIdle()
-  assert.match(h.service.detail(job.id).message, /重试.*0%/)
+  assert.equal(h.service.detail(job.id).status, 'ready')
   assert.equal(h.calls.export, 0)
+  assert.equal(h.calls.downloadExport, 1)
 })
 
 test('a recovered export is not retried if it progresses during the original-project verification', async t => {

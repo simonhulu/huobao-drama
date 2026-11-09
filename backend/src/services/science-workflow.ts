@@ -714,7 +714,11 @@ export class ScienceWorkflowService {
       const stalledSince = info.progress === 0 ? recovery.retryDispatchedAt || recovery.zeroSince : recovery.lastProgressAt
       if ((!changed || info.progress === 0) && now - Date.parse(stalledSince!) >= stallMs) {
         if (recovery.retryDispatchedAt) {
-          throw new ScienceWorkflowError(`原导出已自动重试一次，但仍停在 ${Math.round(info.progress)}%，原项目和任务编号已保留，请检查花生原项目`)
+          const message = `原导出已自动重试一次，当前仍为 ${Math.round(info.progress)}%，将在原 90 分钟期限内继续查询，完成后自动下载`
+          this.modify(id, { status: 'running' })
+          if (this.read(id).message !== message) this.report(id, message, 'export')
+          await wait()
+          continue
         } else {
           const state = await this.retryPlatform(id, '花生原导出恢复核验', signal, () => api.inspectHuashengProduction({
             projectUrl: job.projectUrl!, checkpoint: job.checkpoint, script: job.script, browserConfig, signal, expectedVoice: SCIENCE_HUASHENG_VOICE,
