@@ -59,7 +59,7 @@ class CoverDialogStackTest(unittest.IsolatedAsyncioTestCase):
                   for kind in ("landscape", "portrait")}
         slots = {kind: {"src": kind} for kind in covers}
         with patch.object(self.helpers.base, "_verify_metadata", AsyncMock()) as metadata, \
-                patch.object(self.helpers.base, "_cover_pixels", AsyncMock(return_value=pixels)), \
+                patch.object(self.helpers, "_cover_pixels", AsyncMock(return_value=pixels)), \
                 patch.object(self.helpers, "_cover_slots", AsyncMock(return_value=slots)):
             await self.helpers.verify_page(self.page, {"description": "bound copy"}, covers)
         metadata.assert_awaited_once()
@@ -134,7 +134,7 @@ class CoverDialogStackTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.helpers.base, "_file_digest", side_effect=lambda path: {"wide": "wide-sha", "tall": "tall-sha"}[path]), \
                 patch.object(bridge.Path, "read_bytes", autospec=True, side_effect=lambda file:
                     base64.b64decode(sources["landscape" if str(file) == "wide" else "portrait"].split(",")[1])), \
-                patch.object(self.helpers.base, "_browser_digest", AsyncMock(side_effect=lambda page, url:
+                patch.object(self.helpers, "_browser_digest", AsyncMock(side_effect=lambda page, url:
                     "wide-sha" if url == sources["landscape"] else "tall-sha")):
             result = await bridge.baijiahao_covers(self.page, {"landscapePath": "wide", "portraitPath": "tall"},
                                                   self.helpers, previous, snapshots.append, confirm_only=True)

@@ -9,8 +9,49 @@ import asyncio
 import hashlib
 from pathlib import Path
 import re
+import secrets
 import time
 import unicodedata
+
+
+VIDEO_READ_TIMEOUT_SECONDS = 60
+COVER_READ_TIMEOUT_SECONDS = 30
+MEDIA_READ_GRACE_SECONDS = 2
+
+_READ_MEDIA_BYTES = """async ({url, operationId, timeoutMs, digest}) => {
+  const reads=window.__huobaoSauMediaReads ||= new Map();
+  const controller=new AbortController();
+  let reader, timer, timedOut=false, rejectAbort;
+  const cancelled=new Promise((resolve,reject)=>{rejectAbort=reject;});
+  const abort=()=>{
+    controller.abort();
+    if(reader?.readyState===1)reader.abort();
+    rejectAbort(new DOMException('Media read cancelled','AbortError'));
+  };
+  reads.set(operationId,abort);
+  const deadline=new Promise((resolve,reject)=>{
+    timer=setTimeout(()=>{timedOut=true;abort();reject(new Error('HUOBAO_MEDIA_READ_TIMEOUT'));},timeoutMs);
+  });
+  const read=async()=>{
+    const response=await fetch(url,{signal:controller.signal});
+    if(!response.ok)throw new Error('Cannot read editor media for verification');
+    if(digest){
+      const value=await crypto.subtle.digest('SHA-256',await response.arrayBuffer());
+      return [...new Uint8Array(value)].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+    }
+    const blob=await response.blob();
+    return await new Promise((resolve,reject)=>{
+      reader=new FileReader();
+      reader.onload=()=>resolve(reader.result.split(',')[1]);
+      reader.onerror=()=>reject(new Error('Cannot read cover preview'));
+      reader.onabort=()=>reject(new DOMException('Cover read cancelled','AbortError'));
+      reader.readAsDataURL(blob);
+    });
+  };
+  try{return {ok:true,value:await Promise.race([read(),cancelled,deadline])};}
+  catch(error){return {ok:false,timedOut,error:String(error)};}
+  finally{clearTimeout(timer);reads.delete(operationId);}
+}"""
 
 
 def normalized_copy(value):
@@ -162,8 +203,40 @@ class BaijiahaoEditor:
         await self.base._verify_metadata(page, result)
         return result
 
-    async def verify_upload(self, page, video_path, timeout=1200):
-        result = await self.base.verify_upload(page, video_path, timeout=timeout)
+    async def verify_upload(self, page, video_path, timeout=1200, *, verified_media=None):
+        try:
+            digest = await asyncio.wait_for(asyncio.to_thread(self.base._file_digest, video_path),
+                                            timeout=VIDEO_READ_TIMEOUT_SECONDS)
+        except TimeoutError as error:
+            raise TimeoutError('原视频文件指纹读取超时，已保留原视频和上传检查点，未保存或发表') from error
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                media = await asyncio.wait_for(page.evaluate(self.base._READ_MEDIA),
+                                               timeout=max(0.01, min(10, deadline - time.monotonic())))
+            except TimeoutError as error:
+                raise TimeoutError('原视频预览读取超时，已保留原视频和上传检查点，未保存或发表') from error
+            phase = self.base._classify_upload(media)
+            if phase == 'failed':
+                raise RuntimeError('Baijiahao reports a video upload or transcoding failure')
+            if phase == 'complete':
+                src = media['videos'][0]['src']
+                # The caller verifies the original document before supplying proof.
+                # An unchanged blob URL still refers to the same immutable bytes.
+                reuse = (src.startswith('blob:') and isinstance(verified_media, dict)
+                         and verified_media.get('status') == 'uploaded'
+                         and verified_media.get('verification') == 'blob_sha256'
+                         and verified_media.get('media_src') == src
+                         and verified_media.get('video_fingerprint') == digest)
+                if src.startswith('blob:') and not reuse and await self._browser_digest(page, src) != digest:
+                    raise RuntimeError('Preview video SHA-256 differs from the local video')
+                result = {'status': 'uploaded', 'media_src': src, 'video_fingerprint': digest,
+                          'verification': 'blob_sha256' if src.startswith('blob:') else 'ready_server_preview'}
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f'Video upload did not complete ({phase}); will not retry or submit')
+            await asyncio.sleep(min(1, remaining))
         # Baijiahao's first-run feature tour overlays the cover editor.
         # Dismiss only its explicit acknowledgement, never an arbitrary dialog.
         acknowledge = page.get_by_text("我知道了", exact=True).filter(visible=True)
@@ -178,6 +251,40 @@ class BaijiahaoEditor:
             if known:
                 await acknowledge.click(timeout=3000)
         return result
+
+    async def _read_media_bytes(self, page, src, *, digest):
+        operation_id = secrets.token_hex(16)
+        timeout = VIDEO_READ_TIMEOUT_SECONDS if digest else COVER_READ_TIMEOUT_SECONDS
+        operation = asyncio.create_task(page.evaluate(_READ_MEDIA_BYTES, {
+            'url': src, 'operationId': operation_id, 'timeoutMs': timeout * 1000, 'digest': digest,
+        }))
+        try:
+            result = await asyncio.wait_for(asyncio.shield(operation), timeout=timeout + MEDIA_READ_GRACE_SECONDS)
+            if not result['ok']:
+                if result['timedOut']:
+                    raise TimeoutError()
+                raise RuntimeError(result['error'])
+            return result['value']
+        except BaseException as error:
+            # Cancelling a CDP await does not cancel its in-page fetch or FileReader.
+            try:
+                await asyncio.wait_for(page.evaluate("""id=>window.__huobaoSauMediaReads?.get(id)?.()""",
+                                                      operation_id), timeout=MEDIA_READ_GRACE_SECONDS)
+            except BaseException:
+                pass
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+            if isinstance(error, TimeoutError):
+                label = '原视频指纹' if digest else '封面预览'
+                raise TimeoutError(f'{label}读取超时，已保留原视频、封面和上传检查点，未保存或发表') from error
+            raise
+
+    async def _browser_digest(self, page, src):
+        return await self._read_media_bytes(page, src, digest=True)
+
+    async def _cover_pixels(self, page, src):
+        encoded = await self._read_media_bytes(page, src, digest=False)
+        return self.base._normalized_pixels(encoded)
 
     async def verify_page(self, page, metadata, covers):
         if await baijiahao_dialogs(page, self.base._READ_DIALOGS):

@@ -1521,7 +1521,8 @@ async def verify_staged(page, payload, state, engine, *, cover_checkpoint=None):
     details = state["details"]
     if payload["target"] == "baijiahao-video":
         progress("正在核对原编辑页的视频和上传指纹，不会重新上传", "verify_media")
-        current_media = await bai_helpers.verify_upload(page, payload["videoPath"], timeout=5)
+        current_media = await bai_helpers.verify_upload(page, payload["videoPath"], timeout=5,
+                                                       verified_media=details["media"])
         if current_media.get("media_src") != details["media"].get("media_src"):
             raise RuntimeError("百家号编辑页视频在上传后已被替换，未保存")
         progress("正在核对原编辑页的文案和横竖封面预览", "verify_covers")

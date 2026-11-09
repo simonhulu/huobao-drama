@@ -79,11 +79,12 @@ class BaijiahaoVideoInputTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.page.locator(selector).count(), 1)
 
     async def test_known_feature_tour_is_acknowledged_before_cover_work(self):
-        helper = BaijiahaoEditor(SimpleNamespace(verify_upload=AsyncMock(return_value={"status": "uploaded"})))
+        helper = BaijiahaoEditor(SimpleNamespace(_READ_MEDIA='()=>({videos:[{src:"https://preview.test/video"}]})',
+            _classify_upload=lambda media: 'complete', _file_digest=lambda path: 'video-sha'))
         for heading, expected in [("视频新增“一键填”功能", True), ("账号安全验证", False)]:
             await self.page.set_content(f'<section>{heading}<button onclick="window.acked=true"><span>我知道了</span></button></section>')
             await self.page.evaluate("window.acked=false")
-            self.assertEqual(await helper.verify_upload(self.page, "video.mp4"), {"status": "uploaded"})
+            self.assertEqual((await helper.verify_upload(self.page, "video.mp4"))["status"], "uploaded")
             self.assertEqual(await self.page.evaluate("window.acked"), expected)
 
     async def failed_cover_fixture(self):
