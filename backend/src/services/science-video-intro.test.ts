@@ -320,8 +320,9 @@ test('a very short main retains its entire audio and finishes the already-settle
 
 test('the circular presenter is framed on the head and shoulders rather than the lower body', async t => {
   const f = await fixture(t)
+  // Sample inside the color markers, away from subsampled chroma boundaries.
   await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i',
-    'color=yellow:s=160x160:r=15:d=1.3,drawbox=x=0:y=0:w=160:h=30:color=red:t=fill,drawbox=x=0:y=110:w=160:h=50:color=green:t=fill',
+    'color=yellow:s=160x160:r=15:d=1.3,drawbox=x=0:y=0:w=160:h=40:color=red:t=fill,drawbox=x=0:y=110:w=160:h=50:color=green:t=fill',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-an', f.presenterPath])
   const result = await prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath })
   const shoulder = await pixel(result.videoPath, 1.35, { x: 290, y: 162, width: 4, height: 4 })
@@ -333,7 +334,7 @@ test('the circular presenter is framed on the head and shoulders rather than the
 test('closeup framing preserves the chin area and never reuses the zoomed presenter composite', async t => {
   const f = await fixture(t)
   await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i',
-    'color=yellow:s=160x160:r=15:d=1.3,drawbox=x=0:y=0:w=160:h=30:color=red:t=fill,drawbox=x=0:y=110:w=160:h=50:color=lime:t=fill',
+    'color=yellow:s=160x160:r=15:d=1.3,drawbox=x=0:y=0:w=160:h=40:color=red:t=fill,drawbox=x=0:y=110:w=160:h=50:color=lime:t=fill',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-an', f.presenterPath])
   const options = { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath }
   const zoomed = await prepareScienceVideoWithIntro(f, { ...options, presenterFraming: 'head-and-shoulders' })

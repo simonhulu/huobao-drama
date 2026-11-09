@@ -175,7 +175,7 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       `[ring-input]format=rgba,geq=r=245:g=245:b=245:a='gte(${distance},${radius - border})*255'[ring]`,
       '[presenter-colors][ring]overlay=format=rgb[presenter-framed]',
       '[presenter-framed][presenter-mask]alphamerge[presenter]',
-      `[main-body][presenter]overlay=x=${width - diameter - margin}:y=${height - diameter - margin}:eof_action=pass:format=yuv444,`
+      `[main-body][presenter]overlay=x=${width - diameter - margin}:y=${height - diameter - margin}:eof_action=pass:format=yuv420,`
         + `format=yuv420p,fps=${main.fps},settb=AVTB[body]`,
       '[reveal][body]concat=n=2:v=1:a=0[underlay]',
       '[underlay][moving]overlay=x=0:y=0:eof_action=pass:repeatlast=0:format=yuv420,format=yuv420p,settb=AVTB[transition-body]',
