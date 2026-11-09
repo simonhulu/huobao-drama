@@ -82,6 +82,7 @@ interface StoredJob extends Omit<ScienceJob, 'sourceVideoUrl' | 'videoUrl' | 'la
   productionCompleted?: boolean; productionScriptHash?: string; productionAccountName?: string
   separateIntro?: boolean
   exportDispatched?: boolean; exportTask?: { taskId: string; projectHash: string }; videoPath?: string
+  exportRecovery?: { taskId: string; projectHash: string; zeroSince?: string; retryDispatchedAt?: string }
   mainVideoPath?: string; presenterPath?: string
   uploadAttempt?: CbaUploadRecoveryCurrent; autoUpload?: boolean; automaticDelivery?: boolean; ownerPid?: number
   uploadRestartPending?: boolean; uploadRetryCount?: number
@@ -113,6 +114,7 @@ export interface ScienceWorkflowOptions {
   uploadRuntime?: CbaUploadRecoveryOptions['runtime']
   reviewUpload?: typeof import('./social-auto-upload.js').reviewSocialUpload
   pollMs?: number
+  exportStallMs?: number
   retryDelayMs?: number
 }
 export class ScienceWorkflowError extends Error {
@@ -212,6 +214,7 @@ export class ScienceWorkflowService {
   private publicJob(job: StoredJob): ScienceJob {
     const { version: _version, media, sourceTitle: _title, sourceAuthor: _author, plan, productionCompleted: _complete,
       productionScriptHash: _hash, productionAccountName: _account, separateIntro: _intro, exportDispatched: _dispatch, exportTask: _task,
+      exportRecovery: _exportRecovery,
       videoPath, mainVideoPath: _mainVideoPath, presenterPath: _presenterPath, transcriptCheckpoint: _transcriptCheckpoint, writingCheckpoint: _writingCheckpoint, coverAssets, coverSourceDigest: _coverDigest, coverSequence: _coverSequence, coverRequest, coverUploadRevision: _coverUploadRevision, uploadAttempt, uploadHistory: _uploadHistory, uploadRestartPending: _uploadRestartPending, uploadRetryCount: _uploadRetryCount, autoUpload: _auto, automaticDelivery: _delivery, automaticProduction: _production, ownerPid: _pid, ...result } = job
     const asset = (kind: string) => `/api/v1/science-pop/workflow/jobs/${job.id}/assets/${kind}`
     const receipt = result.upload?.submitted ? this.trustedSubmission(job) : result.upload
@@ -670,6 +673,47 @@ export class ScienceWorkflowService {
         this.modify(id, { status: 'ready' })
         this.report(id, '成片和横竖封面已就绪，可预览或上传到所选百家号', 'covers')
         return
+      }
+      const task = job.exportTask!
+      const saved = this.read(id).exportRecovery
+      let recovery = saved?.taskId === task.taskId && saved.projectHash === task.projectHash ? saved : { ...task }
+      if (info.progress === 0 && !info.url) {
+        const now = Date.now(), stallMs = this.options.exportStallMs ?? 5 * 60_000
+        if (!recovery.zeroSince) {
+          recovery = { ...recovery, zeroSince: new Date(now).toISOString() }
+          this.modify(id, { exportRecovery: recovery })
+        }
+        if (recovery.retryDispatchedAt) {
+          if (now - Date.parse(recovery.retryDispatchedAt) >= stallMs)
+            throw new ScienceWorkflowError('原导出已自动重试一次，但仍停在 0%，原项目和任务编号已保留，请检查花生原项目')
+        } else if (now - Date.parse(recovery.zeroSince!) >= stallMs) {
+          const state = await this.retryPlatform(id, '花生原导出恢复核验', signal, () => api.inspectHuashengProduction({
+            projectUrl: job.projectUrl!, checkpoint: job.checkpoint, script: job.script, browserConfig, signal, expectedVoice: SCIENCE_HUASHENG_VOICE,
+          }))
+          if (state.status !== 'completed') throw new ScienceWorkflowError('花生原项目制作状态已变化，未重试导出，请检查原项目')
+          const latest = await this.retryPlatform(id, '花生原导出恢复查询', signal, () => api.inspectHuashengExport({
+            projectUrl: job.projectUrl!, ...task, browserConfig, signal,
+          }))
+          if (latest.progress !== 0 || latest.url) continue
+          this.report(id, '原导出持续停在 0%，已核对原稿和音色，正在自动重试一次原项目导出', 'export')
+          // Persist before POST: a lost response or process restart must not replay it.
+          let retried: typeof task
+          try {
+            retried = await api.createHuashengExport({ projectUrl: job.projectUrl!, browserConfig, signal,
+              onDispatched: () => { this.modify(id, { exportRecovery: { ...recovery, retryDispatchedAt: new Date().toISOString() } }) },
+            })
+          } catch (error) {
+            if (error instanceof exporter.HuashengExportApiError && error.requestRejected)
+              this.modify(id, { exportRecovery: recovery })
+            throw error
+          }
+          if (retried.taskId !== task.taskId || retried.projectHash !== task.projectHash)
+            throw new ScienceWorkflowError('重试返回的导出任务或版本与原记录不一致，已保留原导出，未替换成片')
+          this.report(id, '原项目导出已重新触发，任务编号和版本保持一致，继续查询并自动下载', 'export')
+          continue
+        }
+      } else if (recovery.zeroSince) {
+        this.modify(id, { exportRecovery: { ...recovery, zeroSince: undefined } })
       }
       this.modify(id, { status: 'running' })
       this.report(id, `花生正在导出：${Math.round(info.progress)}%，完成后自动下载`)
