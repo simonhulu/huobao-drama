@@ -1520,9 +1520,11 @@ async def verify_staged(page, payload, state, engine, *, cover_checkpoint=None):
     _, _, _, bai_helpers, tencent_helpers, tencent_covers = engine
     details = state["details"]
     if payload["target"] == "baijiahao-video":
+        progress("正在核对原编辑页的视频和上传指纹，不会重新上传", "verify_media")
         current_media = await bai_helpers.verify_upload(page, payload["videoPath"], timeout=5)
         if current_media.get("media_src") != details["media"].get("media_src"):
             raise RuntimeError("百家号编辑页视频在上传后已被替换，未保存")
+        progress("正在核对原编辑页的文案和横竖封面预览", "verify_covers")
         if cover_checkpoint is None:
             await bai_helpers.verify_page(page, details["metadata"], details["covers"])
         else:
@@ -2262,6 +2264,7 @@ async def publication_preflight(page, payload, state, engine, *, prepare_file=No
     if local_files(payload) != state.get("files"):
         raise RuntimeError("原上传素材已变化，不能发表")
     if prepare_file is not None and payload.get("target") == "baijiahao-video":
+        progress("正在检查原编辑页的封面裁剪状态，尚未点击发表", "publish_preflight")
         await finish_staged_baijiahao_cover(page, payload, state, prepare_file, engine)
     await verify_staged(page, payload, state, engine, cover_checkpoint=prepare_file)
     # Baijiahao's video editor blocks the publish handler before creating any
@@ -3996,6 +3999,8 @@ async def upload(request, action, *, cleanup_browser=None):
     _, _, async_playwright, _, _, _ = engine
     platform = "tencent" if payload["target"] == "tencent-video" else "baijiahao"
     async with async_playwright() as playwright:
+        if action == "publish":
+            progress("正在连接原视频编辑页，尚未点击发表", "browser_connect")
         browser, endpoint, account_digest = await connect_upload_browser(playwright, config, payload, state)
         if account_digest:
             state["accountCredentialDigest"] = account_digest
@@ -4030,6 +4035,8 @@ async def upload(request, action, *, cleanup_browser=None):
                 checkpoint_progress(file, state, "opening", "原空白编辑页已关闭；确认尚未上传素材，正在为原任务重新打开编辑页")
                 restart_opening = True
         if action in ("save", "resume", "publish", "publish-preflight", "repair-topic-description") and not restart_opening:
+            if action == "publish":
+                progress("正在定位并核对原视频编辑页，尚未点击发表", "editor_restore")
             target = state["result"]["targetId"] if action in ("save", "publish", "publish-preflight", "repair-topic-description") else state.get("targetId")
             pages = [page for context in browser.contexts for page in context.pages if await page_id(page) == target]
             if len(pages) != 1:
