@@ -1187,6 +1187,67 @@ test('finished videos expose upload progress and receipts independently of produ
   assert.equal(h.service.detail(job.id).autoUpload, true)
 })
 
+test('upload progress retains the bridge substep and its observed time before a receipt exists', async t => {
+  const h = fixture(t), job = await prepared(h)
+  h.service.produce(job.id); await h.service.waitForIdle()
+  const run = h.options.uploadRuntime!.runSocialUpload
+  h.options.uploadRuntime!.runSocialUpload = async (payload, options) => {
+    for (const [step, message] of [['browser_connect', '正在连接后台浏览器'], ['covers', '正在确认封面'], ['media', '正在等待转码']]) {
+      options?.onProgress?.(message!, { step: step!, message: message! })
+      const progress = (h.service.detail(job.id) as any).uploadProgress
+      assert.equal(progress?.step, step)
+      assert.equal(progress.message, message)
+      assert.ok(Number.isFinite(Date.parse(progress.updatedAt)))
+      assert.equal(h.service.detail(job.id).upload?.submitted, undefined)
+    }
+    const file = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+    stored.uploadProgress.updatedAt = '2020-01-01T00:00:00.000Z'
+    fs.writeFileSync(file, JSON.stringify(stored))
+    options?.onProgress?.('正在等待转码', { step: 'media', message: '正在等待转码' })
+    assert.equal((h.service.detail(job.id) as any).uploadProgress.updatedAt, stored.uploadProgress.updatedAt,
+      'a repeated status is not new upload progress')
+    return run(payload, options)
+  }
+  h.service.upload(job.id); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'completed')
+  assert.equal(h.calls.upload, 1); assert.equal(h.calls.save, 1)
+})
+
+test('an optional topic skip remains visible as a warning after a successful submission', async t => {
+  const h = fixture(t), job = await prepared(h)
+  h.service.produce(job.id); await h.service.waitForIdle()
+  const run = h.options.uploadRuntime!.runSocialUpload
+  const message = '未添加可选话题：候选列表为空；继续发表'
+  h.options.uploadRuntime!.runSocialUpload = async (payload, options) => {
+    options?.onProgress?.(message, { step: 'topic_skipped', message })
+    return run(payload, options)
+  }
+  h.service.upload(job.id); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).uploadStatus, 'submitted')
+  assert.deepEqual((h.service.detail(job.id) as any).uploadWarnings, [message])
+})
+
+test('composition exposes real encoded duration and progress while the task is active', async t => {
+  const h = fixture(t), job = await prepared(h)
+  let observed = false
+  const prepare = h.options.prepareIntroVideo!
+  h.options.prepareIntroVideo = async (input, options) => {
+    ;(options as any).onProgress?.({ percent: 37, processedSeconds: 74, totalSeconds: 200, speed: .8 })
+    const progress = (h.service.detail(job.id) as any).compositionProgress
+    assert.equal(progress?.percent, 37)
+    assert.equal(progress.processedSeconds, 74)
+    assert.equal(progress.totalSeconds, 200)
+    assert.equal(progress.speed, .8)
+    assert.ok(Number.isFinite(Date.parse(progress.updatedAt)))
+    assert.equal(h.service.detail(job.id).exportStep, 'compose')
+    observed = true
+    return prepare(input, options)
+  }
+  h.service.produce(job.id); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(observed, true)
+})
+
 test('authorized batch uploads resume a ready video after interruption but preserve an explicit stop', async t => {
   const h = fixture(t), job = await prepared(h)
   h.service.produce(job.id); await h.service.waitForIdle()
@@ -2294,6 +2355,64 @@ test('a stalled zero-percent export retries the verified original version once a
   assert.equal(h.calls.export, 1); assert.equal(h.calls.downloadExport, 1); assert.equal(h.calls.produce, 0)
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).exportTask, exportTask)
   assert.equal((h.service.detail(job.id) as any).exportRecovery, undefined)
+})
+
+for (const progress of [42, 100]) test(`an export stalled at ${progress}% recovers its original version without replacing the task`, async t => {
+  const h = fixture(t), job = await prepared(h)
+  const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
+  const file = pendingHuasheng(h, job.id, { productionCompleted: true, exportDispatched: true, exportTask,
+    exportRecovery: { ...exportTask, lastProgress: progress, lastProgressAt: new Date(Date.now() - 6 * 60_000).toISOString() } })
+  let checks = 0
+  h.options.exportApi = { ...h.options.exportApi!, inspectHuashengExport: async () => {
+    if (++checks > 3) throw new Error('nonzero export stall was not recovered')
+    return h.calls.export ? { progress: 100, url: 'https://fixture.invalid/video.mp4', filename: null }
+      : { progress, url: null, filename: null }
+  } }
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(h.calls.export, 1); assert.equal(h.calls.downloadExport, 1)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).exportTask, exportTask)
+  assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).exportRecovery.retryDispatchedAt)
+})
+
+test('a nonzero export progress advance resets the stall clock without requesting another export', async t => {
+  const h = fixture(t), job = await prepared(h)
+  const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
+  const file = pendingHuasheng(h, job.id, { productionCompleted: true, exportDispatched: true, exportTask,
+    exportRecovery: { ...exportTask, lastProgress: 37, lastProgressAt: new Date(0).toISOString() } })
+  let checks = 0
+  h.options.exportApi = { ...h.options.exportApi!, inspectHuashengExport: async () => {
+    if (++checks === 1) return { progress: 42, url: null, filename: null }
+    const recovery = JSON.parse(fs.readFileSync(file, 'utf8')).exportRecovery
+    assert.equal(recovery.lastProgress, 42)
+    assert.ok(Date.parse(recovery.lastProgressAt) > Date.now() - 60_000)
+    return { progress: 100, url: 'https://fixture.invalid/video.mp4', filename: null }
+  } }
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(h.calls.export, 0)
+})
+
+test('a nonzero stalled recovery remains single-dispatch after an uncertain response and resume', async t => {
+  const h = fixture(t), job = await prepared(h)
+  const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
+  pendingHuasheng(h, job.id, { productionCompleted: true, exportDispatched: true, exportTask,
+    exportRecovery: { ...exportTask, lastProgress: 42, lastProgressAt: new Date(0).toISOString() } })
+  let posts = 0, checks = 0
+  h.options.exportApi = { ...h.options.exportApi!,
+    createHuashengExport: async input => { posts++; await input.onDispatched?.(); throw new HuashengExportApiError('result_uncertain', '原恢复响应未知') },
+    inspectHuashengExport: async () => {
+      if (++checks > 4) throw new Error('nonzero export recovery was not stopped')
+      return { progress: 42, url: null, filename: null }
+    },
+  }
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(posts, 1)
+  h.options.exportStallMs = 0
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(posts, 1)
+  assert.match(h.service.detail(job.id).message, /重试.*42%/)
+  assert.equal(h.calls.downloadExport, 0)
 })
 
 test('stalled export recovery dispatch is persisted and never replayed after an uncertain response or resume', async t => {

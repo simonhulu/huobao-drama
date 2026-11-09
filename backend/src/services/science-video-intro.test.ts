@@ -1,6 +1,7 @@
 import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { createHash } from 'node:crypto'
@@ -79,6 +80,90 @@ test('prepends the actual intro before the main, normalizes media formats and pr
   assert.ok(mainPixel[2]! > 200 && mainPixel[0]! < 40, `main follows intro: ${mainPixel}`)
   assert.ok(Math.abs(await frequency(result.videoPath, .15) - 440) < 15)
   assert.ok(Math.abs(await frequency(result.videoPath, 1) - 880) < 15)
+})
+
+test('reports encoder progress before completion and reports 100 only after validated output is committed', async t => {
+  const f = await fixture(t)
+  const updates: Array<{ percent: number; processedSeconds: number; totalSeconds: number; speed?: number }> = []
+  const messages: string[] = []
+  let committedAtCompletion = false
+  const result = await prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath,
+    report: message => messages.push(message),
+    onProgress: progress => {
+      updates.push(progress)
+      if (progress.percent === 100) committedAtCompletion = existsSync(path.join(f.directory, 'science-video-intro.json'))
+    },
+  })
+  assert.ok(updates.some(progress => progress.percent < 100), 'the encoder exposes actual output progress before commit')
+  assert.equal(updates.at(-1)?.percent, 100)
+  assert.ok(committedAtCompletion, '100% requires the validated output and its manifest')
+  assert.ok(updates.every(progress => progress.processedSeconds >= 0 && progress.totalSeconds > 0
+    && progress.processedSeconds <= progress.totalSeconds && progress.percent >= 0 && progress.percent <= 100))
+  assert.ok(Math.abs(updates.at(-1)!.totalSeconds - 1.8) < .1)
+  assert.ok(messages.some(message => /合成.*\d+%/.test(message)), 'progress is visible to callers using the existing report callback')
+  assert.ok(existsSync(result.videoPath))
+})
+
+test('encoder progress handles split records, ignores unavailable values and throttles frequent updates', async t => {
+  const f = await fixture(t)
+  const realFfmpeg = (await exec('which', ['ffmpeg'])).stdout.trim()
+  const bin = path.join(f.root, 'bin')
+  await fs.mkdir(bin)
+  const wrapper = `#!${process.execPath}\nconst cp=require('node:child_process');const args=process.argv.slice(2);
+if(args.includes('-progress')){
+  process.stdout.write('out_time_us=N/A\\nspeed=N/A\\nprogress=continue\\n');
+  process.stdout.write('out_time_');process.stdout.write('us=200000\\nspeed=2.0x\\nprogress=continue\\n');
+  for(let i=0;i<200;i++)process.stdout.write('out_time_us='+(300000+i*1000)+'\\nspeed=N/A\\nprogress=continue\\n');
+}
+const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},args,{stdio:'inherit'});process.exit(r.status??1);\n`
+  await fs.writeFile(path.join(bin, 'ffmpeg'), wrapper, { mode: 0o700 })
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}${path.delimiter}${previousPath || ''}`
+  t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath })
+  const updates: Array<{ percent: number; processedSeconds: number; totalSeconds: number; speed?: number }> = []
+  await prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath,
+    onProgress: progress => updates.push(progress) })
+  assert.equal(updates[0]?.processedSeconds, .2)
+  assert.equal(updates[0]?.speed, 2)
+  assert.ok(updates.length <= 4, 'a burst of encoder records must not create a burst of persisted job updates')
+  assert.equal(updates.at(-1)?.percent, 100)
+  let clock = 0, liveUpdates = 0
+  t.mock.method(Date, 'now', () => { clock += 5_000; return clock })
+  const messages: string[] = []
+  await prepareScienceVideoWithIntro({ ...f, directory: path.join(f.root, 'slow-progress') }, {
+    signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath,
+    onProgress: () => liveUpdates++, report: message => messages.push(message),
+  })
+  assert.ok(liveUpdates > 20, 'the simulated long render still refreshes structured progress')
+  assert.ok(messages.filter(message => message.includes('正在合成')).length < liveUpdates / 2,
+    'text logs use a separate 30-second budget to preserve earlier job history')
+})
+
+test('repeated encoder timestamps do not refresh progress while a restarted render can advance from an earlier timestamp', async t => {
+  const f = await fixture(t)
+  const realFfmpeg = (await exec('which', ['ffmpeg'])).stdout.trim()
+  const bin = path.join(f.root, 'bin')
+  await fs.mkdir(bin)
+  const wrapper = `#!${process.execPath}\nconst cp=require('node:child_process');const args=process.argv.slice(2);
+if(args.includes('-progress'))for(const us of [200000,200000,200000,400000,400000,100000,100000,200000,200000]){
+  process.stdout.write('out_time_us='+us+'\\nspeed=2.0x\\nprogress=continue\\n');
+}
+const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},args,{stdio:'inherit'});process.exit(r.status??1);\n`
+  await fs.writeFile(path.join(bin, 'ffmpeg'), wrapper, { mode: 0o700 })
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}${path.delimiter}${previousPath || ''}`
+  t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath })
+  let clock = 0
+  t.mock.method(Date, 'now', () => { clock += 5_000; return clock })
+  const updates: Array<{ percent: number; processedSeconds: number }> = []
+  await prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath,
+    onProgress: progress => updates.push(progress) })
+  const rendering = updates.filter(progress => progress.percent < 100)
+  assert.ok(rendering.every((progress, index) => !index || progress.processedSeconds !== rendering[index - 1]!.processedSeconds),
+    'repeated stats must not make a stalled render appear to be progressing')
+  assert.deepEqual(rendering.slice(0, 4).map(progress => progress.processedSeconds), [.2, .4, .1, .2],
+    'encoder fallback and a new copy phase may restart their output timestamps')
+  assert.equal(updates.at(-1)?.percent, 100)
 })
 
 test('retries reuse content-bound output, including when the prepared output itself becomes the input', async t => {
@@ -454,13 +539,14 @@ test('intro-only final delivery preserves the full intro and body audio with a f
 
 test('intro-only delivery copies the body after the transition without changing decoded frames, narration or timeline', async t => {
   const f = await fixture(t), reports: string[] = []
+  const progress: Array<{ percent: number; totalSeconds: number }> = []
   const videoPath = path.join(f.root, "main 'quoted'.mp4")
   await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15:duration=6',
     '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=44100:duration=6',
     '-c:v', 'libx264', '-preset', 'fast', '-bf', '0', '-g', '15', '-keyint_min', '15', '-sc_threshold', '0',
     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '1', '-shortest', videoPath])
   const result = await prepareScienceVideoWithIntroOnly({ ...f, videoPath },
-    { signal: signal(), introPath: f.introPath, report: message => reports.push(message) })
+    { signal: signal(), introPath: f.introPath, report: message => reports.push(message), onProgress: update => progress.push(update) })
   const frameHashes = async (file: string) => {
     const { stdout } = await exec('ffmpeg', ['-nostdin', '-v', 'error', '-i', file, '-map', '0:v:0', '-an',
       '-pix_fmt', 'yuv420p', '-f', 'framemd5', 'pipe:1'])
@@ -476,6 +562,9 @@ test('intro-only delivery copies the body after the transition without changing 
   const metadata = await probe(result.videoPath)
   assert.ok(Math.abs(Number(metadata.format.duration) - 6.6) < .08)
   assert.ok(reports.some(message => message.includes('复制')), 'progress identifies the fast body-copy path')
+  assert.ok(progress.some(update => update.percent < 100), 'the copy pipeline reports progress before committing')
+  assert.equal(progress.at(-1)?.percent, 100)
+  assert.ok(progress.every(update => Math.abs(update.totalSeconds - 6.6) < .1), 'both copy phases use the full delivery duration')
   assert.deepEqual((await fs.readdir(f.directory)).sort(), [path.basename(result.videoPath), 'science-video-intro.json'].sort())
 })
 

@@ -2186,8 +2186,10 @@ async def prepare_publication_topics(page, payload, state, file):
     write_state(file, state)
     topic = details["metadata"].get("topicAttempt")
     if topic:
-        progress("已选择话题：" + "、".join(topic["selectedLabels"]) if topic["selectedLabels"]
-                 else "本次未添加话题，继续发表", "metadata")
+        if topic["selectedLabels"]:
+            progress("已选择话题：" + "、".join(topic["selectedLabels"]), "metadata")
+        else:
+            progress("未添加可选话题：" + (topic.get("reason") or "未选中平台话题") + "；继续发表", "topic_skipped")
 
 
 async def publication_preflight(page, payload, state, engine, *, prepare_file=None):

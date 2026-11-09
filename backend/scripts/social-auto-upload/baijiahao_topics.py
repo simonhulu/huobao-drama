@@ -183,11 +183,8 @@ async def add_optional_topics(page, payload, metadata, *, timeout=TOPIC_TIMEOUT_
                             candidate, selected = matches[0]
                             await candidate.click(timeout=max(1, min(1000, (deadline - time.monotonic()) * 1000)))
                             break
-                    # An empty result can belong to the previous query while
-                    # the current search is still waiting for its debounce.
-                    if not required_exact and await page.locator('[class*="FeEditorApp-"][class$="-topicEmpty"]:visible').count():
-                        reason = "候选列表为空，已跳过话题"
-                        break
+                    # Empty rows can outlive the previous query's debounce.
+                    # Give optional topics the same bounded wait as required ones.
                     await asyncio.sleep(0.1)
                 if selected:
                     expected = _text(" ".join([prefix, selected]))

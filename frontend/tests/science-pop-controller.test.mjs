@@ -306,6 +306,45 @@ test('running export labels distinguish platform, download, presenter and compos
   assert.equal(h.s.statusLabel(job('finished', { status: 'completed', stage: 'completed', exportStep: 'compose' })), '已完成')
 })
 
+test('running upload labels follow bridge steps while terminal and paused jobs ignore stale progress', async t => {
+  const h = await harness(t)
+  const current = { status: 'running', stage: 'upload', uploadStatus: 'uploading', executionActive: true,
+    uploadProgress: { step: 'browser_connect', message: '正在连接后台浏览器', updatedAt: '2026-11-09T06:32:57Z' } }
+  const labels = { browser_connect: '连接上传账号', account_check: '检查上传登录', opening: '准备上传页面',
+    media: '上传与转码', metadata: '准备发表文案', covers: '确认上传封面', staged: '准备发表',
+    publishing: '提交发表', reconcile: '核对上传结果' }
+  for (const [step, expected] of Object.entries(labels)) {
+    const item = job('upload', { ...current, uploadProgress: { ...current.uploadProgress, step } })
+    assert.equal(h.s.uploadStatusLabel(item), expected)
+    assert.equal(h.s.statusLabel(item), expected)
+  }
+  const unknown = job('upload', { ...current, uploadProgress: { ...current.uploadProgress, step: 'new-step', message: '正在核对平台素材' } })
+  assert.equal(h.s.uploadStatusLabel(unknown), '正在核对平台素材')
+  for (const extra of [
+    { status: 'paused', uploadStatus: 'paused', executionActive: false },
+    { status: 'needs_attention', uploadStatus: 'blocked', executionActive: false },
+    { status: 'running', executionActive: false },
+    { status: 'completed', stage: 'completed', uploadStatus: 'submitted', upload: { submitted: true, saved: false } },
+  ]) assert.equal(h.s.activeUploadProgress(job('old', { ...current, ...extra })), null)
+  assert.equal(h.s.uploadStatusLabel(job('submitted', { ...current, status: 'completed', upload: { submitted: true } })), '已上传·待审核')
+  assert.equal(h.s.uploadStatusLabel(job('paused', { ...current, status: 'paused', uploadStatus: 'paused' })), '上传已暂停')
+})
+
+test('composition exposes only real current progress and formats processed duration without inventing completion', async t => {
+  const h = await harness(t)
+  const current = { status: 'running', stage: 'export', exportStep: 'compose', executionActive: true,
+    compositionProgress: { percent: 47.8, processedSeconds: 200, totalSeconds: 419.333, speed: 0.62, updatedAt: '2026-11-09T06:23:00Z' } }
+  const item = job('compose', current)
+  assert.equal(h.s.statusLabel(item), '合成成片 · 48%')
+  assert.deepEqual(plain(h.s.activeCompositionProgress(item)), current.compositionProgress)
+  assert.equal(h.s.formatDuration(200), '3:20')
+  assert.equal(h.s.formatDuration(419.333), '6:59')
+  for (const extra of [{ status: 'paused' }, { status: 'completed', stage: 'completed' }, { stage: 'covers' },
+    { exportStep: 'presenter' }, { executionActive: false }, { compositionProgress: { ...current.compositionProgress, totalSeconds: 0 } }])
+    assert.equal(h.s.activeCompositionProgress(job('old', { ...current, ...extra })), null)
+  assert.equal(h.s.statusLabel(job('complete', { ...current, status: 'completed', stage: 'completed' })), '已完成')
+})
+
 test('stopping remote production or queued export pauses continuation without saving edits', async t => {
   const h = await harness(t)
   h.state.post = path => {

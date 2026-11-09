@@ -86,6 +86,22 @@ class BaijiahaoTopicsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['topicAttempt']['status'],'selected')
         self.assertEqual(await self.page.evaluate('clicks'),[0])
 
+    async def test_optional_topic_waits_for_current_query_after_a_stale_empty_result(self):
+        await self.page.evaluate('''() => {
+          delayMs=350;
+          document.querySelector('[contenteditable=true]').addEventListener('input', event => {
+            if (event.target.textContent.endsWith(' #热爆趣创赛')) {
+              document.querySelector('[class$=topicList]').innerHTML='<div class="FeEditorApp-x-topicEmpty">暂无话题</div>';
+            }
+          });
+        }''')
+        result = await add_optional_topics(self.page, self.payload, self.metadata, timeout=2)
+        self.assertEqual(result['topicAttempt']['status'], 'selected')
+        self.assertEqual(result['topicAttempt']['selectedLabels'], ['#首条推荐话题#'])
+        self.assertEqual(await self.page.evaluate('clicks'), [0])
+        self.assertFalse(await self.page.evaluate('changedBody'))
+        await self.helpers._verify_metadata(self.page, result)
+
     async def test_required_topic_waits_for_current_query_after_a_stale_empty_result(self):
         self.payload.update(description=self.payload['title'] + ' #NBA#', tags=['#NBA#'], topicPolicy='required-exact')
         self.metadata = await self.helpers.fill_metadata(self.page, self.payload['title'], self.payload['description'])
@@ -366,6 +382,45 @@ class BaijiahaoTopicsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.page.evaluate('saves'),1)
                 self.assertEqual(await self.page.evaluate('savedCaption'),expected)
                 self.assertFalse(await self.page.evaluate('changedBody'))
+
+class PublicationTopicProgressTest(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_skip_reports_its_reason_as_a_warning_step(self):
+        reason = '话题候选超时或选择失败，已跳过话题'
+        metadata = {'topicAttempt': {'selectedLabels': [], 'status': 'skipped', 'reason': reason}}
+        state = {'details': {'metadata': {}}}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(bridge, 'add_optional_topics', new=AsyncMock(return_value=metadata)), \
+                patch.object(bridge, 'progress') as progress:
+            file = Path(directory) / 'state.json'
+            await bridge.prepare_publication_topics(None, {}, state, file)
+            progress.assert_called_once()
+            message, step = progress.call_args.args
+            self.assertEqual(step, 'topic_skipped')
+            self.assertIn(reason, message)
+            self.assertEqual(json.loads(file.read_text())['details']['metadata'], metadata)
+
+    async def test_selected_topic_keeps_the_metadata_progress_step(self):
+        metadata = {'topicAttempt': {'selectedLabels': [TAG], 'status': 'selected', 'reason': ''}}
+        state = {'details': {'metadata': {}}}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(bridge, 'add_optional_topics', new=AsyncMock(return_value=metadata)), \
+                patch.object(bridge, 'progress') as progress:
+            await bridge.prepare_publication_topics(None, {}, state, Path(directory) / 'state.json')
+            progress.assert_called_once_with('已选择话题：' + TAG, 'metadata')
+
+    async def test_required_topic_failure_never_reports_an_optional_skip(self):
+        error = bridge.RequiredTopicError('尚未选中平台精确话题；保留原编辑页，未发表')
+        error.metadata = {'description': {'value': '原文案'}}
+        state = {'details': {'metadata': {}}}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(bridge, 'add_optional_topics', new=AsyncMock(side_effect=error)), \
+                patch.object(bridge, 'progress') as progress:
+            file = Path(directory) / 'state.json'
+            with self.assertRaises(bridge.RequiredTopicError):
+                await bridge.prepare_publication_topics(None, {'topicPolicy': 'required-exact'}, state, file)
+            progress.assert_not_called()
+            self.assertEqual(json.loads(file.read_text())['details']['metadata'], error.metadata)
+
 
 if __name__=='__main__':
     unittest.main()

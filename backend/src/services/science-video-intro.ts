@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { getVideoEncoderOptions } from './composition/video-encoder.js'
@@ -13,7 +14,8 @@ const VERSION = 4
 
 export interface ScienceVideoIntroInput { videoPath: string; directory: string }
 export type SciencePresenterFraming = 'closeup' | 'head-and-shoulders'
-export interface ScienceVideoIntroOptions { signal: AbortSignal; report?: (message: string) => void; introPath?: string; presenterPath?: string; presenterFraming?: SciencePresenterFraming }
+export interface ScienceVideoIntroProgress { percent: number; processedSeconds: number; totalSeconds: number; speed?: number }
+export interface ScienceVideoIntroOptions { signal: AbortSignal; report?: (message: string) => void; onProgress?: (progress: ScienceVideoIntroProgress) => void; introPath?: string; presenterPath?: string; presenterFraming?: SciencePresenterFraming }
 export type ScienceVideoIntroPreviewOptions = Omit<ScienceVideoIntroOptions, 'presenterPath' | 'presenterFraming'>
 export interface ScienceVideoIntroResult { videoPath: string; introSha256: string; sourceSha256: string }
 interface IntroRecord extends ScienceVideoIntroResult { sourcePath: string; outputSha256: string; presenterSha256?: string; presenterFraming?: SciencePresenterFraming; renderVersion?: number }
@@ -192,21 +194,70 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
   ].join(';')
 }
 
-async function encodeVideo(args: string[], finish: string[], width: number, height: number, signal: AbortSignal) {
-  const encoder = getVideoEncoderOptions({ width, height })
-  const run = async (parameters: string[]) => {
-    signal.throwIfAborted()
-    const rendering = exec('ffmpeg', [...args, ...parameters, ...finish],
-      { signal, killSignal: 'SIGKILL', timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
-    const closed = new Promise<void>(resolve => rendering.child.once('close', () => resolve()))
-    const abort = () => { rendering.child.kill('SIGKILL') }
-    signal.addEventListener('abort', abort, { once: true })
-    try { if (signal.aborted) abort(); await rendering }
-    finally {
-      signal.removeEventListener('abort', abort)
-      if (signal.aborted) { abort(); await closed }
+type RenderProgress = (seconds: number, speed: number | undefined, ended: boolean) => void
+
+function renderProgress(options: ScienceVideoIntroPreviewOptions, totalSeconds: number): RenderProgress {
+  let lastReportedAt: number | undefined
+  let lastMessageAt: number | undefined
+  let lastProcessedSeconds: number | undefined
+  return (seconds, speed, ended) => {
+    const now = Date.now()
+    if (!ended && lastReportedAt !== undefined && now - lastReportedAt < 5_000) return
+    lastReportedAt = now
+    const processedSeconds = Math.min(totalSeconds, Math.max(0, seconds))
+    const percent = Math.min(99, Math.floor(processedSeconds / totalSeconds * 100))
+    if (processedSeconds !== lastProcessedSeconds) {
+      lastProcessedSeconds = processedSeconds
+      options.onProgress?.({ percent, processedSeconds, totalSeconds, ...(speed !== undefined ? { speed } : {}) })
+    }
+    if (ended || lastMessageAt === undefined || now - lastMessageAt >= 30_000) {
+      lastMessageAt = now
+      options.report?.(`科普视频正在合成：${percent}%（${Math.floor(processedSeconds)} / ${Math.ceil(totalSeconds)} 秒）`)
     }
   }
+}
+
+async function runRender(args: string[], signal: AbortSignal, report: RenderProgress) {
+  signal.throwIfAborted()
+  const rendering = exec('ffmpeg', ['-progress', 'pipe:1', '-stats_period', '1', ...args],
+    { signal, killSignal: 'SIGKILL', timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+  const closed = new Promise<void>(resolve => rendering.child.once('close', () => resolve()))
+  const abort = () => { rendering.child.kill('SIGKILL') }
+  signal.addEventListener('abort', abort, { once: true })
+  const lines = createInterface({ input: rendering.child.stdout! })
+  const updates = (async () => {
+    const record = new Map<string, string>()
+    for await (const line of lines) {
+      const separator = line.indexOf('=')
+      if (separator < 0) continue
+      const key = line.slice(0, separator), value = line.slice(separator + 1)
+      record.set(key, value)
+      if (key !== 'progress') continue
+      const microseconds = Number(record.get('out_time_us'))
+      const speed = Number(record.get('speed')?.replace(/x$/, ''))
+      if (Number.isFinite(microseconds) && microseconds >= 0)
+        report(microseconds / 1_000_000, Number.isFinite(speed) && speed > 0 ? speed : undefined, value === 'end')
+      record.clear()
+    }
+  })()
+  try {
+    if (signal.aborted) abort()
+    await Promise.all([rendering, updates])
+  } catch (error) {
+    abort()
+    lines.close()
+    await Promise.allSettled([rendering, updates])
+    throw error
+  } finally {
+    lines.close()
+    signal.removeEventListener('abort', abort)
+    if (signal.aborted) { abort(); await closed }
+  }
+}
+
+async function encodeVideo(args: string[], finish: string[], width: number, height: number, signal: AbortSignal, report: RenderProgress) {
+  const encoder = getVideoEncoderOptions({ width, height })
+  const run = (parameters: string[]) => runRender([...args, ...parameters, ...finish], signal, report)
   try {
     await run(encoder)
   } catch (error) {
@@ -227,7 +278,7 @@ async function decodedFrame(filename: string, at: number, signal: AbortSignal, w
 }
 
 async function copyBodyAfterIntro(introPath: string, sourcePath: string, temporary: string, intro: VideoInfo, main: VideoInfo,
-  options: ScienceVideoIntroPreviewOptions) {
+  options: ScienceVideoIntroPreviewOptions, report: RenderProgress) {
   if (!main.copy) return false
   const { signal } = options
   const { stdout } = await exec('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-skip_frame', 'nokey', '-read_intervals', '%+12',
@@ -259,15 +310,15 @@ async function copyBodyAfterIntro(introPath: string, sourcePath: string, tempora
     await encodeVideo(['-nostdin', '-hide_banner', '-v', 'error', '-y', '-i', introPath, '-t', String(at), '-i', sourcePath,
       '-filter_complex', concatFilter(intro, { ...main, duration: at }, main.width, main.height, undefined, false), '-map', '[v]'],
     ['-an', '-pix_fmt', 'yuv420p', '-r', main.fps, '-frames:v', String(frames), '-bf', '0',
-      '-video_track_timescale', String(main.copy.timeScale), ...main.copy.colorOptions, prefix], main.width, main.height, signal)
+      '-video_track_timescale', String(main.copy.timeScale), ...main.copy.colorOptions, prefix], main.width, main.height, signal, report)
     const quote = (filename: string) => "'" + filename.replaceAll("'", "'\\''") + "'"
     await fs.writeFile(list, `ffconcat version 1.0\nfile ${quote(prefix)}\nduration ${prefixDuration.toFixed(9)}\n`
       + `file ${quote(sourcePath)}\ninpoint ${at.toFixed(9)}\nduration ${(main.videoDuration - at).toFixed(9)}\n`, { signal })
     options.report?.('正在直接复制正文视频流并拼接原声')
-    await exec('ffmpeg', ['-nostdin', '-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list,
+    await runRender(['-nostdin', '-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list,
       '-i', introPath, '-i', sourcePath, '-filter_complex', concatAudioFilter(intro, main, 1).join(';'),
       '-map', '0:v:0', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-      '-movflags', '+faststart', temporary], { signal, timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+      '-movflags', '+faststart', temporary], signal, report)
     const output = await probeVideo(temporary, signal)
     const expectedFrames = frames + main.copy.frames - Math.round(at * fps)
     if (output.frames !== expectedFrames || Math.abs(output.videoDuration - expectedFrames / fps) > .01)
@@ -330,12 +381,14 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
   const outputPath = path.join(directory, `science-with-intro-${key}.mp4`)
   const temporary = path.join(directory, `.science-intro-${randomUUID()}.partial.mp4`)
   const temporaryManifest = path.join(directory, `.science-intro-${randomUUID()}.json.tmp`)
+  const totalSeconds = intro.duration + main.duration
+  const report = renderProgress(options, totalSeconds)
   let committedOutput = false, committedManifest = false
   options.report?.(presenterPath ? '正在拼接固定片头与科普成片，正文叠加同步主播圆窗并保留原声' : '正在拼接固定片头与科普成片，保留片头与正文原声')
   try {
     let copied = false
     if (!presenterPath) {
-      try { copied = await copyBodyAfterIntro(introPath, sourcePath, temporary, intro, main, options) }
+      try { copied = await copyBodyAfterIntro(introPath, sourcePath, temporary, intro, main, options, report) }
       catch {
         signal.throwIfAborted()
         options.report?.('正文视频流复制校验未通过，正在使用兼容模式合成成片')
@@ -346,7 +399,7 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
         '-filter_complex', concatFilter(intro, main, width, height, presenterFraming), '-map', '[v]', '-map', '[a]']
       const finish = ['-pix_fmt', 'yuv420p', '-r', main.fps, '-fps_mode', 'cfr', '-c:a', 'aac', '-b:a', '192k',
         '-ar', '48000', '-ac', '2', '-movflags', '+faststart', temporary]
-      await encodeVideo(args, finish, width, height, signal)
+      await encodeVideo(args, finish, width, height, signal, report)
     }
     const output = await probeVideo(temporary, signal)
     const [fpsNumerator, fpsDenominator = 1] = main.fps.split('/').map(Number)
@@ -369,6 +422,8 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
     signal.throwIfAborted()
     await fs.rename(temporaryManifest, manifestPath)
     committedManifest = true
+    options.onProgress?.({ percent: 100, processedSeconds: totalSeconds, totalSeconds })
+    options.report?.('科普视频合成完成：100%')
     return { videoPath: outputPath, sourceSha256, introSha256 }
   } catch (error) {
     if (committedOutput && !committedManifest) await fs.rm(outputPath, { force: true })

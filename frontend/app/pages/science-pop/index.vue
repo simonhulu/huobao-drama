@@ -34,6 +34,12 @@
             <details v-if="selectedJob.message && selectedJob.message !== actionNotice" class="recovery-error"><summary>{{ recoveryErrorSummary }}</summary><p>{{ selectedJob.message }}</p></details>
           </section>
           <div v-else class="job-message" :class="{ warning: selectedJob.status === 'needs_attention' }" role="status"><CircleAlert v-if="selectedJob.status === 'needs_attention'" :size="16" /><span>{{ selectedJob.message || '任务已保存' }}</span></div>
+          <div v-if="activeCompositionProgress(selectedJob)" class="composition-progress" role="status">
+            <div><strong>合成进度 {{ Math.round(selectedJob.compositionProgress.percent) }}%</strong><span>已处理 {{ formatDuration(selectedJob.compositionProgress.processedSeconds) }} / {{ formatDuration(selectedJob.compositionProgress.totalSeconds) }}<template v-if="selectedJob.compositionProgress.speed > 0"> · {{ selectedJob.compositionProgress.speed.toFixed(2) }}x</template></span></div>
+            <progress :value="selectedJob.compositionProgress.percent" max="100" aria-label="视频合成进度" />
+            <time class="progress-time" :datetime="selectedJob.compositionProgress.updatedAt">最后进展 {{ formatTime(selectedJob.compositionProgress.updatedAt) }}</time>
+          </div>
+          <p v-else-if="activeUploadProgress(selectedJob)" class="progress-time"><time :datetime="selectedJob.uploadProgress.updatedAt">最后进展 {{ formatTime(selectedJob.uploadProgress.updatedAt) }}</time></p>
           <p v-if="selectedJob.automaticRetry" class="automatic-retry" role="status"><RefreshCw :size="14" /><span>已安排第 {{ selectedJob.automaticRetry.attempt }} / {{ selectedJob.automaticRetry.maxAttempts }} 次自动重试，下次 {{ formatTime(selectedJob.automaticRetry.nextRetryAt) }}</span></p>
           <p v-if="selectedJob.uploadRetry" class="automatic-retry" role="status"><Upload :size="14" /><span>已安排第 {{ selectedJob.uploadRetry.attempt }} 次自动重传，下次 {{ formatTime(selectedJob.uploadRetry.nextRetryAt) }}</span></p>
           <div v-if="selectedJob.uploadCheck || selectedJob.huashengCheck" class="recovery-check" role="status"><template v-for="(check, name) in { upload: selectedJob.uploadCheck, huasheng: selectedJob.huashengCheck }" :key="name"><p v-if="check"><strong>{{ name === 'upload' ? '上传核对' : '花生查询' }}</strong><time>{{ formatTime(check.checkedAt) }}</time><span>{{ check.message }}</span></p></template></div>
@@ -118,6 +124,8 @@
               <button v-if="!editor.baijiahaoAccountName" class="btn btn-sm" type="button" :disabled="isRunning || !!actionBusy || batchSyncBusy" @click="openUploadAccountPicker"><Users :size="14" />选择百家号账号</button>
               <p v-if="typeof selectedJob.autoUpload === 'boolean'" class="upload-mode">{{ selectedJob.autoUpload ? '自动发表' : '仅制作' }}</p>
               <div class="upload-status" :class="{ success: ['uploaded', 'submitted', 'published'].includes(uploadState(selectedJob)), 'inline-error': ['blocked', 'uncertain'].includes(uploadState(selectedJob)) }"><Check v-if="['uploaded', 'submitted', 'published'].includes(uploadState(selectedJob))" :size="17" /><LoaderCircle v-else-if="uploadState(selectedJob) === 'uploading'" :size="17" class="spin" /><Upload v-else :size="17" /><strong>{{ uploadStatusLabel(selectedJob) }}</strong></div>
+              <p v-if="activeUploadProgress(selectedJob)" class="upload-progress-detail" role="status">{{ selectedJob.uploadProgress.message }}</p>
+              <p v-for="warning in selectedJob.uploadWarnings || []" :key="warning" class="upload-warning" role="status"><CircleAlert :size="14" /><span>{{ warning }}</span></p>
               <p v-if="['blocked', 'uncertain'].includes(uploadState(selectedJob))" class="inline-error upload-error" role="alert">{{ selectedJob.message }}</p>
               <div v-if="selectedJob.hasUploadAttempt || selectedJob.upload || uploadState(selectedJob) === 'blocked'" class="upload-recovery-actions"><button class="btn btn-sm" :disabled="isRunning || !!actionBusy || batchSyncBusy" @click="openUploadReview('original')"><ExternalLink :size="14" />打开百家号窗口</button></div>
               <a v-if="selectedJob.upload?.publishedUrl" class="btn" :href="selectedJob.upload.publishedUrl" target="_blank" rel="noreferrer">{{ selectedJob.upload.published ? '打开已发表作品' : '打开审核中作品' }}<ExternalLink :size="13" /></a>
@@ -492,15 +500,36 @@ function uploadState(job) {
   return job.videoUrl ? 'pending' : 'not_ready'
 }
 function uploadRetryPending(job) { return job.stage === 'upload' && !taskExecuting(job) && uploadState(job) === 'queued' }
+function activeUploadProgress(job) {
+  if (job?.status !== 'running' || job.stage !== 'upload' || job.executionActive === false
+    || uploadState(job) !== 'uploading' || typeof job.uploadProgress?.step !== 'string') return null
+  return job.uploadProgress
+}
+function activeCompositionProgress(job) {
+  if (job?.status !== 'running' || job.stage !== 'export' || job.exportStep !== 'compose' || job.executionActive === false) return null
+  const progress = job.compositionProgress
+  return progress && Number.isFinite(progress.percent) && progress.percent >= 0 && progress.percent <= 100
+    && Number.isFinite(progress.processedSeconds) && progress.processedSeconds >= 0
+    && Number.isFinite(progress.totalSeconds) && progress.totalSeconds > 0 ? progress : null
+}
+function formatDuration(seconds) {
+  const value = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`
+}
 function uploadStatusLabel(job) {
   if (uploadRetryPending(job)) return '等待自动重传'
+  const progress = activeUploadProgress(job)
+  if (progress) return ({ browser_connect: '连接上传账号', account_check: '检查上传登录', opening: '准备上传页面',
+    media: '上传与转码', metadata: '准备发表文案', covers: '确认上传封面', staged: '准备发表',
+    publishing: '提交发表', reconcile: '核对上传结果', save: '保存草稿' })[progress.step] || progress.message || '上传中'
   return ({ pending: '待上传', queued: '上传排队', uploading: '上传中', uploaded: '已上传（草稿）', submitted: '已上传·待审核', published: '已发表', blocked: '上传异常', paused: '上传已暂停', not_ready: '等待成片与封面' })[uploadState(job)] || '待上传'
 }
 function statusLabel(job) {
   if (job.status === 'running' && /同步花生/.test(job.message || '')) return '同步花生状态'
   if (job.status === 'running' && job.stage === 'export' && job.exportStep) {
     const label = ({ platform: '花生导出', download: '下载成片', presenter: '生成主播', compose: '合成成片' })[job.exportStep]
-    if (label) return label
+    const progress = activeCompositionProgress(job)
+    if (label) return progress ? `${label} · ${Math.round(progress.percent)}%` : label
   }
   if (job.videoCompositionPending) return taskExecuting(job) ? '合成视频' : '视频待合成'
   if (uploadRetryPending(job)) return '等待自动重传'
@@ -723,6 +752,7 @@ onBeforeUnmount(() => { disposed = true; detailSequence++; if (pollTimer) window
 .delete-task-button { color: var(--text-2); }.delete-task-button:not(:disabled):hover { color: var(--error); background: var(--error-bg); }
 .pipeline { display: flex; list-style: none; gap: 8px; margin: 20px 0 12px; padding: 14px 0; border-block: 1px solid var(--border); }.pipeline li { flex: 1; display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--text-2); }.pipeline li:not(:last-child)::after { content: ''; flex: 1; height: 1px; background: var(--border); margin-inline: 4px; }.step-icon { display: grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--border); border-radius: 50%; font-size: 10px; flex-shrink: 0; }.pipeline li.done { color: var(--success); }.pipeline li.done .step-icon { background: var(--success-bg); border-color: transparent; }.pipeline li.active { color: var(--info); }.pipeline li.active .step-icon { background: var(--info-bg); border-color: var(--info); }.pipeline li.attention { color: var(--warning); }
 .job-message { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: var(--bg-1); border-radius: 6px; color: var(--text-2); }.job-message.warning { background: var(--warning-bg); color: var(--warning); }.job-message svg { flex-shrink: 0; margin-top: 2px; }
+.composition-progress { display: grid; gap: 7px; margin-top: 12px; }.composition-progress > div { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; }.composition-progress strong { font-weight: 550; }.composition-progress span,.progress-time { color: var(--text-2); font-size: 11px; font-variant-numeric: tabular-nums; }.composition-progress progress { display: block; width: 100%; height: 7px; accent-color: var(--info); }.science-page p.progress-time { margin-top: 7px; }.upload-status { min-width: 0; }.upload-status strong { overflow-wrap: anywhere; }.upload-status svg { flex-shrink: 0; }
 .detail-tabs { display: flex; gap: 24px; margin: 20px 0; border-bottom: 1px solid var(--border); }.detail-tabs button { border: 0; background: transparent; padding: 0 0 10px; border-bottom: 2px solid transparent; margin-bottom: -1px; font: inherit; color: var(--text-2); cursor: pointer; }.detail-tabs button.active { color: var(--text-1); border-bottom-color: var(--text-1); font-weight: 600; }
 .field { display: grid; gap: 7px; margin-bottom: 16px; }.field > span,.script-heading label { font-weight: 550; }.field small { font-weight: 400; color: var(--text-2); margin-left: 5px; }.field input,.field select,textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-0); color: var(--text-1); font: inherit; }.field input:disabled,.field select:disabled,textarea:disabled { background: var(--bg-1); color: var(--text-2); opacity: 1; }.account-pickers { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }.account-pickers .field { margin-bottom: 8px; }.field-note { color: var(--text-2); font-size: 12px; margin: 0 0 16px !important; line-height: 1.7; }.script-heading { justify-content: space-between; margin-bottom: 8px; }.script-heading span { color: var(--text-2); font-size: 12px; }.script-editor { min-height: 300px; line-height: 1.95; resize: vertical; }.editor-actions { justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 16px; }.save-state { margin-right: auto; color: var(--text-2); font-size: 12px; }.save-state.dirty { color: var(--warning); }
 .fact-checks { background: var(--warning-bg); padding: 15px; border-radius: 6px; margin: 16px 0; }.fact-checks > p { font-size: 12px; color: var(--text-2); margin-top: 5px; }.fact-checks ul { padding-left: 18px; margin: 12px 0 0; }.fact-checks li + li { margin-top: 9px; }.fact-checks li strong,.fact-checks li span { display: block; }.fact-checks li strong { font-weight: 550; }.fact-checks li span { color: var(--text-2); margin-top: 3px; font-size: 12px; }
@@ -737,6 +767,7 @@ onBeforeUnmount(() => { disposed = true; detailSequence++; if (pollTimer) window
 .output-media { min-width: 0; }.cover-panel { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 16px; }.cover-panel > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }.cover-panel header p { margin-top: 5px; color: var(--text-2); font-size: 12px; }.cover-panel header .btn { flex-shrink: 0; }.cover-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin-top: 14px; }.cover-card { margin: 0; min-width: 0; }.cover-preview { display: flex; align-items: center; justify-content: center; width: 100%; height: 180px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--bg-1); }.cover-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }.cover-placeholder { flex-direction: column; gap: 8px; color: var(--text-2); font-size: 12px; }.cover-card figcaption { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; margin-top: 5px; font-size: 12px; }.cover-card figcaption a { color: var(--text-2); text-decoration: none; }
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 35px 20px; color: var(--text-2); }.empty-state strong { font-weight: 550; color: var(--text-1); }.empty-state p { max-width: 380px; font-size: 12px; line-height: 1.8; }.detail-empty { min-height: 350px; }.detail-empty h2 { color: var(--text-1); }.back-button { display: none; }.page-foot { justify-content: space-between; gap: 12px; padding-top: 11px; font-size: 11px; color: var(--text-2); flex-wrap: wrap; }.page-alert { display: flex; align-items: center; gap: 10px; padding: 12px; margin-top: 12px; background: var(--error-bg); color: var(--error); border-radius: 6px; }.page-alert span { flex: 1; }.inline-error { color: var(--error); font-size: 12px; margin: 12px 0 !important; }
 .upload-card { min-width: 0; }.upload-card > p { overflow-wrap: anywhere; }.upload-card > .upload-error { color: var(--error); }
+.upload-card > .upload-warning { display: flex; align-items: flex-start; gap: 6px; color: var(--warning); }.upload-warning svg { flex-shrink: 0; margin-top: 2px; }.upload-warning span { min-width: 0; overflow-wrap: anywhere; }
 .import-dialog { position: fixed; inset: 0; margin: auto; padding: 0; width: min(530px,calc(100vw - 32px)); max-height: calc(100dvh - 48px); background: var(--bg-0); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-elevated); color: var(--text-1); overflow: auto; }.import-dialog::backdrop { background: rgb(9 9 11 / 32%); }.import-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 22px 16px; border-bottom: 1px solid var(--border); }.import-dialog header p { margin-top: 5px; font-size: 12px; color: var(--text-2); }.dialog-body { padding: 20px 22px; }.import-dialog footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 14px 22px; border-top: 1px solid var(--border); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }.spin { animation: spin 1s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .cover-card figcaption small { margin-left: 8px; color: var(--text-2); font-size: 11px; }.cover-upload-note { margin-top: 10px !important; color: var(--text-2); font-size: 12px; line-height: 1.7; }

@@ -15,7 +15,8 @@ import { runHuashengJob } from './history-huasheng-api.js'
 import * as exporter from './history-huasheng-export-api.js'
 import { recoverCbaUpload, checkCbaUploadResult, rebindCbaUploadCovers, validateCbaUploadReceipt, type CbaUploadRecoveryCurrent, type CbaUploadRecoveryOptions } from './cba-upload-recovery.js'
 import { recreateScienceScript, stripScienceNarrationIntroduction, type SciencePlan, type ScienceWritingCheckpoint } from './science-script.js'
-import type { SocialUploadResult, SocialUploadReviewInput } from './social-auto-upload.js'
+import type { SocialUploadProgress, SocialUploadResult, SocialUploadReviewInput } from './social-auto-upload.js'
+import type { ScienceVideoIntroProgress } from './science-video-intro.js'
 import type * as mediaTools from './science-workflow-media.js'
 import { hasScienceTranscriptCheckpoint, releaseScienceSourceMedia } from './science-workflow-media.js'
 
@@ -54,6 +55,9 @@ export interface ScienceJob {
   status: 'draft' | 'queued' | 'running' | 'paused' | 'needs_attention' | 'retry_wait' | 'waiting_remote' | 'awaiting_export' | 'ready' | 'completed'
   stage: ScienceStage; message: string; transcript: string; script: string
   exportStep?: 'platform' | 'download' | 'presenter' | 'compose'
+  compositionProgress?: ScienceVideoIntroProgress & { updatedAt: string }
+  uploadProgress?: SocialUploadProgress & { updatedAt: string }
+  uploadWarnings?: string[]
   factChecks: Array<{ claim: string; note: string }>; sources: string[]
   huashengAccountName: string | null; baijiahaoAccountName: string | null
   projectUrl: string | null; sourceVideoUrl: string | null; videoUrl: string | null
@@ -82,7 +86,8 @@ interface StoredJob extends Omit<ScienceJob, 'sourceVideoUrl' | 'videoUrl' | 'la
   productionCompleted?: boolean; productionScriptHash?: string; productionAccountName?: string
   separateIntro?: boolean
   exportDispatched?: boolean; exportTask?: { taskId: string; projectHash: string }; videoPath?: string
-  exportRecovery?: { taskId: string; projectHash: string; deadlineAt?: string; zeroSince?: string; retryDispatchedAt?: string }
+  exportRecovery?: { taskId: string; projectHash: string; deadlineAt?: string; zeroSince?: string; retryDispatchedAt?: string;
+    lastProgress?: number; lastProgressAt?: string }
   mainVideoPath?: string; presenterPath?: string
   uploadAttempt?: CbaUploadRecoveryCurrent; autoUpload?: boolean; automaticDelivery?: boolean; ownerPid?: number
   uploadRestartPending?: boolean; uploadRetryCount?: number
@@ -203,6 +208,20 @@ export class ScienceWorkflowService {
     job.message = message; if (stage) job.stage = stage
     if (job.logs.at(-1)?.message !== message) job.logs = [...job.logs, { at: new Date().toISOString(), message }].slice(-150)
     this.write(job)
+  }
+  private reportUploadProgress(id: string, message: string, progress?: SocialUploadProgress) {
+    const job = this.read(id), text = safeMessage(message)
+    const step = /^[a-z_]{1,40}$/.test(progress?.step || '') ? progress!.step : 'working'
+    if (job.uploadProgress?.step !== step || job.uploadProgress.message !== text)
+      job.uploadProgress = { step, message: text, updatedAt: new Date().toISOString() }
+    if (progress?.step === 'topic_skipped') job.uploadWarnings = [...new Set([...(job.uploadWarnings || []), text])]
+    job.message = text
+    if (job.logs.at(-1)?.message !== text) job.logs = [...job.logs, { at: job.uploadProgress!.updatedAt, message: text }].slice(-150)
+    this.write(job)
+  }
+  private recordCompositionProgress(id: string, progress: ScienceVideoIntroProgress, signal: AbortSignal) {
+    signal.throwIfAborted()
+    this.modify(id, { compositionProgress: { ...progress, updatedAt: new Date().toISOString() } })
   }
   private trustedSubmission(job: StoredJob, receipt: SocialUploadResult | null | undefined = job.upload) {
     const attempt = job.uploadAttempt, payload = attempt?.payload
@@ -682,16 +701,20 @@ export class ScienceWorkflowService {
       if (Date.now() >= until) throw new ScienceWorkflowError('原导出等待已超过 90 分钟，任务编号已保留，可稍后继续核对原任务')
       const saved = this.read(id).exportRecovery
       let recovery = saved?.taskId === task.taskId && saved.projectHash === task.projectHash ? saved : { ...task }
-      if (info.progress === 0 && !info.url) {
-        const now = Date.now(), stallMs = this.options.exportStallMs ?? 5 * 60_000
-        if (!recovery.zeroSince) {
-          recovery = { ...recovery, zeroSince: new Date(now).toISOString() }
-          this.modify(id, { exportRecovery: recovery })
-        }
+      const now = Date.now(), stallMs = this.options.exportStallMs ?? 5 * 60_000
+      const changed = recovery.lastProgress !== info.progress
+      if (changed || !Number.isFinite(Date.parse(recovery.lastProgressAt || ''))) {
+        recovery = { ...recovery, lastProgress: info.progress,
+          lastProgressAt: info.progress === 0 && recovery.zeroSince || new Date(now).toISOString() }
+      }
+      if (info.progress === 0 && !recovery.zeroSince) recovery = { ...recovery, zeroSince: new Date(now).toISOString() }
+      else if (info.progress > 0 && recovery.zeroSince) recovery = { ...recovery, zeroSince: undefined }
+      this.modify(id, { exportRecovery: recovery })
+      const stalledSince = info.progress === 0 ? recovery.retryDispatchedAt || recovery.zeroSince : recovery.lastProgressAt
+      if ((!changed || info.progress === 0) && now - Date.parse(stalledSince!) >= stallMs) {
         if (recovery.retryDispatchedAt) {
-          if (now - Date.parse(recovery.retryDispatchedAt) >= stallMs)
-            throw new ScienceWorkflowError('原导出已自动重试一次，但仍停在 0%，原项目和任务编号已保留，请检查花生原项目')
-        } else if (now - Date.parse(recovery.zeroSince!) >= stallMs) {
+          throw new ScienceWorkflowError(`原导出已自动重试一次，但仍停在 ${Math.round(info.progress)}%，原项目和任务编号已保留，请检查花生原项目`)
+        } else {
           const state = await this.retryPlatform(id, '花生原导出恢复核验', signal, () => api.inspectHuashengProduction({
             projectUrl: job.projectUrl!, checkpoint: job.checkpoint, script: job.script, browserConfig, signal, expectedVoice: SCIENCE_HUASHENG_VOICE,
           }))
@@ -699,13 +722,17 @@ export class ScienceWorkflowService {
           const latest = await this.retryPlatform(id, '花生原导出恢复查询', signal, () => api.inspectHuashengExport({
             projectUrl: job.projectUrl!, ...task, browserConfig, signal,
           }))
-          if (latest.progress !== 0 || latest.url) continue
-          this.report(id, '原导出持续停在 0%，已核对原稿和音色，正在自动重试一次原项目导出', 'export')
+          if (latest.progress !== info.progress || latest.progress === 100 && latest.url) continue
+          this.report(id, `原导出持续停在 ${Math.round(info.progress)}%，已核对原稿和音色，正在自动重试一次原项目导出`, 'export')
           // Persist before POST: a lost response or process restart must not replay it.
           let retried: typeof task
           try {
             retried = await api.createHuashengExport({ projectUrl: job.projectUrl!, browserConfig, signal,
-              onDispatched: () => { this.modify(id, { exportRecovery: { ...recovery, retryDispatchedAt: new Date().toISOString() } }) },
+              onDispatched: () => {
+                const dispatchedAt = new Date().toISOString()
+                this.modify(id, { exportRecovery: { ...recovery, retryDispatchedAt: dispatchedAt,
+                  lastProgress: info.progress, lastProgressAt: dispatchedAt } })
+              },
             })
           } catch (error) {
             if (error instanceof exporter.HuashengExportApiError && error.requestRejected)
@@ -717,8 +744,6 @@ export class ScienceWorkflowService {
           this.report(id, '原项目导出已重新触发，任务编号和版本保持一致，继续查询并自动下载', 'export')
           continue
         }
-      } else if (recovery.zeroSince) {
-        this.modify(id, { exportRecovery: { ...recovery, zeroSince: undefined } })
       }
       this.modify(id, { status: 'running' })
       this.report(id, `花生正在导出：${Math.round(info.progress)}%，完成后自动下载`)
@@ -772,13 +797,14 @@ export class ScienceWorkflowService {
   }
   private async prepareIntroPreview(id: string, signal: AbortSignal) {
     const job = this.read(id), intro = await import('./science-video-intro.js')
-    this.modify(id, { exportStep: 'compose' })
+    this.modify(id, { exportStep: 'compose', compositionProgress: undefined })
     const directory = path.join(this.directory(id), 'intro')
     const main = await intro.resolveScienceVideoIntroSource({ videoPath: this.localFile(id, job.mainVideoPath || job.videoPath), directory }, { signal })
     this.modify(id, { mainVideoPath: main.videoPath })
     this.report(id, '正在拼接固定片头预览，随后继续视频合成', 'export')
     const prepare = this.options.prepareIntroPreview || intro.prepareScienceVideoIntroPreview
-    const preview = await prepare({ videoPath: main.videoPath, directory }, { signal, report: message => this.report(id, message, 'export') })
+    const preview = await prepare({ videoPath: main.videoPath, directory }, { signal, report: message => this.report(id, message, 'export'),
+      onProgress: progress => this.recordCompositionProgress(id, progress, signal) })
     signal.throwIfAborted()
     if (preview.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('片头预览与原正片版本不一致，已保留原任务')
     this.modify(id, { videoPath: preview.videoPath, videoCompositionPending: true,
@@ -787,9 +813,10 @@ export class ScienceWorkflowService {
   private async prepareCovers(id: string, signal: AbortSignal, input: z.infer<typeof scienceCoversSchema> = {}): Promise<mediaTools.UploadAssets> {
     let job = this.read(id)
     if (job.separateIntro && !job.uploadAttempt && !job.upload) {
-      this.modify(id, { exportStep: 'compose' })
+      this.modify(id, { exportStep: 'compose', compositionProgress: undefined })
       const intro = await import('./science-video-intro.js')
       const directory = path.join(this.directory(id), 'intro')
+      const onProgress = (progress: ScienceVideoIntroProgress) => this.recordCompositionProgress(id, progress, signal)
       const main = await intro.resolveScienceVideoIntroSource({ videoPath: this.localFile(id, job.mainVideoPath || job.videoPath), directory }, { signal })
       job = this.modify(id, { mainVideoPath: main.videoPath })
       let video: Awaited<ReturnType<typeof intro.prepareScienceVideoWithIntro>>
@@ -814,11 +841,11 @@ export class ScienceWorkflowService {
         if (presenter) {
           const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
           video = await prepare({ videoPath: main.videoPath, directory },
-            { signal, presenterPath: presenter.presenterPath, presenterFraming: 'closeup', report: message => this.report(id, message, 'export') })
+            { signal, presenterPath: presenter.presenterPath, presenterFraming: 'closeup', report: message => this.report(id, message, 'export'), onProgress })
         } else {
           const prepare = this.options.prepareIntroVideo || intro.prepareScienceVideoWithIntroOnly
           video = await prepare({ videoPath: main.videoPath, directory },
-            { signal, report: message => this.report(id, message, 'export') })
+            { signal, report: message => this.report(id, message, 'export'), onProgress })
         }
         signal.throwIfAborted()
         if (video.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('视频合成与原正片版本不一致，已保留原任务')
@@ -835,15 +862,15 @@ export class ScienceWorkflowService {
           { signal, report: message => this.report(id, message, 'export') })
         signal.throwIfAborted()
         if (presenter.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('主播口播与正片版本不一致，请继续原任务重新核对')
-        this.modify(id, { presenterPath: presenter.presenterPath, exportStep: 'compose' })
+        this.modify(id, { presenterPath: presenter.presenterPath, exportStep: 'compose', compositionProgress: undefined })
         const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
         video = await prepare({ videoPath: main.videoPath, directory },
-          { signal, presenterPath: presenter.presenterPath, report: message => this.report(id, message, 'export') })
+          { signal, presenterPath: presenter.presenterPath, report: message => this.report(id, message, 'export'), onProgress })
       } else {
         this.report(id, '正在本地拼接固定片头与正文，正文不叠加主播圆窗', 'export')
         const prepare = this.options.prepareIntroVideo || intro.prepareScienceVideoWithIntroOnly
         video = await prepare({ videoPath: main.videoPath, directory },
-          { signal, report: message => this.report(id, message, 'export') })
+          { signal, report: message => this.report(id, message, 'export'), onProgress })
         signal.throwIfAborted()
         if (video.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('视频合成与原正片版本不一致，已保留原任务')
         this.modify(id, { presenterPath: undefined })
@@ -1018,7 +1045,7 @@ export class ScienceWorkflowService {
     const job = this.read(id)
     if (!job.baijiahaoAccountName) throw new ScienceWorkflowError('请先选择百家号账号')
     this.bjh.get(job.baijiahaoAccountName)
-    this.modify(id, { status: 'queued', stage: 'upload' })
+    this.modify(id, { status: 'queued', stage: 'upload', uploadProgress: undefined })
     this.report(id, '等待所选百家号账号，正在排队上传', 'upload')
     let release: (() => void) | null = null
     try {
@@ -1078,7 +1105,8 @@ export class ScienceWorkflowService {
         description: `${job.title} ${SCIENCE_BAIJIAHAO_TAG}`, tags: [SCIENCE_BAIJIAHAO_TAG],
         creationDeclaration: SCIENCE_CREATION_DECLARATION, watermark: SCIENCE_WATERMARK }
       if (!runtime.publishSavedSocialUpload) throw new ScienceWorkflowError('当前上传运行时不支持原草稿转发表，请先更新服务')
-      try { result = await runtime.publishSavedSocialUpload(publishPayload, attemptPayload, activeAttempt.result, { onProgress: message => this.report(id, message) }) }
+      try { result = await runtime.publishSavedSocialUpload(publishPayload, attemptPayload, activeAttempt.result,
+        { onProgress: (message, progress) => this.reportUploadProgress(id, message, progress) }) }
       catch (error) {
         const message = safeMessage(error)
         if (uploadConnectionFailure(message) && !uploadRequiresAction(message)) throw new ScienceWorkflowError(message, 503, true)
@@ -1097,7 +1125,7 @@ export class ScienceWorkflowService {
               ? patch.result : undefined
             this.modify(id, { uploadAttempt: { ...latest.uploadAttempt!, ...patch }, ...(receipt ? { upload: receipt } : {}) })
           },
-          onProgress: message => this.report(id, message), currentInputDigest,
+          onProgress: (message, progress) => this.reportUploadProgress(id, message, progress), currentInputDigest,
         })
         if (['blocked', 'failed'].includes(recovered.decision) && uploadConnectionFailure(recovered.message))
           throw new ScienceWorkflowError(recovered.message, 503, true)
