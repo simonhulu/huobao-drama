@@ -162,7 +162,7 @@ function validateJob(value: any, checkpoint: Checkpoint): RemoteJob {
 /** Generate one full-narration presenter using a cached avatar on the remote GPU. */
 export async function prepareScienceMusetalkVideo(input: { videoPath: string; directory: string }, options: ScienceMusetalkVideoOptions): Promise<{ presenterPath: string; sourceSha256: string }> {
   options.signal.throwIfAborted()
-  let signal = AbortSignal.any([options.signal, AbortSignal.timeout(positive('MUSETALK_TIMEOUT_MS', 10 * 60_000))])
+  let signal = options.signal
   const directory = path.resolve(input.directory), source = path.resolve(input.videoPath)
   await fs.mkdir(directory, { recursive: true })
   const lockPath = path.join(directory, '.musetalk.lock')
@@ -184,6 +184,9 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
     await lock.writeFile(String(process.pid))
     const main = await media(source, signal)
     if (!main.audio) throw new Error('MuseTalk 正片缺少正文音轨')
+    // Half-body blending needs a full-narration budget, bounded to 10-60 minutes.
+    const remoteTimeoutMs = positive('MUSETALK_TIMEOUT_MS', Math.min(60 * 60_000, Math.max(10 * 60_000, Math.ceil(main.duration * 1000))))
+    signal = AbortSignal.any([options.signal, AbortSignal.timeout(remoteTimeoutMs)])
     const sourceSha256 = await fileHash(source, signal)
     api = await openApi(signal)
     const request = async (url: string, init: RequestInit = {}, timeout = 60_000) => {

@@ -104,6 +104,35 @@ function remoteBudget(t: TestContext) {
   return { expire: () => controller.abort(new DOMException('remote budget expired', 'TimeoutError')), budgets }
 }
 
+test('a long narration gets a duration-sized default remote budget and still cancels its pending job on expiry', async t => {
+  const f = await fixture(t), duration = 1045.056
+  const realFfprobe = (await exec('which', ['ffprobe'])).stdout.trim(), bin = path.join(f.root, 'bin')
+  await fs.mkdir(bin)
+  const wrapper = `#!${process.execPath}\nconst cp=require('node:child_process'),args=process.argv.slice(2);
+const result=cp.spawnSync(${JSON.stringify(realFfprobe)},args,{encoding:'utf8'});
+if(result.status!==0){process.stderr.write(result.stderr||'ffprobe failed');process.exit(result.status??1)}
+const info=JSON.parse(result.stdout);if(args.at(-1)===${JSON.stringify(f.videoPath)}){
+for(const stream of info.streams??[])if(stream.codec_type==='video')stream.duration=${JSON.stringify(String(duration))};
+if(info.format)info.format.duration=${JSON.stringify(String(duration))}}process.stdout.write(JSON.stringify(info));\n`
+  await fs.writeFile(path.join(bin, 'ffprobe'), wrapper, { mode: 0o700 })
+  const previousPath = process.env.PATH
+  t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath })
+  process.env.PATH = `${bin}${path.delimiter}${previousPath || ''}`
+  delete process.env.MUSETALK_TIMEOUT_MS
+  const controller = new AbortController(), budgets: number[] = []
+  const timeout = AbortSignal.timeout.bind(AbortSignal)
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    budgets.push(milliseconds)
+    return budgets.length === 1 ? controller.signal : timeout(milliseconds)
+  })
+  f.state.pending = true
+  f.state.onPoll = () => controller.abort(new DOMException('long narration remote budget expired', 'TimeoutError'))
+  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal() }), /long narration remote budget expired/)
+  assert.equal(budgets[0], Math.ceil(duration * 1000), 'the first remote deadline must be based on the probed full narration')
+  assert.equal(f.state.submissions, 1); assert.equal(f.state.deletes, 1)
+  assert.equal([...f.state.jobs.values()][0].status, 'cancelled')
+})
+
 test('a completed remote result still downloads when its remote service budget expires', async t => {
   const f = await fixture(t), budget = remoteBudget(t)
   f.state.onResult = budget.expire
