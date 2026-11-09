@@ -191,13 +191,33 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
     api = await openApi(signal)
     const request = async (url: string, init: RequestInit = {}, timeout = 60_000) => {
       const response = await fetch(`${api!.apiUrl}${url}`, { ...init, signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]) })
-      if (!response.ok) throw new Error(`MuseTalk 请求失败（HTTP ${response.status}），已保留原任务检查点`)
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {})
+        throw Object.assign(new Error(`MuseTalk 请求失败（HTTP ${response.status}），已保留原任务检查点`), { status: response.status })
+      }
       return response
+    }
+    const requestJson = async (url: string, init: RequestInit = {}, timeout = 60_000) => {
+      for (let attempt = 1; ; attempt++) {
+        signal.throwIfAborted()
+        try { return await (await request(url, init, timeout)).json() }
+        catch (error) {
+          signal.throwIfAborted()
+          const status = (error as { status?: number })?.status
+          const code = (error as { cause?: { code?: string }; code?: string })?.cause?.code || (error as { code?: string })?.code || ''
+          const temporary = status === 408 || status === 429 || status && status >= 500 && status <= 599
+            || error instanceof DOMException && error.name === 'TimeoutError'
+            || /fetch failed|terminated|network|socket|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ENOTFOUND|UND_ERR_/i.test(`${error} ${code}`)
+          if (attempt >= 3 || !temporary) throw error
+          options.report?.(`MuseTalk 连接暂时中断，保持原任务编号重试（${attempt + 1}/3）`)
+          await delay(250 * 2 ** (attempt - 1), undefined, { signal })
+        }
+      }
     }
     let health: any
     const readinessDeadline = Date.now() + 60_000
     while (true) {
-      health = await (await request('/health')).json()
+      health = await requestJson('/health')
       if (health?.ok && health.status === 'ready') break
       if (health?.status !== 'loading' || Date.now() >= readinessDeadline) throw new Error('MuseTalk 远程服务尚未就绪，请稍后继续原任务')
       options.report?.('远程 MuseTalk 正在加载主播缓存')
@@ -241,7 +261,8 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       const form = new FormData()
       form.set('request_id', requestId)
       form.set('audio', new Blob([await fs.readFile(audioPath)], { type: 'audio/flac' }), 'narration.flac')
-      const job = validateJob(await (await request('/v1/lipsync', { method: 'POST', body: form })).json(), checkpoint)
+      const job = validateJob(await requestJson('/v1/lipsync', { method: 'POST', body: form },
+        positive('MUSETALK_UPLOAD_TIMEOUT_MS', 180_000, 600_000)), checkpoint)
       checkpoint.jobId = job.job_id ?? job.id
       await save(checkpointPath, checkpoint)
     }
@@ -249,10 +270,10 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
     let completed: RemoteJob
     let retried = false, lastReport = 0
     while (true) {
-      const job = validateJob(await (await request(jobUrl)).json(), checkpoint)
+      const job = validateJob(await requestJson(jobUrl), checkpoint)
       if (job.status === 'completed') { completed = job; break }
       if (resumed && !retried && ['failed', 'cancelled'].includes(job.status)) {
-        validateJob(await (await request(`${jobUrl}/retry`, { method: 'POST' })).json(), checkpoint)
+        validateJob(await requestJson(`${jobUrl}/retry`, { method: 'POST' }), checkpoint)
         retried = true
         options.report?.('正在恢复已保存的 MuseTalk 原任务')
         continue
@@ -296,7 +317,7 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       return { presenterPath, sourceSha256 }
     } finally { await fs.rm(temporary, { force: true }) }
   } finally {
-    if (!succeeded && api && remoteJobId) {
+    if (!succeeded && options.signal.aborted && api && remoteJobId) {
       try { await fetch(`${api.apiUrl}/v1/jobs/${remoteJobId}`, { method: 'DELETE', signal: AbortSignal.timeout(5000) }) } catch {}
     }
     try { await api?.close() } finally { await lock.close(); await fs.rm(lockPath, { force: true }) }

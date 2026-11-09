@@ -29,7 +29,7 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2,
   const output = await fs.readFile(remote)
   const identity = { model: 'musetalk-v15', source_revision: '0a89dec45a0192b824e3cf4daf96c239440c5ed8',
     avatar_id: 'xiaolu-r3-fixture', reference_sha256: '1'.repeat(64), fps: remoteFps }
-  const state = { submissions: 0, retries: 0, deletes: 0, polls: 0, pending: false, wrongAudio: false, dropSubmission: false,
+  const state = { submissions: 0, retries: 0, deletes: 0, polls: 0, pending: false, wrongAudio: false, dropSubmission: false, dropSubmissions: 0,
     loadingReads: 0, failedPoll: false, onPoll: undefined as (() => void) | undefined, onResult: undefined as (() => void) | undefined,
     jobs: new Map<string, any>(), uploaded: undefined as Buffer | undefined }
   const server = createServer(async (request, response) => {
@@ -45,7 +45,7 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2,
         state.submissions++
         if (!state.jobs.has(id)) state.jobs.set(id, { ...identity, id, job_id: id, request_id: id,
           audio_sha256: sha(state.uploaded), status: state.pending ? 'running' : 'completed', result_sha256: sha(output) })
-        if (state.dropSubmission) { state.dropSubmission = false; response.destroy(); return }
+        if (state.dropSubmission || state.dropSubmissions > 0) { state.dropSubmission = false; state.dropSubmissions = Math.max(0, state.dropSubmissions - 1); response.destroy(); return }
         send(state.jobs.get(id)); return
       }
       const match = /^\/v1\/jobs\/([a-f0-9]{64})(\/result|\/retry)?$/.exec(request.url || '')
@@ -65,11 +65,12 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2,
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
   const address = server.address()
   assert.ok(address && typeof address !== 'string')
-  const previous = new Map(['MUSETALK_API_URL', 'MUSETALK_POLL_INTERVAL_MS', 'MUSETALK_TIMEOUT_MS'].map(name => [name, process.env[name]]))
+  const previous = new Map(['MUSETALK_API_URL', 'MUSETALK_POLL_INTERVAL_MS', 'MUSETALK_TIMEOUT_MS', 'MUSETALK_UPLOAD_TIMEOUT_MS'].map(name => [name, process.env[name]]))
   t.after(() => { for (const [name, value] of previous) { if (value === undefined) delete process.env[name]; else process.env[name] = value } })
   process.env.MUSETALK_API_URL = `http://127.0.0.1:${address.port}`
   process.env.MUSETALK_POLL_INTERVAL_MS = '1'
   process.env.MUSETALK_TIMEOUT_MS = '30000'
+  process.env.MUSETALK_UPLOAD_TIMEOUT_MS = '180000'
   return { root, videoPath, directory, state, identity }
 }
 
@@ -104,7 +105,7 @@ function remoteBudget(t: TestContext) {
   return { expire: () => controller.abort(new DOMException('remote budget expired', 'TimeoutError')), budgets }
 }
 
-test('a long narration gets a duration-sized default remote budget and still cancels its pending job on expiry', async t => {
+test('a long narration gets a duration-sized default remote budget and preserves its pending job on expiry', async t => {
   const f = await fixture(t), duration = 1045.056
   const realFfprobe = (await exec('which', ['ffprobe'])).stdout.trim(), bin = path.join(f.root, 'bin')
   await fs.mkdir(bin)
@@ -129,8 +130,8 @@ if(info.format)info.format.duration=${JSON.stringify(String(duration))}}process.
   f.state.onPoll = () => controller.abort(new DOMException('long narration remote budget expired', 'TimeoutError'))
   await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal() }), /long narration remote budget expired/)
   assert.equal(budgets[0], Math.ceil(duration * 1000), 'the first remote deadline must be based on the probed full narration')
-  assert.equal(f.state.submissions, 1); assert.equal(f.state.deletes, 1)
-  assert.equal([...f.state.jobs.values()][0].status, 'cancelled')
+  assert.equal(f.state.submissions, 1); assert.equal(f.state.deletes, 0)
+  assert.equal([...f.state.jobs.values()][0].status, 'running')
 })
 
 test('a completed remote result still downloads when its remote service budget expires', async t => {
@@ -210,14 +211,88 @@ test('native 25fps and a changed quality profile use separate results without ov
   assert.equal(f.state.submissions, 2)
 })
 
-test('an accepted submission with a lost response resumes by the same deterministic request id', async t => {
-  const f = await fixture(t); f.state.dropSubmission = true; f.state.pending = true
-  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal() }), /fetch failed|socket|closed/)
-  assert.equal(f.state.jobs.size, 1)
+test('an accepted submission with a lost response automatically retries the same deterministic request id', { timeout: 10000 }, async t => {
+  const f = await fixture(t); f.state.dropSubmission = true
   await prepareScienceMusetalkVideo(f, { signal: signal() })
   assert.equal(f.state.jobs.size, 1, 'resubmission reuses the accepted backend job')
   assert.equal(f.state.submissions, 2)
-  assert.equal(f.state.retries, 1)
+  assert.equal(f.state.retries, 0)
+  assert.equal(f.state.deletes, 0)
+})
+
+test('exhausted lost acknowledgements retain the unknown job checkpoint and resume without cancelling GPU work', { timeout: 10000 }, async t => {
+  const f = await fixture(t); f.state.dropSubmissions = 3; f.state.pending = true
+  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal() }), /fetch failed|socket|closed/)
+  assert.equal(f.state.submissions, 3)
+  assert.equal(f.state.jobs.size, 1)
+  assert.equal(f.state.deletes, 0)
+  const work = (await fs.readdir(f.directory)).find(name => name.startsWith('musetalk-'))!
+  const checkpointPath = path.join(f.directory, work, 'musetalk.json')
+  const checkpoint = JSON.parse(await fs.readFile(checkpointPath, 'utf8'))
+  assert.equal(checkpoint.submitted, true)
+  assert.equal(checkpoint.jobId, undefined)
+  assert.equal([...f.state.jobs.keys()][0], checkpoint.requestId)
+  for (const job of f.state.jobs.values()) job.status = 'completed'
+  await prepareScienceMusetalkVideo(f, { signal: signal() })
+  const resumed = JSON.parse(await fs.readFile(checkpointPath, 'utf8'))
+  assert.equal(resumed.requestId, checkpoint.requestId)
+  assert.equal(resumed.audioSha256, checkpoint.audioSha256)
+  assert.equal(resumed.jobId, checkpoint.requestId)
+  assert.equal(f.state.jobs.size, 1)
+  assert.equal(f.state.retries, 0)
+  assert.equal(f.state.deletes, 0)
+})
+
+test('audio upload gets a longer deadline and a per-request timeout retries without cancelling its original ID', { timeout: 10000 }, async t => {
+  const f = await fixture(t), budgets: number[] = [], requestIds: string[] = []
+  const timeout = AbortSignal.timeout.bind(AbortSignal), fetch = globalThis.fetch
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => { budgets.push(milliseconds); return timeout(milliseconds) })
+  t.mock.method(globalThis, 'fetch', async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (String(url).endsWith('/v1/lipsync')) {
+      requestIds.push(String((init?.body as FormData).get('request_id')))
+      assert.equal(budgets.at(-1), 180_000)
+      if (requestIds.length === 1) throw new DOMException('upload response timed out', 'TimeoutError')
+    }
+    return fetch(url, init)
+  })
+  await prepareScienceMusetalkVideo(f, { signal: signal() })
+  assert.equal(requestIds.length, 2)
+  assert.equal(new Set(requestIds).size, 1)
+  assert.ok(budgets.includes(60_000), 'health and status keep the shorter request deadline')
+  assert.equal(f.state.jobs.size, 1)
+  assert.equal(f.state.deletes, 0)
+})
+
+test('transient job polling errors retry the existing task without another audio submission', { timeout: 10000 }, async t => {
+  const f = await fixture(t); f.state.failedPoll = true
+  f.state.onPoll = () => { if (f.state.polls === 2) f.state.failedPoll = false }
+  await prepareScienceMusetalkVideo(f, { signal: signal() })
+  assert.equal(f.state.polls, 2)
+  assert.equal(f.state.submissions, 1)
+  assert.equal(f.state.deletes, 0)
+})
+
+test('an explicit cancellation during network backoff stops retries and cancels the accepted task', { timeout: 10000 }, async t => {
+  const f = await fixture(t), controller = new AbortController()
+  f.state.pending = true; f.state.failedPoll = true
+  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: controller.signal,
+    report: message => { if (/重试/.test(message)) controller.abort(new Error('cancel network retry')) } }), /cancel network retry|abort/i)
+  assert.equal(f.state.polls, 1)
+  assert.equal(f.state.submissions, 1)
+  assert.equal(f.state.deletes, 1)
+  assert.equal([...f.state.jobs.values()][0].status, 'cancelled')
+})
+
+test('a conflicting submission is never automatically retried or deleted', { timeout: 10000 }, async t => {
+  const f = await fixture(t), fetch = globalThis.fetch
+  let submissions = 0
+  t.mock.method(globalThis, 'fetch', async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (String(url).endsWith('/v1/lipsync')) { submissions++; return new Response('conflicting audio', { status: 409 }) }
+    return fetch(url, init)
+  })
+  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal() }), /HTTP 409/)
+  assert.equal(submissions, 1)
+  assert.equal(f.state.deletes, 0)
 })
 
 test('presenter normalization succeeds when the Mac hardware encoder cannot open a compression session', async t => {
@@ -257,11 +332,12 @@ test('wrong driving audio is rejected even when the output duration matches', as
   assert.equal(f.state.submissions, 1)
 })
 
-test('a polling service error cancels outstanding work before the workflow falls back to intro-only', async t => {
+test('exhausted polling service errors preserve accepted GPU work and its checkpoint', { timeout: 10000 }, async t => {
   const f = await fixture(t); f.state.pending = true; f.state.failedPoll = true
   await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal() }), /HTTP 500/)
-  assert.equal(f.state.deletes, 1)
-  assert.equal([...f.state.jobs.values()][0].status, 'cancelled')
+  assert.equal(f.state.polls, 3)
+  assert.equal(f.state.deletes, 0)
+  assert.equal([...f.state.jobs.values()][0].status, 'running')
 })
 
 test('a sub-frame tail may be padded, but a short presenter cannot be looped over the full narration', async t => {
@@ -287,12 +363,12 @@ test('cancellation releases the remote GPU job and a subsequent invocation expli
   assert.equal(f.state.retries, 1)
 })
 
-test('the remote service time budget stops polling and sends cancellation instead of leaving expensive work running', async t => {
+test('the remote service time budget stops polling while retaining the original remote work for recovery', async t => {
   const f = await fixture(t)
   f.state.pending = true
   process.env.MUSETALK_TIMEOUT_MS = '1000'
   await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal() }))
-  assert.equal(f.state.deletes, 1)
+  assert.equal(f.state.deletes, 0)
   assert.ok(f.state.polls > 0)
 })
 
