@@ -471,81 +471,89 @@ test('unsubmitted legacy narration is cleaned with its local hash while submitte
   assert.equal(intros, 0)
 })
 
-test('ambiguous publications automatically retry with fresh persisted identities until a trusted submission', async t => {
+test('ambiguous publications retain the original identity and block automatic or explicit redispatch', { timeout: 5000 }, async t => {
   const h = fixture(t), job = await prepared(h)
   h.service.produce(job.id); await h.service.waitForIdle()
   const file = path.join(h.root, 'jobs', job.id, 'job.json')
   const checkpoint = h.options.uploadRuntime!.inspectSocialUploadCheckpoint
-  const confirm = h.options.uploadRuntime!.confirmSocialUpload
   let confirmations = 0, resets = 0
   const uncertain = new Set<string>()
-  h.options.uploadRuntime!.confirmSocialUpload = async (payload, result, options) => {
-    if (++confirmations < 6) { uncertain.add(payload.jobId); throw new Error('发表响应已丢失') }
-    return confirm(payload, result, options)
+  h.options.uploadRuntime!.confirmSocialUpload = async payload => {
+    confirmations++; uncertain.add(payload.jobId); throw new Error('发表响应已丢失')
   }
   h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async payload => uncertain.has(payload.jobId)
     ? { action: 'manual', phase: 'publish_requested', message: '发表结果不明确' } : checkpoint(payload)
-  h.options.uploadRuntime!.resetSocialUploadAttempt = async (payload, options) => {
-    assert.equal(options?.allowDuplicateSubmission, true)
-    assert.ok(uncertain.has(payload.jobId)); resets++; return {}
-  }
+  h.options.uploadRuntime!.resetSocialUploadAttempt = async () => { resets++; assert.fail('An ambiguous publication must never reset its upload') }
   h.service.upload(job.id); await h.service.waitForIdle()
-  const accounts = new Set<string>(), identities = new Set<string>()
-  for (let attempt = 1; attempt <= 5; attempt++) {
+  const original = JSON.parse(fs.readFileSync(file, 'utf8')).uploadAttempt
+  assert.equal(original.id, `${job.id}-baijiahao`)
+  assert.equal(original.dispatched, true)
+  for (let attempt = 0; attempt < 3; attempt++) {
     const current = h.service.detail(job.id)
-    assert.equal(current.status, 'retry_wait'); assert.equal(current.uploadStatus, 'queued')
-    assert.equal(current.uploadRetry?.attempt, attempt); assert.equal(current.executionActive, false)
-    assert.match(current.message, /自动.*重传/)
+    assert.equal(current.status, 'needs_attention'); assert.equal(current.uploadStatus, 'blocked')
+    assert.equal(current.failureKind, 'action_required')
+    assert.equal(current.uploadRetry, undefined); assert.equal(current.executionActive, false)
+    assert.match(current.message, /不自动重传/)
     const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
-    identities.add(stored.uploadAttempt.id); accounts.add(stored.uploadAttempt.accountName)
-    const before = h.calls.upload
+    assert.equal(stored.uploadAttempt.id, original.id)
+    assert.equal(stored.uploadAttempt.inputDigest, original.inputDigest)
+    assert.deepEqual(stored.uploadAttempt.payload, original.payload)
+    assert.equal(stored.uploadAttempt.status, 'uncertain')
+    assert.equal(stored.uploadHistory, undefined)
     assert.deepEqual(h.service.runAutomaticExports(), [])
-    assert.equal(h.calls.upload, before, 'backoff does not dispatch early')
-    stored.uploadRetry.nextRetryAt = new Date(0).toISOString()
-    fs.writeFileSync(file, JSON.stringify(stored))
-    assert.deepEqual(h.service.runAutomaticExports(), [job.id]); await h.service.waitForIdle()
+    h.service.upload(job.id); await h.service.waitForIdle()
   }
-  const completed = h.service.detail(job.id), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
-  identities.add(stored.uploadAttempt.id)
-  assert.equal(completed.status, 'completed'); assert.equal(completed.uploadStatus, 'submitted')
-  assert.equal(completed.uploadRetry, undefined); assert.equal(h.calls.upload, 6); assert.equal(resets, 5)
-  assert.equal(identities.size, 6); assert.deepEqual([...accounts], [h.b.accountName])
-  assert.equal(stored.uploadHistory.length, 5)
-  assert.ok(stored.uploadHistory.every((item: any) => item.attempt.payload.videoPath === stored.uploadAttempt.payload.videoPath))
+  await h.service.stop()
+  const restarted = new ScienceWorkflowService(h.options)
+  t.after(() => restarted.stop())
+  assert.equal(restarted.detail(job.id).uploadStatus, 'blocked')
+  assert.deepEqual(restarted.runAutomaticExports(), [])
+  assert.equal(h.calls.upload, 1); assert.equal(confirmations, 1); assert.equal(resets, 0)
+  assert.deepEqual(h.payloads.map(payload => payload.jobId), [original.id])
   assert.equal(h.calls.produce, 1); assert.equal(h.calls.export, 1)
 })
 
-test('stopping an automatic reupload cancels its schedule and manual continuation can still retry', async t => {
+test('stopping a connection retry cancels its schedule and explicit continuation retains the original upload identity', { timeout: 5000 }, async t => {
   const h = fixture(t), job = await prepared(h)
   h.service.produce(job.id); await h.service.waitForIdle()
-  const checkpoint = h.options.uploadRuntime!.inspectSocialUploadCheckpoint
-  h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async () => ({ action: 'manual', phase: 'unknown', message: '上传结果不明' })
+  const runtime = h.options.uploadRuntime!.inspectSocialUploadAccountRuntime
+  h.options.uploadRuntime!.inspectSocialUploadAccountRuntime = async () => ({ ready: false, message: 'ECONNRESET：账号连接中断' })
+  h.options.uploadRuntime!.resetSocialUploadAttempt = async () => assert.fail('Connection recovery must preserve the original upload')
   h.service.upload(job.id); await h.service.waitForIdle()
   assert.equal(h.service.detail(job.id).status, 'retry_wait')
+  const file = path.join(h.root, 'jobs', job.id, 'job.json'), original = JSON.parse(fs.readFileSync(file, 'utf8')).uploadAttempt
+  assert.equal(original.dispatched, false); assert.equal(h.calls.upload, 0)
   h.service.cancel(job.id)
   assert.equal(h.service.detail(job.id).status, 'paused'); assert.equal(h.service.detail(job.id).uploadRetry, undefined)
   assert.deepEqual(h.service.runAutomaticExports(), [])
-  h.options.uploadRuntime!.inspectSocialUploadCheckpoint = checkpoint
+  h.options.uploadRuntime!.inspectSocialUploadAccountRuntime = runtime
   h.service.upload(job.id); await h.service.waitForIdle()
   assert.equal(h.service.detail(job.id).status, 'completed'); assert.equal(h.calls.upload, 1)
+  assert.equal(h.payloads[0]?.jobId, original.id)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).uploadHistory, undefined)
 })
 
-test('automatic upload retry resumes after a service restart and migrates old uncertain jobs', async t => {
+test('a scheduled connection retry resumes the original upload checkpoint after a service restart', { timeout: 5000 }, async t => {
   const h = fixture(t), job = await prepared(h)
   h.service.produce(job.id); await h.service.waitForIdle()
-  const checkpoint = h.options.uploadRuntime!.inspectSocialUploadCheckpoint
-  h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async () => ({ action: 'manual', phase: 'publish_requested', message: '上传结果待核对' })
+  const runtime = h.options.uploadRuntime!.inspectSocialUploadAccountRuntime
+  h.options.uploadRuntime!.inspectSocialUploadAccountRuntime = async () => ({ ready: false, message: 'ETIMEDOUT：账号连接超时' })
+  h.options.uploadRuntime!.resetSocialUploadAttempt = async () => assert.fail('A service restart must not reset the original upload')
   h.service.upload(job.id); await h.service.waitForIdle()
   const file = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
-  stored.status = 'needs_attention'; stored.autoUpload = false
-  delete stored.uploadRetry
+  assert.equal(stored.status, 'retry_wait'); assert.equal(stored.uploadAttempt.dispatched, false)
+  assert.deepEqual(h.service.runAutomaticExports(), [], 'The retry backoff must survive restart')
+  stored.uploadRetry.nextRetryAt = new Date(0).toISOString()
   fs.writeFileSync(file, JSON.stringify(stored))
-  h.options.uploadRuntime!.inspectSocialUploadCheckpoint = checkpoint
+  await h.service.stop()
+  h.options.uploadRuntime!.inspectSocialUploadAccountRuntime = runtime
   const restarted = new ScienceWorkflowService(h.options)
   t.after(() => restarted.stop())
   assert.equal(restarted.detail(job.id).uploadStatus, 'queued')
   assert.deepEqual(restarted.runAutomaticExports(), [job.id]); await restarted.waitForIdle()
   assert.equal(restarted.detail(job.id).status, 'completed'); assert.equal(h.calls.upload, 1)
+  assert.equal(h.payloads[0]?.jobId, stored.uploadAttempt.id)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).uploadHistory, undefined)
 })
 
 test('upload reattempts stop for actual platform blockers and mismatched receipt accounts', async t => {
@@ -568,31 +576,37 @@ test('upload reattempts stop for actual platform blockers and mismatched receipt
   assert.deepEqual(h.service.runAutomaticExports(), [])
 })
 
-test('a delayed trusted submission is adopted before a replacement upload and cancelled reset never dispatches', async t => {
+test('a delayed trusted submission is adopted through read-only verification and cancellation never redispatches', { timeout: 5000 }, async t => {
   for (const cancel of [false, true]) {
     const h = fixture(t), job = await prepared(h)
     h.service.produce(job.id); await h.service.waitForIdle()
-    h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async () => ({ action: 'manual', phase: 'publish_requested', message: '发表结果不明确' })
+    const checkpoint = h.options.uploadRuntime!.inspectSocialUploadCheckpoint
+    let uncertain = false
+    h.options.uploadRuntime!.confirmSocialUpload = async () => { uncertain = true; throw new Error('发表响应已丢失') }
+    h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async payload => uncertain
+      ? { action: 'manual', phase: 'publish_requested', message: '发表结果不明确' } : checkpoint(payload)
+    h.options.uploadRuntime!.resetSocialUploadAttempt = async () => assert.fail('Read-only verification must not reset an upload')
     h.service.upload(job.id); await h.service.waitForIdle()
-    let entered!: () => void, release!: () => void
-    const started = new Promise<void>(resolve => { entered = resolve }), hold = new Promise<void>(resolve => { release = resolve })
-    h.options.uploadRuntime!.resetSocialUploadAttempt = async () => {
-      entered(); await hold
-      return cancel ? {} : { result: { accountName: h.b.accountName, staged: true, saved: false, submitted: true, published: false,
+    const file = path.join(h.root, 'jobs', job.id, 'job.json'), original = JSON.parse(fs.readFileSync(file, 'utf8')).uploadAttempt
+    assert.equal(original.dispatched, true); assert.equal(h.calls.upload, 1)
+    h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async payload => {
+      assert.equal(payload.jobId, original.id)
+      if (cancel) h.service.cancel(job.id)
+      return { action: 'complete', phase: 'submitted', message: '已核验原提交', result: { accountName: h.b.accountName, staged: true, saved: false, submitted: true, published: false,
         publicationStatus: 'submitted', articleId: '12345', targetId: 'abc123', engine: 'fixture',
         editorUrl: 'https://baijiahao.baidu.com/builder/rc/edit?type=videoV2' } }
     }
-    h.service.upload(job.id); await started
-    if (cancel) h.service.cancel(job.id)
-    release(); await h.service.waitForIdle()
+    h.service.checkUpload(job.id); await h.service.waitForIdle()
     const current = h.service.detail(job.id)
     assert.equal(current.status, cancel ? 'paused' : 'completed')
-    assert.equal(current.uploadRetry, undefined); assert.equal(h.calls.upload, 0)
+    assert.equal(current.upload?.submitted, cancel ? undefined : true)
+    assert.equal(current.uploadRetry, undefined); assert.equal(h.calls.upload, 1); assert.equal(h.calls.save, 0)
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).uploadAttempt.id, original.id)
     assert.deepEqual(h.service.runAutomaticExports(), [])
   }
 })
 
-test('a replacement upload retains its own account verification window and rejects a foreign attempt identity', async t => {
+test('legacy retry identities retain their account verification window and reject a foreign task identity', { timeout: 5000 }, async t => {
   const h = fixture(t), job = await prepared(h)
   h.service.produce(job.id); await h.service.waitForIdle()
   h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async () => ({ action: 'manual', phase: 'unknown', message: '上传结果不明' })
@@ -600,7 +614,10 @@ test('a replacement upload retains its own account verification window and rejec
   h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async () => ({ action: 'manual', phase: 'blocked', message: '需要安全验证' })
   h.service.upload(job.id); await h.service.waitForIdle()
   const file = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
-  assert.match(stored.uploadAttempt.id, /-retry-/)
+  assert.equal(stored.uploadAttempt.id, `${job.id}-baijiahao`, 'Explicit recovery must not create a replacement identity')
+  stored.uploadAttempt.id = `${job.id}-baijiahao-retry-${randomUUID()}`
+  stored.uploadAttempt.payload.jobId = stored.uploadAttempt.id
+  fs.writeFileSync(file, JSON.stringify(stored))
   h.options.reviewUpload = async payload => {
     assert.equal(payload.jobId, stored.uploadAttempt.id); assert.equal(payload.accountName, h.b.accountName)
     return { jobId: payload.jobId, targetId: 'abc123', url: 'https://baijiahao.baidu.com/builder/rc/content',
@@ -616,26 +633,26 @@ test('a replacement upload retains its own account verification window and rejec
   await assert.rejects(h.service.reviewUpload(job.id), /上传记录与原账号或任务不一致/)
 })
 
-test('a temporary reset failure preserves automatic retry intent until the next successful upload', async t => {
+test('legacy replacement-upload flags stop automatic delivery without resetting or redispatching', { timeout: 5000 }, async t => {
   const h = fixture(t), job = await prepared(h)
   h.service.produce(job.id); await h.service.waitForIdle()
-  const checkpoint = h.options.uploadRuntime!.inspectSocialUploadCheckpoint
   h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async () => ({ action: 'manual', phase: 'publish_requested', message: '发表结果不明' })
   h.service.upload(job.id); await h.service.waitForIdle()
   let resets = 0
-  h.options.uploadRuntime!.resetSocialUploadAttempt = async () => {
-    if (++resets === 1) throw new Error('ETIMEDOUT：原编辑页连接超时')
-    return {}
-  }
-  h.service.upload(job.id); await h.service.waitForIdle()
-  assert.equal(h.service.detail(job.id).status, 'retry_wait'); assert.equal(h.calls.upload, 0)
+  h.options.uploadRuntime!.resetSocialUploadAttempt = async () => { resets++; assert.fail('Legacy retry flags must not reset an ambiguous upload') }
   const file = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
-  assert.equal(stored.uploadRestartPending, true)
-  stored.uploadRetry.nextRetryAt = new Date(0).toISOString()
+  stored.uploadRestartPending = true
+  stored.uploadRetry = { attempt: 1, nextRetryAt: new Date(0).toISOString() }
   fs.writeFileSync(file, JSON.stringify(stored))
-  h.options.uploadRuntime!.inspectSocialUploadCheckpoint = checkpoint
   assert.deepEqual(h.service.runAutomaticExports(), [job.id]); await h.service.waitForIdle()
-  assert.equal(h.service.detail(job.id).status, 'completed'); assert.equal(resets, 2); assert.equal(h.calls.upload, 1)
+  const current = h.service.detail(job.id), blocked = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(current.status, 'needs_attention'); assert.equal(current.failureKind, 'action_required')
+  assert.match(current.message, /停止自动重传/)
+  assert.equal(current.uploadRetry, undefined); assert.equal(blocked.uploadRestartPending, undefined)
+  assert.equal(blocked.uploadAttempt.id, stored.uploadAttempt.id)
+  assert.equal(blocked.uploadHistory, undefined)
+  assert.equal(resets, 0); assert.equal(h.calls.upload, 0); assert.equal(h.calls.save, 0)
+  assert.deepEqual(h.service.runAutomaticExports(), [])
 })
 
 test('a failed receipt recovery cannot mark a stale unverified submission as completed', async t => {
@@ -1295,23 +1312,32 @@ test('temporary browser connection failures retry the original upload without an
   assert.ok(h.service.detail(job.id).logs.some(log => /百家号连接暂时失败/.test(log.message)))
 })
 
-test('temporary connections and uncertain editors schedule further uploads while security challenges stop', async t => {
-  for (const scenario of ['connection', 'verification', 'uncertain']) {
+test('only temporary connections schedule upload retries while uncertain editors and security challenges stop', { timeout: 5000 }, async t => {
+  for (const scenario of ['connection', 'verification', 'uncertain', 'changed_editor']) {
     const h = fixture(t, { retryDelayMs: 0 }), job = await prepared(h)
     let checks = 0
-    if (scenario === 'uncertain') h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async () => {
-      checks++; return { action: 'manual', phase: 'uncertain', message: '原编辑页文案已变化，不能继续' }
+    if (scenario === 'uncertain' || scenario === 'changed_editor') h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async () => {
+      checks++; return { action: 'manual', phase: 'uncertain', message: scenario === 'uncertain'
+        ? '发表结果尚未确认' : '原编辑页文案已变化，不能继续' }
     }
     else h.options.uploadRuntime!.inspectSocialUploadAccountRuntime = async () => {
       checks++; return { ready: false, message: scenario === 'connection'
         ? '后台浏览器连接失败或响应超时，尚未检查登录状态；已保留原登录，请重试连接'
         : '平台要求人工安全验证，完成后重新检查' }
     }
+    h.options.uploadRuntime!.resetSocialUploadAttempt = async () => assert.fail('Connection retries and blocked editors must preserve the upload identity')
     h.service.produce(job.id, true); await h.service.waitForIdle()
-    assert.equal(h.service.detail(job.id).status, scenario === 'verification' ? 'needs_attention' : 'retry_wait')
-    assert.equal(Boolean(h.service.detail(job.id).uploadRetry), scenario !== 'verification')
+    const current = h.service.detail(job.id)
+    assert.equal(current.status, scenario === 'connection' ? 'retry_wait' : 'needs_attention')
+    assert.equal(current.failureKind, scenario === 'connection' ? 'temporary' : 'action_required')
+    assert.equal(Boolean(current.uploadRetry), scenario === 'connection')
     assert.equal(checks, scenario === 'connection' ? 4 : 1)
     assert.equal(h.calls.upload, 0); assert.equal(h.calls.save, 0)
+    const stored = JSON.parse(fs.readFileSync(path.join(h.root, 'jobs', job.id, 'job.json'), 'utf8'))
+    assert.equal(stored.uploadAttempt.id, `${job.id}-baijiahao`)
+    assert.equal(stored.uploadAttempt.payload.jobId, stored.uploadAttempt.id)
+    assert.equal(stored.uploadAttempt.dispatched, false)
+    assert.equal(stored.uploadHistory, undefined)
     assert.deepEqual(h.service.runAutomaticExports(), [])
   }
 })
