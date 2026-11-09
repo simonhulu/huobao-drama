@@ -82,7 +82,7 @@ interface StoredJob extends Omit<ScienceJob, 'sourceVideoUrl' | 'videoUrl' | 'la
   productionCompleted?: boolean; productionScriptHash?: string; productionAccountName?: string
   separateIntro?: boolean
   exportDispatched?: boolean; exportTask?: { taskId: string; projectHash: string }; videoPath?: string
-  exportRecovery?: { taskId: string; projectHash: string; zeroSince?: string; retryDispatchedAt?: string }
+  exportRecovery?: { taskId: string; projectHash: string; deadlineAt?: string; zeroSince?: string; retryDispatchedAt?: string }
   mainVideoPath?: string; presenterPath?: string
   uploadAttempt?: CbaUploadRecoveryCurrent; autoUpload?: boolean; automaticDelivery?: boolean; ownerPid?: number
   uploadRestartPending?: boolean; uploadRetryCount?: number
@@ -648,7 +648,12 @@ export class ScienceWorkflowService {
         throw error
       }
     }
-    const until = Date.now() + 90 * 60_000
+    const task = job.exportTask!
+    const priorRecovery = this.read(id).exportRecovery
+    const boundRecovery = priorRecovery?.taskId === task.taskId && priorRecovery.projectHash === task.projectHash ? priorRecovery : { ...task }
+    const savedDeadline = Date.parse(boundRecovery.deadlineAt || '')
+    const until = Number.isFinite(savedDeadline) ? savedDeadline : Date.now() + 90 * 60_000
+    if (!Number.isFinite(savedDeadline)) this.modify(id, { exportRecovery: { ...boundRecovery, deadlineAt: new Date(until).toISOString() } })
     for (;;) {
       signal.throwIfAborted()
       const { info, result } = await this.retryPlatform(id, '华生导出查询与下载', signal, async () => {
@@ -674,7 +679,7 @@ export class ScienceWorkflowService {
         this.report(id, '成片和横竖封面已就绪，可预览或上传到所选百家号', 'covers')
         return
       }
-      const task = job.exportTask!
+      if (Date.now() >= until) throw new ScienceWorkflowError('原导出等待已超过 90 分钟，任务编号已保留，可稍后继续核对原任务')
       const saved = this.read(id).exportRecovery
       let recovery = saved?.taskId === task.taskId && saved.projectHash === task.projectHash ? saved : { ...task }
       if (info.progress === 0 && !info.url) {
@@ -717,7 +722,6 @@ export class ScienceWorkflowService {
       }
       this.modify(id, { status: 'running' })
       this.report(id, `花生正在导出：${Math.round(info.progress)}%，完成后自动下载`)
-      if (Date.now() > until) throw new ScienceWorkflowError('导出仍在进行，任务编号已保留，可稍后继续查询')
       await wait()
     }
   }

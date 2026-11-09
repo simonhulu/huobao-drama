@@ -37,7 +37,7 @@ function estimateBitrateKbps({ width, height }: VideoDimensions): number {
  * 可通过环境变量覆盖：
  *   VIDEO_BITRATE_KBPS  - 平均码率（kbps）
  *   VIDEO_MAX_BITRATE_KBPS - 最大码率（kbps），默认 1.5 倍平均码率
- *   VIDEO_QUALITY       - VideoToolbox 的 -q:v（0-100，越小质量越好）
+ *   VIDEO_QUALITY       - Apple Silicon VideoToolbox 的 -q:v（0-100，越小质量越好）
  *   VIDEO_CRF           - libx264 的 CRF（默认 23）
  */
 export function getVideoEncoderOptions(dimensions?: VideoDimensions): string[] {
@@ -54,7 +54,8 @@ export function getVideoEncoderOptions(dimensions?: VideoDimensions): string[] {
       '-b:v', `${bitrateKbps}k`,
       '-maxrate', `${maxBitrateKbps}k`,
       '-bufsize', `${bufsizeKbps}k`,
-      '-q:v', quality,
+      // Intel VideoToolbox rejects qscale; bitrate control works on both architectures.
+      ...(os.arch() === 'arm64' ? ['-q:v', quality] : []),
     ]
   }
 

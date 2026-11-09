@@ -2213,6 +2213,52 @@ test('export setup may retry before dispatch but never replays an uncertain disp
   assert.equal(attempts, 2, 'a later resume still must not resend the uncertain POST')
 })
 
+test('an expired export polling deadline survives a service restart without creating another export', async t => {
+  const h = fixture(t), job = await prepared(h)
+  const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
+  const deadlineAt = new Date(Date.now() - 60_000).toISOString()
+  const file = pendingHuasheng(h, job.id, { productionCompleted: true, exportDispatched: true, exportTask,
+    exportRecovery: { ...exportTask, deadlineAt } })
+  let checks = 0
+  h.options.exportApi = { ...h.options.exportApi!, inspectHuashengExport: async () => {
+    if (++checks > 1) throw new Error('expired export deadline was reset')
+    return { progress: 97, url: null, filename: null }
+  } }
+  const resumed = new ScienceWorkflowService(h.options)
+  t.after(() => resumed.stop())
+  resumed.produce(job.id, false); await resumed.waitForIdle()
+  assert.match(resumed.detail(job.id).message, /90 分钟/)
+  assert.equal(checks, 1); assert.equal(h.calls.export, 0); assert.equal(h.calls.downloadExport, 0)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).exportRecovery.deadlineAt, deadlineAt)
+})
+
+test('a completed export still downloads after its persisted polling deadline', async t => {
+  const h = fixture(t), job = await prepared(h)
+  const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
+  pendingHuasheng(h, job.id, { productionCompleted: true, exportDispatched: true, exportTask,
+    exportRecovery: { ...exportTask, deadlineAt: new Date(0).toISOString() } })
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(h.calls.export, 0); assert.equal(h.calls.downloadExport, 1)
+})
+
+test('initializing an export polling deadline preserves zero-progress and recovery dispatch checkpoints', async t => {
+  const h = fixture(t), job = await prepared(h)
+  const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }
+  const zeroSince = new Date(Date.now() - 6 * 60_000).toISOString(), retryDispatchedAt = new Date().toISOString()
+  const file = pendingHuasheng(h, job.id, { productionCompleted: true, exportDispatched: true, exportTask,
+    exportRecovery: { ...exportTask, zeroSince, retryDispatchedAt } })
+  h.options.exportApi = { ...h.options.exportApi!, inspectHuashengExport: async () => {
+    const recovery = JSON.parse(fs.readFileSync(file, 'utf8')).exportRecovery
+    assert.equal(recovery.zeroSince, zeroSince); assert.equal(recovery.retryDispatchedAt, retryDispatchedAt)
+    assert.ok(Date.parse(recovery.deadlineAt) > Date.now())
+    return { progress: 100, url: 'https://fixture.invalid/video.mp4', filename: null }
+  } }
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(h.calls.export, 0); assert.equal(h.calls.downloadExport, 1)
+})
+
 test('a stalled zero-percent export retries the verified original version once and downloads it', async t => {
   const h = fixture(t), job = await prepared(h)
   const exportTask = { taskId: 'task1', projectHash: 'a'.repeat(64) }

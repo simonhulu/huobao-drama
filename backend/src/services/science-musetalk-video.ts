@@ -274,7 +274,7 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       await exec('ffmpeg', ['-nostdin', '-v', 'error', '-i', raw, '-f', 'null', '-'], { signal, timeout: 180_000 })
       options.report?.('正在规范主播视频帧率，保留正文原声')
       const targetFrames = Math.max(1, Math.round(main.duration * main.rate))
-      // This small 360px clip avoids scarce VideoToolbox sessions used by full-size renders.
+      // Older Intel VideoToolbox can reject 360px sessions even when 1080p encoding works.
       await exec('ffmpeg', ['-nostdin', '-v', 'error', '-n', '-i', raw, '-an', '-vf',
         `setpts=PTS-STARTPTS,fps=${main.fps},tpad=stop_mode=clone:stop_duration=0.15,trim=end_frame=${targetFrames},setsar=1`,
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-threads', '2', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', temporary], { signal, timeout: 180_000 })
