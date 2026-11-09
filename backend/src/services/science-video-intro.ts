@@ -111,7 +111,14 @@ async function probeVideo(filename: string, signal: AbortSignal): Promise<VideoI
     ...(copyCompatible ? { copy: { timeScale: timeScale!, frames, colorOptions } } : {}) }
 }
 
-function movingIntroMask(width: number, height: number, diameter: number, margin: number, border: number, duration: number) {
+function movingIntroMask(width: number, height: number, diameter: number, margin: number, border: number, duration: number): string {
+  // Only the brief moving layer needs the per-pixel warp, not a full-resolution canvas.
+  if (height > 360) {
+    const ratio = 360 / height, reducedWidth = Math.ceil(width * ratio / 2) * 2
+    return `scale=${reducedWidth}:360:flags=lanczos,`
+      + movingIntroMask(reducedWidth, 360, diameter * ratio, margin * ratio, border * ratio, duration)
+      + `,scale=${width}:${height}:flags=lanczos`
+  }
   const cropSize = Math.min(width, height) * .5
   const cropY = Math.max(0, Math.min(height - cropSize, height * .28 - cropSize / 2))
   // Inverse-map a moving crop onto a fixed canvas, so neither scaling nor masking can resize the timeline.

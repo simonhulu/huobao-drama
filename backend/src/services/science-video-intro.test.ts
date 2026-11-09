@@ -241,6 +241,20 @@ test('the intro visibly shrinks and travels into the lower-right circle before s
   assert.ok(Math.abs(await frequency(result.videoPath, 1.25) - 880) < 15, 'main audio remains alone; presenter audio is excluded')
 })
 
+test('HD motion stays correctly framed while the final presenter and output retain full resolution', async t => {
+  const f = await fixture(t)
+  await clip(f.videoPath, 'blue', 880, '1280x720', 15, 48000, 2, 1.2)
+  const result = await prepareScienceVideoWithIntro(f, { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath })
+  const video = (await probe(result.videoPath)).streams.find((item: any) => item.codec_type === 'video')
+  assert.deepEqual([video.width, video.height], [1280, 720])
+  const moving = await pixel(result.videoPath, .533, { x: 1096, y: 556, width: 8, height: 8 })
+  assert.ok(moving[0]! > 200 && moving[2]! < 40, `the shrinking intro remains at its expected HD position: ${moving}`)
+  const outside = await pixel(result.videoPath, .533, { x: 400, y: 200, width: 8, height: 8 })
+  assert.ok(outside[2]! > 200 && outside[0]! < 40, `main is revealed outside the moving layer: ${outside}`)
+  const circle = await pixel(result.videoPath, 1.35, { x: 1164, y: 604, width: 8, height: 8 })
+  assert.ok(circle[0]! + circle[1]! > 70, `full-size presenter remains visible in the final window: ${circle}`)
+})
+
 test('a missing or too-short synchronized presenter is rejected instead of looping or substituting silence', async t => {
   const f = await fixture(t), previous = process.env.SCIENCE_PRESENTER_VIDEO_PATH
   delete process.env.SCIENCE_PRESENTER_VIDEO_PATH
