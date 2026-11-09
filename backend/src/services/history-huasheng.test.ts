@@ -303,7 +303,7 @@ test('selected inspection does not expand to other projects or versions of the s
   assert.equal(inspected.length, 1)
 })
 
-test('manual status check reconnects a closed dedicated browser once and completes the original check without submitting', async t => {
+test('status checks retain a closed browser error until the user explicitly opens the login window', async t => {
   let connected = false
   let opened = 0
   const inspected: string[] = []
@@ -322,8 +322,15 @@ test('manual status check reconnects a closed dedicated browser once and complet
   db.close()
   f.queue.checkProduction(1)
   await productionFinished(f.queue)
+  assert.equal(opened, 0)
+  assert.deepEqual(inspected, [`https://www.huasheng.cn/video/${selected.id}`])
+  assert.equal(f.queue.getJob(selected.id).productionStatus, 'not_started')
+  assert.match(f.queue.getJob(selected.id).productionCheckError!, /未连接.*登录窗口/)
+  assert.equal(f.queue.getJob(selected.id).productionCheckedAt, null)
+  await f.queue.openBrowser()
   assert.equal(opened, 1)
-  assert.deepEqual(inspected, [`https://www.huasheng.cn/video/${selected.id}`, `https://www.huasheng.cn/video/${selected.id}`])
+  f.queue.checkProduction(1)
+  await productionFinished(f.queue)
   assert.equal(f.queue.getJob(selected.id).productionStatus, 'completed')
   assert.equal(f.queue.getJob(selected.id).productionCheckError, null)
   assert.equal(f.queue.getJob(selected.id).status, 'submitted')
@@ -332,7 +339,7 @@ test('manual status check reconnects a closed dedicated browser once and complet
   assert.equal(f.queue.monitoring.enabled, false)
 })
 
-test('automatic checks never relaunch a closed browser, while a manual batch opens at most one login window', async t => {
+test('automatic and manual status batches never open login windows on connection failure', async t => {
   let opened = 0
   const f = fixture(t, {
     inspectHuashengProject: async () => { throw Object.assign(new Error('花生专用浏览器未连接'), { code: 'browser_unavailable' }) },
@@ -341,15 +348,15 @@ test('automatic checks never relaunch a closed browser, while a manual batch ope
   await f.queue.enqueue(1)
   await f.queue.enqueue(2)
   const db = new Database(f.databasePath)
-  db.exec("UPDATE history_huasheng_jobs SET project_url='https://www.huasheng.cn/video/' || id, production_status='creating', production_message='上次在创作中'")
+  db.exec("UPDATE history_huasheng_jobs SET project_url='https://www.huasheng.cn/video/' || id, status='submitted', production_status='creating', production_message='上次在创作中'")
   db.close()
   f.queue.checkProduction(undefined, { automatic: true })
   await productionFinished(f.queue)
   assert.equal(opened, 0)
   f.queue.checkProduction()
   await productionFinished(f.queue)
-  assert.equal(opened, 1)
-  assert.match(f.queue.getJob(2).productionCheckError!, /扫码登录/)
+  assert.equal(opened, 0)
+  assert.match(f.queue.getJob(2).productionCheckError!, /专用浏览器未连接/)
   for (const job of f.queue.listJobs()) {
     assert.equal(job.productionStatus, 'creating')
     assert.equal(job.productionCheckedAt, null)
@@ -358,10 +365,10 @@ test('automatic checks never relaunch a closed browser, while a manual batch ope
   assert.equal(f.queue.monitoring.enabled, false)
 })
 
-test('manual connection recovery stops on abort and never hides a browser profile conflict', async t => {
+test('status checks preserve browser profile conflicts without attempting connection recovery', async t => {
   const f = fixture(t, {
     inspectHuashengProject: async () => { throw Object.assign(new Error('该端口不是花生专用浏览器'), { code: 'browser_unavailable' }) },
-    openHuashengBrowser: async () => { throw new Error('该端口不是花生专用浏览器，请检查配置') },
+    openHuashengBrowser: async () => assert.fail('a status check cannot open a browser to repair a profile conflict'),
   })
   const job = (await f.queue.enqueue(1))!
   const db = new Database(f.databasePath)
@@ -369,17 +376,8 @@ test('manual connection recovery stops on abort and never hides a browser profil
   db.close()
   f.queue.checkProduction(1)
   await productionFinished(f.queue)
-  assert.match(f.queue.getJob(job.id).productionCheckError!, /该端口不是花生专用浏览器，请检查配置/)
+  assert.match(f.queue.getJob(job.id).productionCheckError!, /该端口不是花生专用浏览器/)
   assert.equal(f.queue.getJob(job.id).productionCheckedAt, null)
-  const entered = deferred()
-  const release = deferred()
-  f.driver.openHuashengBrowser = async () => { entered.resolve(); await release.promise; return { status: 'ready', message: '已登录' } }
-  f.queue.checkProduction(1)
-  await entered.promise
-  const stopping = f.queue.stop()
-  release.resolve()
-  await stopping
-  assert.match(f.queue.getJob(job.id).productionCheckError!, /已取消/)
   assert.equal(f.calls.run, 0)
 })
 

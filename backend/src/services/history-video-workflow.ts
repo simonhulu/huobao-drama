@@ -255,8 +255,10 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
           else sql.prepare('UPDATE history_dual_production SET huasheng_error=? WHERE source_id=? AND script_sha256=?').run(errorText(error),...key)
         }
       }
-      if(activeHuasheng?.projectUrl && activeHuasheng.productionStatus!=='completed' && Date.now()>row.next_check_at) {
-        try { await queue!.checkProduction(row.source_id) }
+      // Accepted work needs progress for delivery, scoped to its original cloud job.
+      if(activeHuasheng?.status==='submitted' && ['queued','creating'].includes(activeHuasheng.productionStatus)
+        && Date.now()>row.next_check_at) {
+        try { await queue!.checkProduction(row.source_id,{automatic:true,jobIds:[row.huasheng_job_id]}) }
         catch(error) { sql.prepare('UPDATE history_dual_production SET huasheng_error=? WHERE source_id=? AND script_sha256=?').run(errorText(error),...key) }
         sql.prepare('UPDATE history_dual_production SET next_check_at=? WHERE source_id=? AND script_sha256=?').run(Date.now()+60000,...key)
       }

@@ -49,20 +49,22 @@ test('monitoring is opt-in, durable, interval-limited and never submits or downl
   assert.ok(f.queue.monitoring.lastCheckedAt)
   assert.ok(f.queue.monitoring.nextCheckAt)
   assert.equal(f.queue.runMonitoring(), false)
+  const settled = f.queue.monitoring
   f.advance(60_000)
-  assert.equal(f.queue.runMonitoring(), true)
+  assert.equal(f.queue.runMonitoring(), false)
   await finish(f.queue)
   assert.equal(f.inspections(), 1, 'completed projects leave the recurring inspection set')
+  assert.deepEqual(f.queue.monitoring, settled, 'idle monitoring does not acquire a lease or reschedule checks')
   const restarted = new HistoryHuashengService(f.options)
   t.after(() => restarted.close())
   assert.equal(restarted.monitoring.enabled, true)
-  assert.equal(restarted.runMonitoring(), false, 'restart preserves the next due time')
+  assert.equal(restarted.runMonitoring(), false, 'an idle restart does not schedule external work')
 })
 
 test('recurring checks exclude canceled and stale versions, while explicit batch checks retain their existing scope', async t => {
   const f = fixture(t)
   for (let id = 1; id <= 3; id++) await f.queue.enqueue(id)
-  f.sql.prepare("UPDATE history_huasheng_jobs SET project_url='https://www.huasheng.cn/video/' || id, status='submitted'").run()
+  f.sql.prepare("UPDATE history_huasheng_jobs SET project_url='https://www.huasheng.cn/video/' || id, status='submitted', production_status='creating'").run()
   f.sql.prepare("UPDATE history_huasheng_jobs SET status='canceled' WHERE source_id=2").run()
   f.sql.prepare("UPDATE history_huasheng_jobs SET script_sha256='outdated' WHERE source_id=3").run()
   f.queue.setMonitoring(true)
@@ -77,7 +79,7 @@ test('recurring checks exclude canceled and stale versions, while explicit batch
 test('multiple workers share the due-time claim and disabling monitoring stops future checks', async t => {
   const f = fixture(t)
   const job = (await f.queue.enqueue(1))!
-  f.sql.prepare("UPDATE history_huasheng_jobs SET project_url=?, status='submitted' WHERE id=?")
+  f.sql.prepare("UPDATE history_huasheng_jobs SET project_url=?, status='submitted', production_status='creating' WHERE id=?")
     .run('https://www.huasheng.cn/video/123', job.id)
   const other = new HistoryHuashengService(f.options)
   t.after(() => other.close())
@@ -108,6 +110,36 @@ test('monitoring settings enforce local command guards without starting browser 
   assert.equal(f.inspections(), 0)
   assert.equal(f.submissions(), 0)
   assert.equal((await (await route.request('/huasheng')).json()).data.monitoring.enabled, true)
+})
+
+test('recurring checks only inspect accepted cloud work and leave blocked or unresolved tasks for the user', async t => {
+  const f = fixture(t)
+  const cases = [
+    ['submitted', 'queued', 0], ['submitted', 'creating', 0], ['submitted', 'not_started', 0],
+    ['queued', 'not_started', 0], ['running', 'creating', 0], ['failed', 'creating', 0],
+    ['needs_attention', 'not_started', 0], ['waiting_login', 'creating', 0], ['submitted', 'completed', 0],
+    ['submitted', 'creating', 1],
+  ] as const
+  const jobs = []
+  for (const [index, [status, production, canceled]] of cases.entries()) {
+    const job = (await f.queue.enqueue(index + 1))!
+    jobs.push(job)
+    f.sql.prepare("UPDATE history_huasheng_jobs SET project_url=?, status=?, production_status=?, cancel_requested=? WHERE id=?")
+      .run(`https://www.huasheng.cn/video/${job.id}`, status, production, canceled, job.id)
+  }
+  const unresolved = (await f.queue.enqueue(cases.length + 1))!
+  f.sql.prepare("UPDATE history_huasheng_jobs SET status='needs_attention',checkpoint='create_pending' WHERE id=?").run(unresolved.id)
+  f.options.driver.openHuashengBrowser = async () => assert.fail('monitoring cannot open a browser')
+  f.queue.setMonitoring(true)
+  assert.equal(f.queue.runMonitoring(), true)
+  await finish(f.queue)
+  assert.equal(f.inspections(), 2)
+  assert.ok(f.queue.getJob(jobs[0]!.id).productionCheckedAt)
+  assert.ok(f.queue.getJob(jobs[1]!.id).productionCheckedAt)
+  for (const job of [...jobs.slice(2), unresolved]) assert.equal(f.queue.getJob(job.id).productionCheckedAt, null)
+  f.advance(600_000)
+  assert.equal(f.queue.runMonitoring(), false)
+  assert.equal(f.submissions(), 0)
 })
 
 test('failed inspections back off and retain the last observed state without retrying creation', async t => {

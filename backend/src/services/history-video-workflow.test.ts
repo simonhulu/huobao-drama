@@ -121,6 +121,44 @@ test('one accepted manuscript starts both producers once and retries reuse the d
   assert.equal(state.episode_id,500+value.id)
 })
 
+for (const status of ['needs_attention', 'waiting_login', 'failed', 'canceled']) {
+  test(`dual reconciliation does not poll a ${status} cloud project`, async()=>{
+    const value=source(),f=fixture(value.id),jobId=completedHuasheng(value.id,{status,productionStatus:'creating'})
+    recordHistoryDualProduction(db.$client,value.id,hash(script),jobId)
+    db.$client.prepare("UPDATE history_dual_production SET huasheng_state='started',motion_state='completed',export_requested=1 WHERE source_id=?").run(value.id)
+    persistedExport(value.id,jobId)
+    f.deps.queue.getJob=()=>({id:jobId,sourceId:value.id,status,productionStatus:'creating',projectUrl:'https://www.huasheng.cn/video/123'})
+    let checks=0
+    f.deps.queue.checkProduction=()=>{checks++;return {checking:true}}
+    await runHistoryDualProductionPass(f.deps)
+    assert.equal(checks,0,'blocked or stopped work must wait for an explicit user action')
+    assert.equal(f.counts().huashengCalls,0)
+    assert.equal(huashengSchema.getJob(jobId).status,status)
+    assert.equal(huashengSchema.getJob(jobId).productionCheckedAt,null)
+  })
+}
+
+for (const productionStatus of ['not_started', 'queued', 'creating', 'completed']) {
+  test(`dual delivery only polls accepted unfinished cloud work: ${productionStatus}`, async()=>{
+    const value=source(),f=fixture(value.id),jobId=completedHuasheng(value.id,{productionStatus})
+    recordHistoryDualProduction(db.$client,value.id,hash(script),jobId)
+    db.$client.prepare("UPDATE history_dual_production SET huasheng_state='started',motion_state='completed',export_requested=1 WHERE source_id=?").run(value.id)
+    persistedExport(value.id,jobId)
+    f.deps.queue.getJob=()=>({id:jobId,sourceId:value.id,status:'submitted',productionStatus,projectUrl:'https://www.huasheng.cn/video/123'})
+    const checks:unknown[]=[]
+    f.deps.queue.checkProduction=(sourceId:number,options:unknown)=>{checks.push({sourceId,options});return {checking:true}}
+    assert.equal(huashengSchema.monitoring.enabled,false)
+    await runHistoryDualProductionPass(f.deps)
+    const expected=['queued','creating'].includes(productionStatus)
+      ? [{sourceId:value.id,options:{automatic:true,jobIds:[jobId]}}] : []
+    assert.deepEqual(checks,expected,'delivery checks are automatic and scoped to the accepted original job')
+    await runHistoryDualProductionPass(f.deps)
+    assert.deepEqual(checks,expected,'the same task waits for its next due time')
+    assert.equal(huashengSchema.monitoring.enabled,false,'delivery must not turn on general monitoring')
+    assert.equal(f.counts().huashengCalls,0)
+  })
+}
+
 for(const mode of ['new','failed-retry','backfill'] as const) {
   test(`an oversized ${mode} intent preserves its locked manuscript until the source starts a prepared new version`,async()=>{
     const oversized='历史主线与关键事实。'.repeat(600)

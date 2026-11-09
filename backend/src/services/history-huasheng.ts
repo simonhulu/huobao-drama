@@ -67,6 +67,8 @@ const jobColumns = `id, source_id AS sourceId, title, script, script_sha256 AS s
   created_at AS createdAt, updated_at AS updatedAt, cancel_requested AS cancelRequested, attempts, owner,
   production_status AS productionStatus, production_checked_at AS productionCheckedAt,
   production_message AS productionMessage, production_check_error AS productionCheckError, huasheng_account_name AS huashengAccountName`
+const automaticProductionFilter = `status='submitted' AND production_status IN ('queued','creating')
+  AND cancel_requested=0 AND project_url IS NOT NULL AND project_url <> ''`
 
 function publicJob(job: StoredJob): HuashengJob {
   const { script: _script, owner: _owner, ...result } = job
@@ -199,6 +201,8 @@ export class HistoryHuashengService {
       const row = this.db.prepare(`SELECT enabled, next_check_at AS nextCheckAt, owner, host, pid, 0 AS expiresAt
         FROM history_huasheng_monitor WHERE id=1`).get() as Lease & { enabled: number; nextCheckAt: number | null }
       if (!row.enabled || (row.nextCheckAt !== null && row.nextCheckAt > now) || this.leaseAlive(row)) return false
+      if (!this.db.prepare(`SELECT 1 FROM history_huasheng_jobs
+        WHERE ${this.visibleSourceFilter()} AND ${automaticProductionFilter} LIMIT 1`).get()) return false
       this.db.prepare('UPDATE history_huasheng_monitor SET owner=?, host=?, pid=? WHERE id=1')
         .run(this.owner, hostname(), process.pid)
       return true
@@ -519,8 +523,8 @@ export class HistoryHuashengService {
 
   get productionChecking(): boolean { return this.productionCheck !== null }
 
-  /** Explicit read-only batch. An optional selection scopes exact job IDs;
-   * otherwise snapshot linked and unresolved-create jobs, independently of UI pagination.
+  /** Read-only batch; never opens a browser. Manual selection includes historical
+   * and unresolved-create jobs; automatic checks only observe accepted cloud work.
    * Requests during a batch merge by URL; no source is enqueued or resumed here. */
   checkProduction(sourceId?: number, options: { automatic?: boolean; jobIds?: number[] } = {}): { checking: boolean } {
     if (this.stopping) throw new HuashengQueueError('花生服务正在停止，请稍后重试')
@@ -535,7 +539,7 @@ export class HistoryHuashengService {
         OR ((project_url IS NULL OR project_url = '') AND (checkpoint='create_pending' OR stage='create_pending')
           AND status IN ('needs_attention','failed','waiting_login','canceled'))) ${sourceId === undefined ? '' : 'AND source_id = ?'}
       ${selectedIds ? `AND id IN (${selectedIds.map(() => '?').join(',')})` : ''}
-      ${options.automatic ? "AND production_status <> 'completed' AND status <> 'canceled'" : ''}
+      ${options.automatic ? `AND ${automaticProductionFilter}` : ''}
       ORDER BY id DESC`).all(...(sourceId === undefined ? [] : [sourceId]), ...(selectedIds ?? [])) as StoredJob[]
     if (selectedIds && !jobs.length) return { checking: this.productionChecking }
     for (const job of jobs) {
@@ -658,7 +662,6 @@ export class HistoryHuashengService {
   }
 
   private async inspectPendingProjects(signal: AbortSignal) {
-    let browserRecoveryAttempted = false
     while ((this.productionPending.size || this.productionUnboundPending.size) && !signal.aborted) {
       await this.discoverPendingProjects(signal)
       // Prioritize current saved versions; failed/deleted sources still have inspectable historical projects.
@@ -708,19 +711,7 @@ export class HistoryHuashengService {
           const checkpoint = checkpoints.sort((a, b) => stages.indexOf(b.checkpoint ?? '') - stages.indexOf(a.checkpoint ?? ''))[0]?.checkpoint ?? null
           // The observer must close its own page on abort before settling. Retain the lease until then.
           const input = { projectUrl, checkpoint, signal: controller.signal, huashengAccountName: jobs[0]?.huashengAccountName }
-          let result: Awaited<ReturnType<NonNullable<HuashengBrowserDriver['inspectHuashengProject']>>>
-          try { result = await inspect.call(this.options.driver, input) }
-          catch (error) {
-            // A manual check authorizes one connection recovery, not a creation retry.
-            // Recurring checks never reopen a browser the user has closed.
-            if (!manual || browserRecoveryAttempted || (error as { code?: string } | null)?.code !== 'browser_unavailable') throw error
-            controller.signal.throwIfAborted()
-            browserRecoveryAttempted = true
-            const connection = await this.openBrowser()
-            controller.signal.throwIfAborted()
-            if (connection.status !== 'ready') throw new Error(connection.message)
-            result = await inspect.call(this.options.driver, input)
-          }
+          const result = await inspect.call(this.options.driver, input)
           controller.signal.throwIfAborted()
           if (!['not_started', 'queued', 'creating', 'completed'].includes(result.status) || typeof result.message !== 'string') {
             throw new Error('花生返回了无效的制作状态')
