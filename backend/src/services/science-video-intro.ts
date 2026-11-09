@@ -183,13 +183,25 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
 
 async function encodeVideo(args: string[], finish: string[], width: number, height: number, signal: AbortSignal) {
   const encoder = getVideoEncoderOptions({ width, height })
+  const run = async (parameters: string[]) => {
+    signal.throwIfAborted()
+    const rendering = exec('ffmpeg', [...args, ...parameters, ...finish],
+      { signal, killSignal: 'SIGKILL', timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+    const closed = new Promise<void>(resolve => rendering.child.once('close', () => resolve()))
+    const abort = () => { rendering.child.kill('SIGKILL') }
+    signal.addEventListener('abort', abort, { once: true })
+    try { if (signal.aborted) abort(); await rendering }
+    finally {
+      signal.removeEventListener('abort', abort)
+      if (signal.aborted) { abort(); await closed }
+    }
+  }
   try {
-    await exec('ffmpeg', [...args, ...encoder, ...finish], { signal, timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+    await run(encoder)
   } catch (error) {
     signal.throwIfAborted()
     if (!encoder.includes('h264_videotoolbox')) throw error
-    await exec('ffmpeg', [...args, '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', ...finish],
-      { signal, timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+    await run(['-c:v', 'libx264', '-preset', 'fast', '-crf', '20'])
   }
 }
 

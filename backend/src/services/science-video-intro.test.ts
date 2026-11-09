@@ -112,6 +112,38 @@ test('changed input or intro creates a new version and corrupted cached bytes ar
   assert.notEqual(replacedMain.videoPath, replacedIntro.videoPath)
 })
 
+test('cancellation kills an encoder that ignores SIGTERM instead of leaving an orphan process', async t => {
+  const f = await fixture(t), controller = new AbortController()
+  const realFfmpeg = (await exec('which', ['ffmpeg'])).stdout.trim()
+  const bin = path.join(f.root, 'bin'), pidFile = path.join(f.root, 'encoder.pid')
+  await fs.mkdir(bin)
+  const wrapper = `#!${process.execPath}\nconst fs=require('node:fs');const cp=require('node:child_process');
+if(process.argv.includes('-c:v')){process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)}
+else{const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},process.argv.slice(2),{stdio:'inherit'});process.exit(r.status??1)}\n`
+  await fs.writeFile(path.join(bin, 'ffmpeg'), wrapper, { mode: 0o700 })
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}${path.delimiter}${previousPath || ''}`
+  let pid = 0
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath
+    if (pid) { try { process.kill(pid, 'SIGKILL') } catch {} }
+  })
+  const running = prepareScienceVideoWithIntro(f, { signal: controller.signal, introPath: f.introPath, presenterPath: f.presenterPath })
+  const rejected = assert.rejects(running, /abort|cancel/i)
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { pid = Number(await fs.readFile(pidFile, 'utf8')); break } catch {}
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(pid > 1, 'the actual compositor reaches its encoder subprocess')
+  controller.abort(new Error('cancel unresponsive encoder'))
+  await rejected
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try { process.kill(pid, 0) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw error }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.fail('cancelled encoder must not survive its task')
+})
+
 test('cancellation keeps original media and leaves no successful manifest or partial output', async t => {
   const f = await fixture(t), controller = new AbortController(), mainHash = await digest(f.videoPath)
   const reason = new Error('cancel intro preparation')
