@@ -143,7 +143,7 @@ function processAlive(pid: number | undefined) {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 function uploadConnectionFailure(message: string) {
-  return /连接失败|响应超时|连接中断|连接超时|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|network|socket|timed.out|timeout/i.test(message)
+  return /连接失败|响应超时|连接中断|连接超时|账号后台连接或检查失败|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|network|socket|timed.out|timeout/i.test(message)
     && !/要求.*验证|请.*登录|请.*登陆|验证码|人机验证|captcha|原编辑页.*变化|版本已变化|指纹不一致/i.test(message)
 }
 function uploadRequiresAction(message: string) {

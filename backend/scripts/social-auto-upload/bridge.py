@@ -25,6 +25,7 @@ from upload_locks import UploadLockBusy, account_lock_key, browser_lock_key, upl
 import history_sessions
 from draft_list_navigation import locate_tencent_draft
 from baijiahao_draft_listing import BaijiahaoDraftListingError, locate_baijiahao_draft
+from baijiahao_publication_listing import BaijiahaoPublicationApiError, locate_baijiahao_publication
 from video_storage import install_video_storage_isolation
 from editor_compat import BaijiahaoEditor, TencentCovers, baijiahao_dialogs, fill_tencent_metadata, tencent_metadata
 from baijiahao_topics import RequiredTopicError, add_optional_topics, video_description, unselected_topic_suffix, _base as optional_topic_base
@@ -2302,30 +2303,43 @@ async def reconcile_publication(browser, payload, state, file):
         state["publicationCheck"]["checkedAt"] = time.time()
         write_state(file, state)
 
-    listing = await browser.contexts[0].new_page()
+    listing = None
     try:
         checkpoint_progress(file, state, "reconcile", "正在只读核对百家号作品与审核状态，不会再次发表")
-        started = time.monotonic()
-        for attempt in range(2):
-            try:
-                candidate, _, diagnostic = await locate_baijiahao_draft(
-                    listing, title=video_description(payload, state), attempted_at=state["publishAttemptedAt"],
-                    target=payload["target"], expected_id=state.get("expectedPublicationId"),
-                    match=matching_publication, collection="")
-                record_check(diagnostic)
-                break
-            except BaijiahaoDraftListingError as error:
-                record_check(error.diagnostic)
-                # A successful POST may reach the list a few seconds later.
-                # Retry the read once only after a complete, short no-match
-                # scan. Ambiguous/failed scans and unknown POSTs stay blocked.
-                can_retry = (attempt == 0 and time.monotonic() - started < 30
-                             and publication_observation(state)["classification"] == "accepted"
-                             and error.diagnostic.get("outcome") in ("not_found", "unmatched"))
-                if not can_retry:
-                    raise
-                await asyncio.sleep(2)
+        try:
+            candidate, diagnostic = await locate_baijiahao_publication(
+                browser.contexts[0].request, title=video_description(payload, state),
+                attempted_at=state["publishAttemptedAt"], target=payload["target"],
+                expected_id=state.get("expectedPublicationId"), match=matching_publication)
+            record_check(diagnostic)
+        except BaijiahaoPublicationApiError as error:
+            record_check(error.diagnostic)
+            if not error.allow_ui_fallback:
+                raise
+            listing = await browser.contexts[0].new_page()
+            started = time.monotonic()
+            for attempt in range(2):
+                try:
+                    candidate, _, diagnostic = await locate_baijiahao_draft(
+                        listing, title=video_description(payload, state), attempted_at=state["publishAttemptedAt"],
+                        target=payload["target"], expected_id=state.get("expectedPublicationId"),
+                        match=matching_publication, collection="")
+                    record_check(diagnostic)
+                    break
+                except BaijiahaoDraftListingError as error:
+                    record_check(error.diagnostic)
+                    # A successful POST may reach the list a few seconds later.
+                    # Retry only a complete short no-match scan, never an
+                    # ambiguous/failed scan or an unknown publish request.
+                    can_retry = (attempt == 0 and time.monotonic() - started < 30
+                                 and publication_observation(state)["classification"] == "accepted"
+                                 and error.diagnostic.get("outcome") in ("not_found", "unmatched"))
+                    if not can_retry:
+                        raise
+                    await asyncio.sleep(2)
         evidence = await verify_publication_record(payload, state, candidate)
+        if candidate.get("source") == "authenticated_list_api":
+            evidence["source"] = candidate["source"]
         state["expectedPublicationId"] = candidate["id"]
         state["publicationEvidence"] = evidence
         state.pop("publicationError", None)
@@ -2339,19 +2353,20 @@ async def reconcile_publication(browser, payload, state, file):
         state["phase"] = evidence["publicationStatus"]
         state["result"] = result
         checkpoint_progress(file, state, state["phase"], "百家号已发布" if result["published"] else "已提交百家号，等待平台审核")
-        try:
-            await listing.screenshot(path=evidence_path, full_page=True)
-            result["evidencePath"] = evidence_path
-            write_state(file, state)
-        except Exception:
-            pass
+        if listing is not None:
+            try:
+                await listing.screenshot(path=evidence_path, full_page=True)
+                result["evidencePath"] = evidence_path
+                write_state(file, state)
+            except Exception:
+                pass
         return result
     except Exception as error:
         state["publicationError"] = str(error)[:1000]
         write_state(file, state)
         raise RuntimeError("发表结果待核对；不会重传或再次发表：" + str(error).replace("草稿", "作品")) from error
     finally:
-        await listing.close()
+        await close_disposable_verification_page(listing)
 
 
 def publication_diagnostic_text(value):

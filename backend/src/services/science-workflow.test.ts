@@ -1414,6 +1414,20 @@ test('temporary browser connection failures retry the original upload without an
   assert.ok(h.service.detail(job.id).logs.some(log => /百家号连接暂时失败/.test(log.message)))
 })
 
+test('a temporary account connection check failure resumes without manual upload or a new identity', async t => {
+  const h = fixture(t, { retryDelayMs: 0 }), job = await prepared(h)
+  const runtime = h.options.uploadRuntime!, ready = runtime.inspectSocialUploadAccountRuntime!
+  let checks = 0
+  runtime.inspectSocialUploadAccountRuntime = async name => ++checks <= 2
+    ? { ready: false, message: '百家号账号后台连接或检查失败，请重新检查账号' }
+    : ready(name)
+  runtime.resetSocialUploadAttempt = async () => assert.fail('A failed account check must retain the original upload')
+  h.service.produce(job.id, true); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).uploadStatus, 'submitted')
+  assert.equal(checks, 3); assert.equal(h.calls.upload, 1); assert.equal(h.calls.save, 1)
+  assert.equal(h.payloads[0]?.jobId, `${job.id}-baijiahao`)
+})
+
 test('only temporary connections schedule upload retries while uncertain editors and security challenges stop', { timeout: 5000 }, async t => {
   for (const scenario of ['connection', 'verification', 'uncertain', 'changed_editor']) {
     const h = fixture(t, { retryDelayMs: 0 }), job = await prepared(h)

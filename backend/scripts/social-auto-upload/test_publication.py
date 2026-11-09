@@ -191,6 +191,11 @@ class PublicationCheckpointTest(unittest.IsolatedAsyncioTestCase):
 
 class PublicationTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        api = patch.object(bridge, 'locate_baijiahao_publication', new_callable=AsyncMock,
+            side_effect=bridge.BaijiahaoPublicationApiError('offline UI fixture',
+                {'outcome': 'incomplete', 'pagesScanned': 0, 'rowsScanned': 0}, allow_ui_fallback=True))
+        api.start()
+        self.addCleanup(api.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
