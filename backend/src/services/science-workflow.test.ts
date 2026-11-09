@@ -1705,6 +1705,57 @@ test('a cover failure preserves the downloaded video and local retry needs no pr
   assert.equal(h.calls.produce, 1); assert.equal(h.calls.export, 1); assert.equal(h.calls.downloadExport, 1); assert.equal(h.calls.upload, 0)
 })
 
+for (const recovery of ['covers', 'produce'] as const) test(`${recovery} retry after a portrait failure preserves the completed half-body video and original landscape`, async t => {
+  const h = fixture(t, { presenterMode: 'musetalk' }), job = await prepared(h)
+  const file = path.join(h.root, 'jobs', job.id, 'job.json'), hash = (value: string) => createHash('sha256').update(value).digest('hex')
+  let presenterCalls = 0, composeCalls = 0, fallbackCalls = 0, landscapeGenerations = 0
+  h.options.prepareMusetalkPresenter = async input => {
+    if (++presenterCalls > 1) throw new Error('MuseTalk network unavailable after the finished video')
+    return { presenterPath: input.videoPath, sourceSha256: hash(fs.readFileSync(input.videoPath, 'utf8')) }
+  }
+  h.options.prepareVideo = async (input, options) => {
+    composeCalls++
+    assert.equal(options.presenterFraming, 'half-body')
+    fs.mkdirSync(input.directory, { recursive: true })
+    const videoPath = path.join(input.directory, 'completed-half-body.mp4')
+    fs.writeFileSync(videoPath, 'intro+half-body+finished-video')
+    return { videoPath, introSha256: 'a'.repeat(64), sourceSha256: hash(fs.readFileSync(input.videoPath, 'utf8')) }
+  }
+  const intro = h.options.prepareIntroVideo!, assets = h.options.prepareAssets!, requests: Array<{ directory: string; videoPath: string; revision: number }> = []
+  h.options.prepareIntroVideo = async (input, options) => { fallbackCalls++; return intro(input, options) }
+  h.options.prepareAssets = async (input, options) => {
+    requests.push({ directory: input.directory, videoPath: input.videoPath, revision: input.revision })
+    const landscapePath = path.join(input.directory, 'landscape.jpg')
+    if (!fs.existsSync(landscapePath)) {
+      landscapeGenerations++
+      await sharp({ create: { width: 1280, height: 720, channels: 3, background: '#345678' } }).jpeg().toFile(landscapePath)
+    }
+    if (requests.length === 1) throw new Error('portrait provider temporarily unavailable')
+    return assets(input, options)
+  }
+  h.service.produce(job.id); await h.service.waitForIdle()
+  const failed = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(failed.status, 'needs_attention'); assert.equal(failed.stage, 'covers')
+  assert.equal(failed.videoCompositionPending, false)
+  const originalVideo = fs.readFileSync(failed.videoPath), landscape = path.join(requests[0].directory, 'landscape.jpg')
+  const originalLandscape = { bytes: fs.readFileSync(landscape), mtime: fs.statSync(landscape).mtimeMs }
+  await h.service.stop()
+  const restored = new ScienceWorkflowService(h.options)
+  t.after(() => restored.stop())
+  restored[recovery](job.id); await restored.waitForIdle()
+  const complete = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(presenterCalls, 1, 'a completed video must not call MuseTalk again while repairing its covers')
+  assert.equal(composeCalls, 1); assert.equal(fallbackCalls, 0)
+  assert.equal(complete.status, 'ready'); assert.equal(complete.videoPath, failed.videoPath)
+  assert.equal(complete.presenterPath, failed.presenterPath); assert.equal(complete.videoCompositionPending, false)
+  assert.deepEqual(fs.readFileSync(complete.videoPath), originalVideo)
+  assert.deepEqual(requests[1], requests[0], 'cover recovery must reuse the original video, revision and checkpoint directory')
+  assert.equal(landscapeGenerations, 1)
+  assert.deepEqual(fs.readFileSync(landscape), originalLandscape.bytes); assert.equal(fs.statSync(landscape).mtimeMs, originalLandscape.mtime)
+  assert.ok(fs.existsSync(complete.coverAssets.portraitPath)); assert.equal(complete.coverRevision, failed.coverRequest.revision)
+  assert.equal(h.calls.produce, 1); assert.equal(h.calls.export, 1); assert.equal(h.calls.upload, 0)
+})
+
 test('standalone cover preview stops stale automatic delivery until upload is explicitly requested', async t => {
   const h = fixture(t), job = await prepared(h)
   const { file } = legacyFinishedVideo(h, job.id)

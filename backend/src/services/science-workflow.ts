@@ -819,7 +819,7 @@ export class ScienceWorkflowService {
   }
   private async prepareCovers(id: string, signal: AbortSignal, input: z.infer<typeof scienceCoversSchema> = {}): Promise<mediaTools.UploadAssets> {
     let job = this.read(id)
-    if (job.separateIntro && !job.uploadAttempt && !job.upload) {
+    if (job.separateIntro && job.videoCompositionPending !== false && !job.uploadAttempt && !job.upload) {
       this.modify(id, { exportStep: 'compose', compositionProgress: undefined })
       const intro = await import('./science-video-intro.js')
       const directory = path.join(this.directory(id), 'intro')
