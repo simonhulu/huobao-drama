@@ -18,7 +18,11 @@ export type ScienceVideoIntroPreviewOptions = Omit<ScienceVideoIntroOptions, 'pr
 export interface ScienceVideoIntroResult { videoPath: string; introSha256: string; sourceSha256: string }
 interface IntroRecord extends ScienceVideoIntroResult { sourcePath: string; outputSha256: string; presenterSha256?: string; presenterFraming?: SciencePresenterFraming; renderVersion?: number }
 interface IntroManifest { version: typeof VERSION; entries: IntroRecord[] }
-interface VideoInfo { width: number; height: number; fps: string; duration: number; videoDuration: number; audio: boolean }
+interface VideoInfo {
+  width: number; height: number; fps: string; duration: number; videoDuration: number; audio: boolean
+  frames?: number
+  copy?: { timeScale: number; frames: number; colorOptions: string[] }
+}
 
 async function fileHash(filename: string, signal: AbortSignal) {
   signal.throwIfAborted()
@@ -85,10 +89,26 @@ async function probeVideo(filename: string, signal: AbortSignal): Promise<VideoI
   const fps = numerator! / denominator!
   const rotation = Number(stream.side_data_list?.find((item: any) => Number.isFinite(Number(item.rotation)))?.rotation || 0)
   const rotated = Math.abs(rotation) % 180 === 90
+  const [timeNumerator, timeScale] = String(stream.time_base).split('/').map(Number)
+  const [rateNumerator, rateDenominator = 1] = String(stream.r_frame_rate).split('/').map(Number)
+  const frames = Number(stream.nb_frames)
+  const videoDuration = Number.isFinite(Number(stream.duration)) && Number(stream.duration) > 0 ? Number(stream.duration) : duration
+  const copyCompatible = stream.codec_name === 'h264' && stream.pix_fmt === 'yuv420p' && Number(stream.has_b_frames) === 0
+    && rotation === 0 && stream.sample_aspect_ratio === '1:1' && stream.field_order === 'progressive'
+    && Math.abs(Number(stream.start_time)) < .00001 && stream.width % 2 === 0 && stream.height % 2 === 0
+    && timeNumerator === 1 && Number.isSafeInteger(timeScale) && timeScale! > 0
+    && Math.abs(rateNumerator! / rateDenominator! - fps) < .00001 && Number.isSafeInteger(frames)
+    && Math.abs(frames - videoDuration * fps) < .1 && Math.abs(duration - videoDuration) * fps < .5
+  const colorOptions = ['color_range', 'color_space', 'color_transfer', 'color_primaries'].flatMap(key => {
+    const value = stream[key]
+    return typeof value === 'string' && /^[a-z0-9_-]+$/i.test(value) && !['unknown', 'unspecified', 'reserved'].includes(value)
+      ? [`-${key === 'color_space' ? 'colorspace' : key === 'color_transfer' ? 'color_trc' : key}`, value] : []
+  })
   return { width: rotated ? stream.height : stream.width, height: rotated ? stream.width : stream.height,
     fps: Number.isFinite(fps) && fps >= 1 && fps <= 120 ? rate : '30/1', duration,
-    videoDuration: Number.isFinite(Number(stream.duration)) && Number(stream.duration) > 0 ? Number(stream.duration) : duration,
-    audio: data.streams?.some((item: any) => item.codec_type === 'audio') || false }
+    videoDuration, frames: Number.isSafeInteger(frames) ? frames : undefined,
+    audio: data.streams?.some((item: any) => item.codec_type === 'audio') || false,
+    ...(copyCompatible ? { copy: { timeScale: timeScale!, frames, colorOptions } } : {}) }
 }
 
 function movingIntroMask(width: number, height: number, diameter: number, margin: number, border: number, duration: number) {
@@ -107,15 +127,20 @@ function movingIntroMask(width: number, height: number, diameter: number, margin
   return `geq=r='${channel('r')}':g='${channel('g')}':b='${channel('b')}':a='${geometry}clip(.5-ld(8),0,1)*255':interpolation=bilinear`
 }
 
-function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: number, presenterFraming?: SciencePresenterFraming) {
+function concatAudioFilter(intro: VideoInfo, main: VideoInfo, inputOffset = 0) {
+  return [...[intro, main].map((media, index) =>
+    `[${index + inputOffset}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,`
+      + `atrim=duration=${media.duration},asetpts=PTS-STARTPTS[a${index}]`),
+  '[a0][a1]concat=n=2:v=0:a=1[a]']
+}
+
+function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: number, presenterFraming?: SciencePresenterFraming, includeAudio = true) {
   const transition = Math.min(.5, main.duration / 2)
-  const segments = [intro, main].flatMap((media, index) => [
+  const segments = [intro, main].map((media, index) =>
     `[${index}:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,`
       + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${main.fps},format=yuv420p,`
-      + `tpad=stop_mode=clone:stop_duration=${media.duration + transition},trim=duration=${media.duration + (index === 0 ? transition : 0)},setpts=PTS-STARTPTS,fps=${main.fps},settb=AVTB[v${index}]`,
-    `[${index}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,`
-      + `atrim=duration=${media.duration},asetpts=PTS-STARTPTS[a${index}]`,
-  ])
+      + `tpad=stop_mode=clone:stop_duration=${media.duration + transition},trim=duration=${media.duration + (index === 0 ? transition : 0)},setpts=PTS-STARTPTS,fps=${main.fps},settb=AVTB[v${index}]`)
+  const audio = includeAudio ? concatAudioFilter(intro, main) : []
   const diameter = Math.min(width, Math.max(16, Math.round(height * .25 / 2) * 2))
   const margin = Math.max(2, Math.round(height * .03)), border = Math.max(1, Math.round(height * .002))
   const radius = diameter / 2, distance = 'hypot(X-(W-1)/2,Y-(H-1)/2)'
@@ -144,7 +169,7 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       '[reveal][body]concat=n=2:v=1:a=0[underlay]',
       '[underlay][moving]overlay=x=0:y=0:eof_action=pass:repeatlast=0:format=auto,format=yuv420p,settb=AVTB[transition-body]',
       `[prefix][transition-body]concat=n=2:v=1:a=0,trim=duration=${intro.duration + main.duration},fps=${main.fps},format=yuv420p[v]`,
-      '[a0][a1]concat=n=2:v=0:a=1[a]',
+      ...audio,
     ].join(';')
   }
   const presentation = [
@@ -152,8 +177,81 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
   ]
   return [...segments, ...presentation,
     `[v0][body]xfade=transition=fade:duration=${transition}:offset=${intro.duration},trim=duration=${intro.duration + main.duration},format=yuv420p[v]`,
-    '[a0][a1]concat=n=2:v=0:a=1[a]',
+    ...audio,
   ].join(';')
+}
+
+async function encodeVideo(args: string[], finish: string[], width: number, height: number, signal: AbortSignal) {
+  const encoder = getVideoEncoderOptions({ width, height })
+  try {
+    await exec('ffmpeg', [...args, ...encoder, ...finish], { signal, timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+  } catch (error) {
+    signal.throwIfAborted()
+    if (!encoder.includes('h264_videotoolbox')) throw error
+    await exec('ffmpeg', [...args, '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', ...finish],
+      { signal, timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+  }
+}
+
+async function decodedFrame(filename: string, at: number, signal: AbortSignal, width: number, height: number) {
+  const { stdout } = await exec('ffmpeg', ['-nostdin', '-v', 'error', '-ss', String(Math.max(0, at - .00001)), '-i', filename,
+    '-map', '0:v:0', '-frames:v', '1', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', 'pipe:1'],
+  { signal, encoding: 'buffer', timeout: 60_000, maxBuffer: Math.max(16 * 1024 * 1024, width * height * 2) })
+  if (stdout.length !== width * height * 1.5) throw new Error('片头拼接接缝缺少完整画面')
+  return createHash('sha256').update(stdout).digest('hex')
+}
+
+async function copyBodyAfterIntro(introPath: string, sourcePath: string, temporary: string, intro: VideoInfo, main: VideoInfo,
+  options: ScienceVideoIntroPreviewOptions) {
+  if (!main.copy) return false
+  const { signal } = options
+  const { stdout } = await exec('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-skip_frame', 'nokey', '-read_intervals', '%+12',
+    '-show_frames', '-show_entries', 'frame=key_frame,pts_time', '-of', 'json', sourcePath], { signal, timeout: 60_000, maxBuffer: 1024 * 1024 })
+  const [numerator, denominator = 1] = main.fps.split('/').map(Number), fps = numerator! / denominator!
+  const cut = JSON.parse(stdout).frames?.find((frame: any) => frame.key_frame === 1
+    && Number(frame.pts_time) >= 1 && Number(frame.pts_time) < main.videoDuration - 1 / fps)
+  if (!cut) return false
+  const at = Number(cut.pts_time)
+  // Only an IDR can start an independently copied H.264 tail. An ordinary
+  // I-frame may still reference pictures before the cut in an open GOP.
+  const { stdout: packet } = await exec('ffmpeg', ['-nostdin', '-v', 'error', '-ss', String(at), '-i', sourcePath,
+    '-map', '0:v:0', '-frames:v', '1', '-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb', '-f', 'h264', 'pipe:1'],
+  { signal, encoding: 'buffer', timeout: 60_000, maxBuffer: 4 * 1024 * 1024 })
+  let idr = false
+  for (let i = 0; i + 4 < packet.length; i++) {
+    if (packet[i] || packet[i + 1]) continue
+    const offset = packet[i + 2] === 1 ? i + 3 : packet[i + 2] === 0 && packet[i + 3] === 1 ? i + 4 : -1
+    if (offset < 0) continue
+    const type = packet[offset]! & 31
+    if (type >= 1 && type <= 5) { idr = type === 5; break }
+  }
+  if (!idr) return false
+  const directory = await fs.mkdtemp(path.join(path.dirname(temporary), '.science-intro-copy-'))
+  try {
+    const prefix = path.join(directory, 'prefix.mp4'), list = path.join(directory, 'video.ffconcat')
+    const frames = Math.ceil((intro.duration + at) * fps - .00001), prefixDuration = frames / fps
+    options.report?.('正在编码片头与过渡短片段，后续正文直接复制视频流')
+    await encodeVideo(['-nostdin', '-hide_banner', '-v', 'error', '-y', '-i', introPath, '-t', String(at), '-i', sourcePath,
+      '-filter_complex', concatFilter(intro, { ...main, duration: at }, main.width, main.height, undefined, false), '-map', '[v]'],
+    ['-an', '-pix_fmt', 'yuv420p', '-r', main.fps, '-frames:v', String(frames), '-bf', '0',
+      '-video_track_timescale', String(main.copy.timeScale), ...main.copy.colorOptions, prefix], main.width, main.height, signal)
+    const quote = (filename: string) => "'" + filename.replaceAll("'", "'\\''") + "'"
+    await fs.writeFile(list, `ffconcat version 1.0\nfile ${quote(prefix)}\nduration ${prefixDuration.toFixed(9)}\n`
+      + `file ${quote(sourcePath)}\ninpoint ${at.toFixed(9)}\nduration ${(main.videoDuration - at).toFixed(9)}\n`, { signal })
+    options.report?.('正在直接复制正文视频流并拼接原声')
+    await exec('ffmpeg', ['-nostdin', '-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list,
+      '-i', introPath, '-i', sourcePath, '-filter_complex', concatAudioFilter(intro, main, 1).join(';'),
+      '-map', '0:v:0', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+      '-movflags', '+faststart', temporary], { signal, timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+    const output = await probeVideo(temporary, signal)
+    const expectedFrames = frames + main.copy.frames - Math.round(at * fps)
+    if (output.frames !== expectedFrames || Math.abs(output.videoDuration - expectedFrames / fps) > .01)
+      throw new Error('正文视频流复制后的帧数或时长不完整')
+    const [original, copied] = await Promise.all([decodedFrame(sourcePath, at, signal, main.width, main.height),
+      decodedFrame(temporary, prefixDuration, signal, main.width, main.height)])
+    if (original !== copied) throw new Error('正文视频流复制后的接缝画面不一致')
+    return true
+  } finally { await fs.rm(directory, { recursive: true, force: true }) }
 }
 
 /** Full delivery requires the complete synchronized presenter video. */
@@ -210,18 +308,20 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
   let committedOutput = false, committedManifest = false
   options.report?.(presenterPath ? '正在拼接固定片头与科普成片，正文叠加同步主播圆窗并保留原声' : '正在拼接固定片头与科普成片，保留片头与正文原声')
   try {
-    const args = ['-nostdin', '-hide_banner', '-v', 'error', '-y', '-i', introPath, '-i', sourcePath, ...(presenterPath ? ['-i', presenterPath] : []),
-      '-filter_complex', concatFilter(intro, main, width, height, presenterFraming), '-map', '[v]', '-map', '[a]']
-    const finish = ['-pix_fmt', 'yuv420p', '-r', main.fps, '-fps_mode', 'cfr', '-c:a', 'aac', '-b:a', '192k',
-      '-ar', '48000', '-ac', '2', '-movflags', '+faststart', temporary]
-    const encoder = getVideoEncoderOptions({ width, height })
-    try {
-      await exec('ffmpeg', [...args, ...encoder, ...finish], { signal, timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
-    } catch (error) {
-      signal.throwIfAborted()
-      if (!encoder.includes('h264_videotoolbox')) throw error
-      await exec('ffmpeg', [...args, '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', ...finish],
-        { signal, timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+    let copied = false
+    if (!presenterPath) {
+      try { copied = await copyBodyAfterIntro(introPath, sourcePath, temporary, intro, main, options) }
+      catch {
+        signal.throwIfAborted()
+        options.report?.('正文视频流复制校验未通过，正在使用兼容模式合成成片')
+      }
+    }
+    if (!copied) {
+      const args = ['-nostdin', '-hide_banner', '-v', 'error', '-y', '-i', introPath, '-i', sourcePath, ...(presenterPath ? ['-i', presenterPath] : []),
+        '-filter_complex', concatFilter(intro, main, width, height, presenterFraming), '-map', '[v]', '-map', '[a]']
+      const finish = ['-pix_fmt', 'yuv420p', '-r', main.fps, '-fps_mode', 'cfr', '-c:a', 'aac', '-b:a', '192k',
+        '-ar', '48000', '-ac', '2', '-movflags', '+faststart', temporary]
+      await encodeVideo(args, finish, width, height, signal)
     }
     const output = await probeVideo(temporary, signal)
     const [fpsNumerator, fpsDenominator = 1] = main.fps.split('/').map(Number)

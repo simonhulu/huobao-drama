@@ -497,6 +497,11 @@ function uploadStatusLabel(job) {
   return ({ pending: '待上传', queued: '上传排队', uploading: '上传中', uploaded: '已上传（草稿）', submitted: '已上传·待审核', published: '已发表', blocked: '上传异常', paused: '上传已暂停', not_ready: '等待成片与封面' })[uploadState(job)] || '待上传'
 }
 function statusLabel(job) {
+  if (job.status === 'running' && /同步花生/.test(job.message || '')) return '同步花生状态'
+  if (job.status === 'running' && job.stage === 'export' && job.exportStep) {
+    const label = ({ platform: '花生导出', download: '下载成片', presenter: '生成主播', compose: '合成成片' })[job.exportStep]
+    if (label) return label
+  }
   if (job.videoCompositionPending) return taskExecuting(job) ? '合成视频' : '视频待合成'
   if (uploadRetryPending(job)) return '等待自动重传'
   if (job.status === 'retry_wait') return '等待自动恢复'
@@ -505,7 +510,6 @@ function statusLabel(job) {
   if (collectionRecovery) return collectionRecovery.title
   if (job.status === 'running' && /只读核对百家号|只读核对.*上传/.test(job.message || '')) return '核对上传结果'
   if (job.status === 'queued' && job.executionActive === false) return '待开始制作'
-  if (job.status === 'running' && /同步花生/.test(job.message || '')) return '同步花生状态'
   if (job.status === 'running' && job.stage !== 'upload') return ({ download: '下载素材', transcribe: '提取原稿', rewrite: '生成二创', produce: '花生制作', export: '导出成片', covers: '生成封面' })[job.stage] || '处理中'
   if (job.videoUrl && job.stage === 'covers' && ['needs_attention', 'paused'].includes(job.status)) return job.status === 'paused' ? '封面已暂停' : '封面异常'
   const upload = uploadState(job)

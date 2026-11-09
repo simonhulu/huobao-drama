@@ -53,6 +53,7 @@ export interface ScienceJob {
   deletedAt?: string
   status: 'draft' | 'queued' | 'running' | 'paused' | 'needs_attention' | 'retry_wait' | 'waiting_remote' | 'awaiting_export' | 'ready' | 'completed'
   stage: ScienceStage; message: string; transcript: string; script: string
+  exportStep?: 'platform' | 'download' | 'presenter' | 'compose'
   factChecks: Array<{ claim: string; note: string }>; sources: string[]
   huashengAccountName: string | null; baijiahaoAccountName: string | null
   projectUrl: string | null; sourceVideoUrl: string | null; videoUrl: string | null
@@ -629,6 +630,7 @@ export class ScienceWorkflowService {
       }
     }
     this.modify(id, { status: 'running' })
+    this.modify(id, { exportStep: 'platform' })
     this.report(id, '华生制作完成，正在导出成片', 'export')
     job = this.read(id)
     if (!job.exportTask) {
@@ -647,11 +649,13 @@ export class ScienceWorkflowService {
     for (;;) {
       signal.throwIfAborted()
       const { info, result } = await this.retryPlatform(id, '华生导出查询与下载', signal, async () => {
+        this.modify(id, { exportStep: 'platform' })
         const info = await api.inspectHuashengExport({ projectUrl: job.projectUrl!, ...job.exportTask!, browserConfig, signal })
         this.modify(id, { huashengSync: { checkedAt: new Date().toISOString(), status: 'completed',
           message: info.progress === 100 && info.url ? '花生原导出已完成，正在下载成片' : `花生正在导出：${Math.round(info.progress)}%`, exportProgress: info.progress } })
         if (info.progress !== 100 || !info.url) return { info, result: null }
         this.modify(id, { status: 'running' })
+        this.modify(id, { exportStep: 'download' })
         this.report(id, '正在下载华生成片', 'export')
         // Requery on every retry so an expired URL is replaced while the saved
         // task, project hash and partial download continue to be reused.
@@ -720,6 +724,7 @@ export class ScienceWorkflowService {
   }
   private async prepareIntroPreview(id: string, signal: AbortSignal) {
     const job = this.read(id), intro = await import('./science-video-intro.js')
+    this.modify(id, { exportStep: 'compose' })
     const directory = path.join(this.directory(id), 'intro')
     const main = await intro.resolveScienceVideoIntroSource({ videoPath: this.localFile(id, job.mainVideoPath || job.videoPath), directory }, { signal })
     this.modify(id, { mainVideoPath: main.videoPath })
@@ -734,6 +739,7 @@ export class ScienceWorkflowService {
   private async prepareCovers(id: string, signal: AbortSignal, input: z.infer<typeof scienceCoversSchema> = {}): Promise<mediaTools.UploadAssets> {
     let job = this.read(id)
     if (job.separateIntro && !job.uploadAttempt && !job.upload) {
+      this.modify(id, { exportStep: 'compose' })
       const intro = await import('./science-video-intro.js')
       const directory = path.join(this.directory(id), 'intro')
       const main = await intro.resolveScienceVideoIntroSource({ videoPath: this.localFile(id, job.mainVideoPath || job.videoPath), directory }, { signal })
@@ -744,6 +750,7 @@ export class ScienceWorkflowService {
       if (presenterMode === 'musetalk') {
         let presenter: { presenterPath: string; sourceSha256: string } | undefined
         try {
+          this.modify(id, { exportStep: 'presenter' })
           this.report(id, '正在使用远程 MuseTalk 生成正文同步口型，复用缓存主播素材', 'export')
           const generate = this.options.prepareMusetalkPresenter || (await import('./science-musetalk-video.js')).prepareScienceMusetalkVideo
           presenter = await generate({ videoPath: main.videoPath, directory: path.join(this.directory(id), 'presenter-musetalk') },
@@ -755,6 +762,7 @@ export class ScienceWorkflowService {
           presenter = undefined
           this.report(id, `MuseTalk 暂不可用，自动保留固定片头并完成正文：${safeMessage(error)}`, 'export')
         }
+        this.modify(id, { exportStep: 'compose' })
         if (presenter) {
           const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
           video = await prepare({ videoPath: main.videoPath, directory },
@@ -772,13 +780,14 @@ export class ScienceWorkflowService {
           await this.prepareIntroPreview(id, signal)
           job = this.read(id)
         }
+        this.modify(id, { exportStep: 'presenter' })
         this.report(id, '正在根据正片旁白生成同步口型的主播视频', 'export')
         const generate = this.options.preparePresenter || (await import('./science-presenter-video.js')).prepareSciencePresenterVideo
         const presenter = await generate({ videoPath: main.videoPath, directory: path.join(this.directory(id), 'presenter') },
           { signal, report: message => this.report(id, message, 'export') })
         signal.throwIfAborted()
         if (presenter.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('主播口播与正片版本不一致，请继续原任务重新核对')
-        this.modify(id, { presenterPath: presenter.presenterPath })
+        this.modify(id, { presenterPath: presenter.presenterPath, exportStep: 'compose' })
         const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
         video = await prepare({ videoPath: main.videoPath, directory },
           { signal, presenterPath: presenter.presenterPath, report: message => this.report(id, message, 'export') })
@@ -795,6 +804,7 @@ export class ScienceWorkflowService {
       job = this.modify(id, { videoPath: video.videoPath, videoCompositionPending: false,
         ...(video.videoPath !== job.videoPath ? { coverAssets: undefined, coverSourceDigest: undefined, coverRequest: undefined } : {}) })
     }
+    if (job.exportStep) job = this.modify(id, { exportStep: undefined })
     if (job.uploadAttempt && !input.regenerate && !job.coverRequest && job.coverStyle === SCIENCE_COVER_STYLE && job.coverAssets
       && job.coverAssets.landscapePath !== job.uploadAttempt.payload?.landscapePath) return this.inspectPreparedCovers(id, signal)
     // An ordinary inspection must never rewrite files bound to a dispatched upload.

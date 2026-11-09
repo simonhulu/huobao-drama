@@ -382,3 +382,77 @@ test('intro-only final delivery preserves the full intro and body audio with a f
   assert.equal(network.mock.callCount(), 0)
   assert.ok(reports.length > 0 && reports.every(message => !message.includes('预览')), 'final-delivery progress does not describe a preview')
 })
+
+test('intro-only delivery copies the body after the transition without changing decoded frames, narration or timeline', async t => {
+  const f = await fixture(t), reports: string[] = []
+  const videoPath = path.join(f.root, "main 'quoted'.mp4")
+  await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15:duration=6',
+    '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=44100:duration=6',
+    '-c:v', 'libx264', '-preset', 'fast', '-bf', '0', '-g', '15', '-keyint_min', '15', '-sc_threshold', '0',
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '1', '-shortest', videoPath])
+  const result = await prepareScienceVideoWithIntroOnly({ ...f, videoPath },
+    { signal: signal(), introPath: f.introPath, report: message => reports.push(message) })
+  const frameHashes = async (file: string) => {
+    const { stdout } = await exec('ffmpeg', ['-nostdin', '-v', 'error', '-i', file, '-map', '0:v:0', '-an',
+      '-pix_fmt', 'yuv420p', '-f', 'framemd5', 'pipe:1'])
+    return stdout.split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(',').at(-1)!.trim())
+  }
+  const [source, output] = await Promise.all([frameHashes(videoPath), frameHashes(result.videoPath)])
+  assert.equal(output.length, source.length + 9, 'the complete intro and main retain every frame')
+  assert.deepEqual(output.slice(24), source.slice(15), 'all body frames after the one-second splice remain lossless')
+  const fade = await pixel(result.videoPath, .85)
+  assert.ok(fade[0]! > 40, 'the original fade is retained before the copied body')
+  assert.ok(Math.abs(await frequency(result.videoPath, .15) - 440) < 15)
+  assert.ok(Math.abs(await frequency(result.videoPath, 6.3) - 880) < 15, 'main narration remains audible near the end')
+  const metadata = await probe(result.videoPath)
+  assert.ok(Math.abs(Number(metadata.format.duration) - 6.6) < .08)
+  assert.ok(reports.some(message => message.includes('复制')), 'progress identifies the fast body-copy path')
+  assert.deepEqual((await fs.readdir(f.directory)).sort(), [path.basename(result.videoPath), 'science-video-intro.json'].sort())
+})
+
+test('fractional frame rates retain the copied body without cumulative audio or video drift', async t => {
+  const f = await fixture(t), reports: string[] = []
+  await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30000/1001:duration=3',
+    '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=3',
+    '-c:v', 'libx264', '-preset', 'fast', '-bf', '0', '-g', '30', '-keyint_min', '30', '-sc_threshold', '0',
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', f.videoPath])
+  const result = await prepareScienceVideoWithIntroOnly(f, { signal: signal(), introPath: f.introPath, report: message => reports.push(message) })
+  const metadata = await probe(result.videoPath), video = metadata.streams.find((item: any) => item.codec_type === 'video')
+  assert.equal(video.avg_frame_rate, '30000/1001')
+  assert.equal(Number(video.nb_frames), 108)
+  assert.ok(Math.abs(Number(video.duration) - 3.6) < 1 / 29.97)
+  assert.ok(Math.abs(Number(metadata.format.duration) - Number(video.duration)) < .03)
+  assert.ok(Math.abs(await frequency(result.videoPath, 3.25) - 880) < 15)
+  assert.ok(reports.some(message => message.includes('直接复制正文')), reports.join('\n'))
+  assert.ok(reports.every(message => !message.includes('兼容模式')), reports.join('\n'))
+})
+
+test('cancelling the fast copy path cleans its encoded prefix and never falls back to a full render', async t => {
+  const f = await fixture(t), controller = new AbortController(), reports: string[] = []
+  await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15:duration=3',
+    '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=3',
+    '-c:v', 'libx264', '-preset', 'fast', '-bf', '0', '-g', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', f.videoPath])
+  const sourceHash = await digest(f.videoPath)
+  await assert.rejects(prepareScienceVideoWithIntroOnly(f, { signal: controller.signal, introPath: f.introPath, report: message => {
+    reports.push(message)
+    if (message.includes('直接复制正文')) controller.abort(new Error('cancel fast copy'))
+  } }), /cancel fast copy|aborted/i)
+  assert.ok(reports.some(message => message.includes('直接复制正文')), reports.join('\n'))
+  assert.ok(reports.every(message => !message.includes('兼容模式')), reports.join('\n'))
+  assert.equal(await digest(f.videoPath), sourceHash)
+  assert.deepEqual(await fs.readdir(f.directory), [])
+})
+
+test('body video with B frames uses the compatible renderer and preserves the complete narration', async t => {
+  const f = await fixture(t), reports: string[] = []
+  await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15:duration=3',
+    '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=3',
+    '-c:v', 'libx264', '-preset', 'fast', '-bf', '2', '-g', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', f.videoPath])
+  assert.ok((await probe(f.videoPath)).streams.find((item: any) => item.codec_type === 'video').has_b_frames > 0)
+  const result = await prepareScienceVideoWithIntroOnly(f, { signal: signal(), introPath: f.introPath, report: message => reports.push(message) })
+  const metadata = await probe(result.videoPath)
+  assert.equal(Number(metadata.streams.find((item: any) => item.codec_type === 'video').nb_frames), 54)
+  assert.ok(Math.abs(Number(metadata.format.duration) - 3.6) < .08)
+  assert.ok(Math.abs(await frequency(result.videoPath, 3.2) - 880) < 15)
+  assert.ok(reports.every(message => !message.includes('复制')), reports.join('\n'))
+})

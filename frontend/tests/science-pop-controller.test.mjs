@@ -295,6 +295,17 @@ test('sync completion follows backend export and publication progress without an
   assert.deepEqual(h.state.requests.filter(item => item.method !== 'GET'), [{ method: 'POST', path: `${BASE}/jobs/first/sync`, body: {} }])
 })
 
+test('running export labels distinguish platform, download, presenter and composition without changing legacy or terminal labels', async t => {
+  const h = await harness(t)
+  for (const [exportStep, expected] of [['platform', '花生导出'], ['download', '下载成片'], ['presenter', '生成主播'], ['compose', '合成成片']]) {
+    assert.equal(h.s.statusLabel(job('exporting', { status: 'running', stage: 'export', exportStep })), expected)
+  }
+  assert.equal(h.s.statusLabel(job('legacy', { status: 'running', stage: 'export' })), '导出成片')
+  assert.equal(h.s.statusLabel(job('preview', { status: 'running', stage: 'export', exportStep: 'presenter', videoCompositionPending: true })), '生成主播')
+  assert.equal(h.s.statusLabel(job('cover', { status: 'running', stage: 'covers', exportStep: 'compose' })), '生成封面')
+  assert.equal(h.s.statusLabel(job('finished', { status: 'completed', stage: 'completed', exportStep: 'compose' })), '已完成')
+})
+
 test('stopping remote production or queued export pauses continuation without saving edits', async t => {
   const h = await harness(t)
   h.state.post = path => {

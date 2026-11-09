@@ -165,12 +165,14 @@ test('new default science production uses remote MuseTalk once and composes the 
   h.options.preparePresenter = async () => assert.fail('MuseTalk must not call the LatentSync runtime')
   h.options.prepareIntroVideo = async () => assert.fail('a successful MuseTalk result must retain the circle')
   h.options.prepareMusetalkPresenter = async input => {
+    assert.equal(h.service.detail(job.id).exportStep, 'presenter')
     order.push('musetalk')
     assert.equal(fs.readFileSync(input.videoPath, 'utf8'), 'finished-video')
     assert.equal(path.basename(input.directory), 'presenter-musetalk')
     return { presenterPath: input.videoPath, sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
   }
   h.options.prepareVideo = async (input, options) => {
+    assert.equal(h.service.detail(job.id).exportStep, 'compose')
     order.push('compose')
     assert.equal(options.presenterFraming, 'closeup')
     assert.equal(options.presenterPath, input.videoPath)
@@ -179,8 +181,46 @@ test('new default science production uses remote MuseTalk once and composes the 
   }
   h.service.produce(job.id, true); await h.service.waitForIdle()
   assert.equal(h.service.detail(job.id).status, 'completed')
+  assert.equal(h.service.detail(job.id).exportStep, undefined)
   assert.deepEqual(order, ['musetalk', 'compose'])
   assert.equal(h.calls.produce, 1); assert.equal(h.calls.export, 1); assert.equal(h.calls.upload, 1)
+})
+
+test('export substeps distinguish platform rendering, download and local composition until covers begin', async t => {
+  const h = fixture(t), job = await prepared(h), steps: string[] = []
+  const api = h.options.exportApi!
+  h.options.exportApi = { ...api,
+    createHuashengExport: async input => {
+      assert.equal(h.service.detail(job.id).exportStep, 'platform')
+      steps.push('platform')
+      return api.createHuashengExport(input)
+    },
+    inspectHuashengExport: async input => {
+      assert.equal(h.service.detail(job.id).exportStep, 'platform')
+      return api.inspectHuashengExport(input)
+    },
+    downloadHuashengExport: async (input, options) => {
+      assert.equal(h.service.detail(job.id).exportStep, 'download')
+      steps.push('download')
+      return api.downloadHuashengExport(input, options)
+    },
+  }
+  const intro = h.options.prepareIntroVideo!, covers = h.options.prepareAssets!
+  h.options.prepareIntroVideo = async (input, options) => {
+    assert.equal(h.service.detail(job.id).exportStep, 'compose')
+    steps.push('compose')
+    return intro(input, options)
+  }
+  h.options.prepareAssets = async (input, options) => {
+    assert.equal(h.service.detail(job.id).exportStep, undefined)
+    assert.equal(h.service.detail(job.id).stage, 'covers')
+    steps.push('covers')
+    return covers(input, options)
+  }
+  h.service.produce(job.id, false); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'ready')
+  assert.equal(h.service.detail(job.id).exportStep, undefined)
+  assert.deepEqual(steps, ['platform', 'download', 'compose', 'covers'])
 })
 
 test('a MuseTalk timeout falls back to intro-only delivery without blocking automatic production', async t => {
