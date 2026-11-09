@@ -106,7 +106,9 @@ class BaijiahaoVideoInputTest(unittest.IsolatedAsyncioTestCase):
         slots = await helpers._cover_slots(self.page)
         self.assertEqual(set(slots), {"landscape", "portrait"})
         self.assertTrue(slots["landscape"]["src"].startswith("data:image/"))
+        self.assertFalse(slots["landscape"]["failed"])
         self.assertIsNone(slots["portrait"]["src"])
+        self.assertTrue(slots["portrait"]["failed"])
         self.assertEqual(slots["portrait"]["index"], 1)
         self.assertEqual(slots["portrait"]["image_inputs"], [1])
         control = self.page.locator(helpers._SLOTS).nth(slots["portrait"]["index"]).locator(
@@ -137,7 +139,8 @@ class BaijiahaoVideoInputTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "exactly two"):
             await bridge.load_engine()[3]._cover_slots(self.page)
 
-    async def exercise_cover_confirmation(self, reject_confirmations=0, timeout=120):
+    async def exercise_cover_confirmation(self, reject_confirmations=0, timeout=120, fail_processing=0, confirm_only=False,
+                                         stale_after_recovery=False, resume_failed=False):
         import cv2
         import numpy as np
         # Source SHA-256 uses WebCrypto, as it does on Baijiahao's HTTPS editor.
@@ -152,10 +155,14 @@ class BaijiahaoVideoInputTest(unittest.IsolatedAsyncioTestCase):
             <input type="file" accept="image/*"></section></div>
           <script>
           window.confirmed=[];window.coverClicks={landscape:0,portrait:0};window.rejectConfirmations=0;
+          window.coverSelections={landscape:0,portrait:0};window.failProcessing=0;
+          window.staleAfterRecovery=false;
           const canvas=document.createElement('canvas');canvas.width=160;canvas.height=90;
           document.querySelectorAll('.form-cover img').forEach(e=>e.src=canvas.toDataURL());
           document.querySelectorAll('input').forEach(input=>input.onchange=()=>{
+            if(!input.files.length)return;
             const slot=input.closest('section'), kind=slot.dataset.kind;
+            coverSelections[kind]++;
             const src=URL.createObjectURL(input.files[0]);
             setTimeout(()=>{
               const modal=document.createElement('div');modal.setAttribute('role','dialog');
@@ -169,22 +176,42 @@ class BaijiahaoVideoInputTest(unittest.IsolatedAsyncioTestCase):
                   notice.textContent='裁剪处理中，请稍后再点击确定';return;
                 }
                 document.querySelector('[role="alert"]')?.remove();
+                if(kind==='landscape'&&coverSelections[kind]<=failProcessing){
+                  modal.remove();slot.querySelector('[data-testid="cover-preview"]').style.display='none';
+                  let error=slot.querySelector('.x-error');
+                  if(!error){error=document.createElement('div');error.className='x-error';slot.append(error)}
+                  error.style='width:160px;height:90px';error.textContent='重选封面';return;
+                }
                 confirmed.push(kind);modal.remove();
-                setTimeout(()=>slot.querySelector('img').src=src,150);
+                slot.querySelector('.x-error')?.remove();
+                slot.querySelector('[data-testid="cover-preview"]').style.display='block';
+                setTimeout(()=>slot.querySelector('img').src=staleAfterRecovery&&kind==='landscape'&&coverSelections[kind]>1
+                  ?canvas.toDataURL():src,150);
               };
               document.body.append(modal);
             },200);
           });</script>''')
         await self.page.evaluate('n=>window.rejectConfirmations=n', reject_confirmations)
+        await self.page.evaluate('n=>window.failProcessing=n', fail_processing)
+        await self.page.evaluate('value=>window.staleAfterRecovery=value', stale_after_recovery)
         with tempfile.TemporaryDirectory() as directory:
             payload = {}
             for kind, (width, height) in {"landscape": (160, 90), "portrait": (90, 120)}.items():
                 path = Path(directory) / f"{kind}.png"
                 cv2.imwrite(str(path), np.full((height, width, 3), 120, dtype=np.uint8))
                 payload[f"{kind}Path"] = str(path)
-            covers = await asyncio.wait_for(bridge.baijiahao_covers(self.page, payload, bridge.load_engine()[3], timeout=timeout), timeout=15)
+            if confirm_only:
+                await self.page.locator('.form-cover input[type="file"]').first.set_input_files(payload['landscapePath'])
+                await self.page.get_by_role('dialog').wait_for()
+            if resume_failed:
+                await self.page.locator('.form-cover input[type="file"]').first.set_input_files(payload['landscapePath'])
+                await self.page.get_by_role('dialog').get_by_role('button', name='确定', exact=True).click()
+                await self.page.get_by_text('重选封面', exact=True).wait_for()
+            covers = await asyncio.wait_for(bridge.baijiahao_covers(self.page, payload, bridge.load_engine()[3],
+                timeout=timeout, confirm_only=confirm_only), timeout=15)
             self.assertEqual(await self.page.evaluate("confirmed"), ["landscape", "portrait"])
             self.assertTrue(all(covers[k]["preview"].startswith("blob:") for k in ("landscape", "portrait")))
+            return covers
 
     async def test_cover_upload_waits_for_crop_confirmation_and_replacement_preview(self):
         await self.exercise_cover_confirmation()
@@ -192,6 +219,40 @@ class BaijiahaoVideoInputTest(unittest.IsolatedAsyncioTestCase):
     async def test_processing_notice_can_require_more_than_two_confirm_attempts(self):
         await self.exercise_cover_confirmation(reject_confirmations=2)
         self.assertEqual(await self.page.evaluate('coverClicks'), {'landscape': 3, 'portrait': 3})
+
+    async def test_failed_processing_after_confirm_reselects_only_the_same_cover_once(self):
+        covers = await self.exercise_cover_confirmation(fail_processing=1, timeout=5)
+        self.assertEqual(await self.page.evaluate('coverSelections'), {'landscape': 2, 'portrait': 1})
+        self.assertEqual(covers['landscape']['confirmClicks'], 2)
+        self.assertEqual(covers['landscape']['verification'], 'source_and_preview')
+        self.assertLessEqual(covers['landscape']['pixel_difference']['mae'], 3)
+
+    async def test_resume_reselects_a_preexisting_failed_slot_with_the_same_file_still_selected(self):
+        covers = await self.exercise_cover_confirmation(fail_processing=1, timeout=3, resume_failed=True)
+        self.assertEqual(await self.page.evaluate('coverSelections'), {'landscape': 2, 'portrait': 1})
+        self.assertEqual(covers['landscape']['confirmClicks'], 1)
+        self.assertEqual(covers['landscape']['verification'], 'source_and_preview')
+
+    async def test_resume_of_a_failed_slot_does_not_grant_another_processing_retry(self):
+        with self.assertRaisesRegex(RuntimeError, '横版封面.*再次失败'):
+            await self.exercise_cover_confirmation(fail_processing=99, timeout=3, resume_failed=True)
+        self.assertEqual(await self.page.evaluate('coverSelections'), {'landscape': 2, 'portrait': 0})
+
+    async def test_repeated_processing_failure_stops_without_reselecting_forever(self):
+        with self.assertRaisesRegex(RuntimeError, '横版封面.*再次失败'):
+            await self.exercise_cover_confirmation(fail_processing=99, timeout=5)
+        self.assertEqual(await self.page.evaluate('coverSelections'), {'landscape': 2, 'portrait': 0})
+        self.assertEqual(await self.page.evaluate('confirmed'), [])
+
+    async def test_confirm_only_never_reselects_a_failed_cover(self):
+        with self.assertRaisesRegex(RuntimeError, '横版封面.*失败.*不能.*重新选择'):
+            await self.exercise_cover_confirmation(fail_processing=1, timeout=2, confirm_only=True)
+        self.assertEqual(await self.page.evaluate('coverSelections'), {'landscape': 1, 'portrait': 0})
+
+    async def test_recovery_still_rejects_an_automatic_frame_in_the_final_preview(self):
+        with self.assertRaisesRegex(TimeoutError, '当前仍为旧封面'):
+            await self.exercise_cover_confirmation(fail_processing=1, timeout=4, stale_after_recovery=True)
+        self.assertEqual(await self.page.evaluate('coverSelections'), {'landscape': 2, 'portrait': 0})
 
     async def test_permanent_processing_stops_with_cover_stage_and_click_count(self):
         with self.assertRaisesRegex(TimeoutError, r'横版封面确认超时：.*已点击确定 \d+ 次'):

@@ -101,7 +101,7 @@ class BaijiahaoEditor:
         const images = [...slot.querySelectorAll('[data-testid="cover-preview"] img')];
         const image = images.length === 1 ? images[0] : null;
         return {index, kind: rect.width > rect.height ? 'landscape' : rect.height > rect.width ? 'portrait' : 'square',
-          image_inputs: imageInputs, image_count: images.length,
+          image_inputs: imageInputs, image_count: images.length, failed,
           src: !failed && image?.complete && image.naturalWidth ? image.currentSrc || image.src : null};
       }).filter(Boolean)"""
 

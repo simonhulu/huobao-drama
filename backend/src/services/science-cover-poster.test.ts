@@ -131,9 +131,43 @@ test('a lost submission acknowledgement is preserved and not replayed on automat
   const f = await fixture(t)
   let submissions = 0
   f.images.execute = async () => { submissions++; throw new Error('connection lost after dispatch') }
-  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /connection lost/)
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /封面底图 1.*提交结果未确认/)
   await assert.rejects(generateScienceCoverPosters(f.input, f.options), /已提交但未取得任务编号/)
   assert.equal(submissions, 1); assert.equal(f.requests.length, 1)
+})
+
+test('an uncertain portrait submission names its base and preserves the plan and finished landscape without redispatch', async t => {
+  const f = await fixture(t), execute = f.images.execute, submissions: number[] = []
+  const failure = new TypeError('fetch failed at https://provider.invalid/image?token=SECRET', {
+    cause: Object.assign(new Error('download DNS failure'), { code: 'ENOTFOUND' }),
+  })
+  f.images.execute = async (id, configId, executionSignal) => {
+    submissions.push(id)
+    if (id === 2) throw failure
+    return execute(id, configId, executionSignal)
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), error => {
+    assert.ok(error instanceof Error)
+    assert.match(error.message, /封面底图 2.*提交结果未确认/)
+    assert.match(error.message, /检查点.*横图.*保留/)
+    assert.match(error.message, /核对.*请求.*仅重做缺失底图/)
+    assert.doesNotMatch(error.message, /https?:|provider\.invalid|token|SECRET/)
+    assert.equal(error.cause, failure)
+    return true
+  })
+  const checkpointPath = path.join(f.input.directory, 'poster-checkpoint.json')
+  const saved = JSON.parse(await fs.readFile(checkpointPath, 'utf8'))
+  const landscapePath = path.join(f.input.directory, 'cover-landscape.jpg'), landscape = await fs.readFile(landscapePath)
+  assert.deepEqual(saved.plan, plan)
+  assert.equal(saved.images.portrait.generationId, 2)
+  assert.equal(saved.images.portrait.dispatched, true)
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /封面底图 2.*已提交但未取得任务编号/)
+  assert.deepEqual(JSON.parse(await fs.readFile(checkpointPath, 'utf8')), saved)
+  assert.deepEqual(await fs.readFile(landscapePath), landscape)
+  assert.deepEqual(submissions, [1, 2])
+  assert.deepEqual(f.composed, ['landscape'])
+  assert.equal(f.requests.length, 2)
+  assert.equal(f.calls(), 1)
 })
 
 test('a rejected model advances only through the configured list and retains the selected provider job across restart', async t => {
@@ -201,7 +235,9 @@ test('unknown failures and already accepted jobs never switch models', async t =
       f.states.set(id, { ...f.states.get(id)!, status: 'failed', model: 'unavailable-model', ...failure })
       throw new Error(failure.errorMsg)
     }
-    await assert.rejects(generateScienceCoverPosters(f.input, f.options), error => error instanceof Error && error.message === failure.errorMsg)
+    await assert.rejects(generateScienceCoverPosters(f.input, f.options), error => error instanceof Error &&
+      (failure.taskId || failure.lastErrorCode === 'bad_request' ? error.message === failure.errorMsg
+        : /封面底图 1.*提交结果未确认/.test(error.message)))
     assert.equal(f.requests.length, 1)
   }
 })
@@ -265,7 +301,7 @@ test('a lost acknowledgement while retrying a restored rejection cannot be repla
     f.states.set(id, { ...f.states.get(id)!, status: 'processing', lastErrorCode: null, errorMsg: null })
     throw new Error('connection lost after dispatch')
   }
-  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /connection lost/)
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /封面底图 1.*提交结果未确认/)
   await assert.rejects(generateScienceCoverPosters(f.input, f.options), /已提交但未取得任务编号/)
   assert.equal(submissions, 1)
   assert.equal(f.requests.length, 1)

@@ -615,6 +615,8 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
                 if confirm_only:
                     raise RuntimeError("原封面缺少上传证明，不能在确认裁剪时重新选择文件")
                 control = page.locator(helpers._SLOTS).nth(slot["index"]).locator('input[type="file"]').nth(slot["image_inputs"][0])
+                if slot.get("failed"):
+                    await control.set_input_files([])
                 await control.set_input_files(filename)
                 source_verified = True
                 selected_now = must_confirm = True
@@ -622,6 +624,8 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
             expected_pixels = helpers._normalized_pixels(base64.b64encode(Path(filename).read_bytes()).decode())
         deadline = time.monotonic() + timeout
         clicks = 0
+        clicks_at_selection = 0
+        reselected = bool(slot.get("failed") and selected_now)
         last_click = 0
         waiting_for = "等待裁剪窗口打开"
         confirmed_pixels = None
@@ -630,10 +634,30 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
             # A confirmed crop can reveal an older crop while its own preview finishes applying.
             other_step = next((step for step in steps if len(dialogs) == 1 and step[2] != label
                                and step[2] in dialogs[0]["text"]), None)
-            if not dialogs or (other_step and clicks > 0):
-                current = (await helpers._cover_slots(page))[kind]["src"]
+            confirmed_selection = clicks > clicks_at_selection
+            if not dialogs or (other_step and confirmed_selection):
+                current_slot = (await helpers._cover_slots(page))[kind]
+                current = current_slot["src"]
+                if not dialogs and current_slot.get("failed") and confirmed_selection and time.monotonic() - last_click >= 1:
+                    if confirm_only:
+                        raise RuntimeError(f"{label[:2]}封面处理失败，确认裁剪时不能重新选择文件；已保留原视频和上传检查点")
+                    if reselected:
+                        raise RuntimeError(f"{label[:2]}封面处理再次失败，已保留原视频和上传检查点，请继续原任务重试封面")
+                    # The platform explicitly asks to reselect this image after
+                    # rejecting its crop. Recover only that same cover, once.
+                    control = page.locator(helpers._SLOTS).nth(slot["index"]).locator('input[type="file"]').nth(slot["image_inputs"][0])
+                    progress(f"平台处理{label[:2]}封面失败，正在原视频上重新选择同一封面并核验", "covers")
+                    await control.set_input_files([])
+                    await control.set_input_files(filename)
+                    reselected = True
+                    clicks_at_selection = clicks
+                    source_verified = selected_now = must_confirm = True
+                    confirmed_pixels = None
+                    last_click = 0
+                    await asyncio.sleep(0.5)
+                    continue
                 waiting_for = "等待新封面预览加载" if clicks else "等待裁剪窗口打开"
-                if current and source_verified and (not must_confirm or clicks > 0):
+                if current and source_verified and (not must_confirm or confirmed_selection):
                     actual_pixels = await helpers._cover_pixels(page, current)
                     difference = helpers._pixel_difference(expected_pixels, actual_pixels)
                     crop_difference = helpers._pixel_difference(confirmed_pixels if confirmed_pixels is not None else expected_pixels, actual_pixels)
@@ -654,7 +678,7 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
                             raise RuntimeError("已确认的封面裁剪窗反复出现，保留原页和封面证明后停止")
                         steps.append(other_step)
                     break
-                if other_step and clicks > 0:
+                if other_step and confirmed_selection:
                     await asyncio.sleep(0.5)
                     continue
             if dialogs:
@@ -702,7 +726,7 @@ async def baijiahao_covers(page, payload, helpers, verified=None, checkpoint=Non
                                 progress(f"正在确认{label[:2]}封面（第 {clicks} 次），等待裁剪窗口关闭", "covers")
             await asyncio.sleep(0.5)
         else:
-            raise TimeoutError(f"{label[:2]}封面确认超时：{waiting_for}（已点击确定 {clicks} 次）；请重新上传")
+            raise TimeoutError(f"{label[:2]}封面确认超时：{waiting_for}（已点击确定 {clicks} 次）；已保留原视频，请继续原任务重试封面")
     return result
 
 

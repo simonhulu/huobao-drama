@@ -268,7 +268,7 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
             options.report?.('正在重新尝试原封面模型，检查图片服务是否已恢复')
           }
           if (image.dispatched && !state.taskId && !retryRejectedModel && !(state.status === 'failed' && definiteRejections.has(state.lastErrorCode || '')))
-            throw new Error(`封面底图 ${image.generationId} 已提交但未取得任务编号，已保留检查点；请核对原请求，或手动重新生成新版本`)
+            throw new Error(`封面底图 ${image.generationId} 已提交但未取得任务编号，原检查点${checkpoint.outputs.landscape ? '和已完成横图' : ''}已保留；请核对该请求，或仅重做缺失底图`)
           options.report?.(`正在${image.dispatched ? '继续查询' : '生成'}${format.key === 'landscape' ? '横版' : '竖版'}独立海报底图`)
           options.signal.throwIfAborted()
           image.dispatched = true
@@ -279,6 +279,9 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
           } catch (error) {
             options.signal.throwIfAborted()
             const failed = await runtime.state(image.generationId)
+            if (image.dispatched && !failed?.taskId && failed?.status !== 'completed'
+              && !(failed && (rejectedModel(failed) || failed.status === 'failed' && definiteRejections.has(failed.lastErrorCode || ''))))
+              throw new Error(`封面底图 ${image.generationId} 提交结果未确认，原检查点${checkpoint.outputs.landscape ? '和已完成横图' : ''}已保留；请核对该请求，或仅重做缺失底图`, { cause: error })
             if (!failed || !rejectedModel(failed)) throw error
           }
         }
