@@ -142,6 +142,45 @@ test('legacy pending state never proves completion even if the other fields appe
   await assert.rejects(f.inspect(), /文稿/)
 })
 
+test('the observed same-account queue stays queued even with zero wait time or apparently ready metadata', async () => {
+  const f = productionFixture()
+  f.legacy.project.state = '-1'
+  f.legacy.project.state_message = '你有任务正在生成中，完成后将自动开始'
+  f.legacy.project.stage = '0'
+  f.legacy.project.progress = '0'
+  f.sandbox.project.project_stage = 0
+  f.sandbox.clips = null
+  assert.equal((await f.inspect()).status, 'queued')
+  assert.deepEqual(f.calls, ['/api/innovideo/project/info', '/api/v2/innovideo/project/info'])
+  f.legacy.project.progress = '100'
+  f.sandbox.project.project_stage = 3
+  f.sandbox.clips = [{ state: 1 }]
+  assert.equal((await f.inspect()).status, 'queued')
+  f.legacy.project.state = '0'
+  f.legacy.project.state_message = '项目处理完成'
+  assert.equal((await f.inspect()).status, 'completed')
+})
+
+test('queue metadata still requires the original project, script, voice and valid sandbox state', async () => {
+  for (const mutate of [
+    (f: ReturnType<typeof productionFixture>) => { f.legacy.project.pid = '999' },
+    (f: ReturnType<typeof productionFixture>) => { f.legacy.project.script = '另一篇文稿' },
+    (f: ReturnType<typeof productionFixture>) => { f.legacy.project.voice_id = '999' },
+    (f: ReturnType<typeof productionFixture>) => { f.sandbox.project.pid = 999 },
+    (f: ReturnType<typeof productionFixture>) => { f.sandbox.project.state = -1 },
+    (f: ReturnType<typeof productionFixture>) => { f.legacy.project.state = '-2' },
+    (f: ReturnType<typeof productionFixture>) => { f.legacy.project.is_agent_sandbox = false },
+    (f: ReturnType<typeof productionFixture>) => { f.legacy.project.state_message += '，但遇到错误' },
+  ]) {
+    const f = productionFixture()
+    f.legacy.project.state = '-1'
+    f.legacy.project.state_message = '你有任务正在生成中，完成后将自动开始'
+    mutate(f)
+    await assert.rejects(f.inspect({ id: 6036721, type: 0 }),
+      (e: unknown) => e instanceof HuashengExportApiError && e.code === 'invalid_response')
+  }
+})
+
 test('only the observed sandbox pending state is allowed; failures and unknown states remain errors', async () => {
   for (const mutate of [
     (f: ReturnType<typeof productionFixture>) => { f.legacy.project.state = '-2'; f.legacy.project.state_message = '视频制作中，' },

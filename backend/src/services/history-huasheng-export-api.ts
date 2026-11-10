@@ -11,6 +11,7 @@ import { closeHuashengTemporaryPage, connectHuashengBrowser, createHuashengTempo
 const ORIGIN = 'https://www.huasheng.cn'
 const API = '/api/v2/innovideo'
 const PROJECT_API = '/api/innovideo'
+const PRODUCTION_QUEUE_MESSAGE = '你有任务正在生成中，完成后将自动开始'
 const EXPORT_ROOT = fileURLToPath(new URL('../../../data/huasheng-exports', import.meta.url))
 const MAX_BYTES = 4 * 1024 ** 3
 export type HuashengExportErrorCode = 'login_required' | 'browser_unavailable' | 'retryable' | 'invalid_response' | 'result_uncertain'
@@ -51,10 +52,11 @@ function productionFlag(value: unknown, field: string): boolean {
 }
 function verifyProductionProject(project: any, pid: string, allowLegacyPending = false) {
   if (!project || String(project.pid) !== pid) throw new HuashengExportApiError('invalid_response', '花生返回的制作项目编号不匹配')
-  // Observed legacy sandbox metadata uses -1 with this message while its v2
-  // stage is still zero. Inspect that stage, but never treat -1 as completed.
+  // Observed legacy sandbox metadata uses -1 during production or account
+  // queueing. Validate v2 as well, and never treat these messages as completion.
   if (allowLegacyPending && (project.state === -1 || project.state === '-1')
-    && typeof project.state_message === 'string' && /^视频制作中[，。,.\s]*$/.test(project.state_message)
+    && typeof project.state_message === 'string'
+    && (/^视频制作中[，。,.\s]*$/.test(project.state_message) || project.state_message === PRODUCTION_QUEUE_MESSAGE)
     && productionFlag(project.is_agent_sandbox, '制作类型')) return -1
   if (productionNumber(project.state, '状态') !== 0) throw new HuashengExportApiError('invalid_response', '花生项目处理状态异常，请检查原项目')
   return 0
@@ -323,7 +325,9 @@ export function createHuashengExportClient(options: {
       const progress = productionNumber(project.progress, '制作进度', 100)
       const stage = productionNumber(sandbox ? project.project_stage : project.stage, '制作阶段', sandbox ? 3 : Number.MAX_SAFE_INTEGER)
       const compositing = productionFlag(project.composite_running, '合成状态')
-      if (waitTime > 0) return { status: 'queued', message: '花生接口显示制作排队，等待处理' }
+      if (waitTime > 0 || legacyState === -1 && original.state_message === PRODUCTION_QUEUE_MESSAGE) {
+        return { status: 'queued', message: '花生接口显示制作排队，等待处理' }
+      }
       // A sandbox project can briefly keep project_stage at zero after the
       // confirmation is accepted. An active compositor is authoritative in
       // that window; only an idle stage-zero project is truly not started.
