@@ -16,6 +16,54 @@ async function stalledComposerFixture(t: TestContext) {
   return { design: {}, variants: [{ key: 'portrait', baseImagePath, width: 32, height: 32 }], outputDir: directory }
 }
 
+for (const cleanupFailure of ['timeout', 'rejection'] as const) {
+  test(`a completed cover survives Chrome close ${cleanupFailure} without discarding its image`, async t => {
+    const input = await stalledComposerFixture(t), source = await fs.readFile(input.variants[0]!.baseImagePath)
+    let closeStarted!: () => void, launchSignal: AbortSignal | undefined, disconnected = false
+    const closing = new Promise<void>(resolve => { closeStarted = resolve })
+    t.mock.method(puppeteer, 'launch', async (options?: LaunchOptions) => {
+      launchSignal = options?.signal
+      return { newPage: async () => ({ setViewport: async () => {}, setContent: async () => {},
+        evaluate: async () => {}, screenshot: async () => source }),
+      close: () => { closeStarted(); return cleanupFailure === 'timeout' ? new Promise(() => {}) : Promise.reject(new Error('Chrome close failed')) },
+      disconnect: async () => { disconnected = true } } as any
+    })
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    let outcome: { result?: Awaited<ReturnType<typeof composeCoverVariants>>; error?: unknown } | undefined
+    const completion = composeCoverVariants(input).then(result => { outcome = { result } }, error => { outcome = { error } })
+    await closing
+    t.mock.timers.tick(5001)
+    await completion
+    assert.equal(outcome?.error, undefined, 'cleanup cannot discard an already completed cover')
+    assert.deepEqual(outcome?.result, [{ key: 'portrait', path: path.join(input.outputDir, 'portrait.png'), width: 32, height: 32 }])
+    assert.deepEqual(await fs.readFile(outcome!.result![0]!.path), source)
+    assert.deepEqual(await fs.readFile(input.variants[0]!.baseImagePath), source, 'the reusable base image is unchanged')
+    assert.equal(launchSignal?.aborted, true, 'the composer still force-stops its owned Chrome on cleanup failure')
+    assert.equal(disconnected, true)
+  })
+}
+
+test('cancelling after the image is written still rejects while Chrome close is stalled', async t => {
+  const input = await stalledComposerFixture(t), source = await fs.readFile(input.variants[0]!.baseImagePath)
+  const controller = new AbortController(), reason = new Error('user stopped after cover render')
+  let closeStarted!: () => void, launchSignal: AbortSignal | undefined
+  const closing = new Promise<void>(resolve => { closeStarted = resolve })
+  t.mock.method(puppeteer, 'launch', async (options?: LaunchOptions) => {
+    launchSignal = options?.signal
+    return { newPage: async () => ({ setViewport: async () => {}, setContent: async () => {},
+      evaluate: async () => {}, screenshot: async () => source }),
+    close: () => { closeStarted(); return new Promise(() => {}) }, disconnect: async () => {} } as any
+  })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const rejection = assert.rejects(composeCoverVariants({ ...input, signal: controller.signal }), error => error === reason)
+  await closing
+  controller.abort(reason)
+  t.mock.timers.tick(5001)
+  await rejection
+  assert.equal(launchSignal?.aborted, true)
+  assert.deepEqual(await fs.readFile(path.join(input.outputDir, 'portrait.png')), source)
+})
+
 test('a failed cover render escapes a stalled Chrome close and retains its original error', async t => {
   const input = await stalledComposerFixture(t), original = new Error('cover font loading failed')
   let closeStarted!: () => void, launchSignal: AbortSignal | undefined

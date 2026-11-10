@@ -29,7 +29,7 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2,
   const output = await fs.readFile(remote)
   const identity = { model: 'musetalk-v15', source_revision: '0a89dec45a0192b824e3cf4daf96c239440c5ed8',
     avatar_id: 'xiaolu-r3-fixture', reference_sha256: '1'.repeat(64), fps: remoteFps }
-  const state = { submissions: 0, retries: 0, deletes: 0, polls: 0, pending: false, wrongAudio: false, dropSubmission: false, dropSubmissions: 0,
+  const state = { submissions: 0, retries: 0, deletes: 0, polls: 0, downloads: 0, pending: false, wrongAudio: false, dropSubmission: false, dropSubmissions: 0,
     loadingReads: 0, failedPoll: false, onPoll: undefined as (() => void) | undefined, onResult: undefined as (() => void) | undefined,
     jobs: new Map<string, any>(), uploaded: undefined as Buffer | undefined }
   const server = createServer(async (request, response) => {
@@ -53,7 +53,7 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2,
       if (match && job) {
         if (request.method === 'DELETE') { state.deletes++; if (job.status !== 'completed') job.status = 'cancelled'; send(job); return }
         if (match[2] === '/retry' && request.method === 'POST') { state.retries++; job.status = 'completed'; send(job); return }
-        if (match[2] === '/result') { state.onResult?.(); response.setHeader('Content-Type', 'video/mp4'); response.end(output); return }
+        if (match[2] === '/result') { state.downloads++; state.onResult?.(); response.setHeader('Content-Type', 'video/mp4'); response.end(output); return }
         state.polls++; state.onPoll?.()
         if (state.failedPoll) { response.writeHead(500); response.end(); return }
         send(state.wrongAudio ? { ...job, audio_sha256: '0'.repeat(64) } : job); return
@@ -139,7 +139,7 @@ test('a completed remote result still downloads when its remote service budget e
   f.state.onResult = budget.expire
   const result = await prepareScienceMusetalkVideo(f, { signal: signal() })
   assert.ok((await fs.stat(result.presenterPath)).size > 0)
-  assert.ok(budget.budgets.includes(5 * 60_000), 'local postprocessing gets its own bounded budget')
+  assert.ok(budget.budgets.includes(15 * 60_000), 'local download, decoding and CPU normalization get a separate budget')
   assert.equal(f.state.submissions, 1); assert.equal(f.state.deletes, 0)
 })
 
@@ -156,12 +156,41 @@ test('remote service budget expiry during normalization cannot discard a complet
   assert.equal(f.state.submissions, 1); assert.equal(f.state.deletes, 0)
 })
 
+test('a local postprocessing timeout is retryable and resumes verified GPU output without resubmitting or downloading again', async t => {
+  const f = await fixture(t), gate = await gatedNormalization(t, f.root), controller = new AbortController()
+  const timeout = AbortSignal.timeout.bind(AbortSignal)
+  let captured = false
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    if (!captured && milliseconds >= 5 * 60_000) { captured = true; return controller.signal }
+    return timeout(milliseconds)
+  })
+  const running = prepareScienceMusetalkVideo(f, { signal: signal() })
+  const stopped = assert.rejects(running, (error: any) => {
+    assert.match(error.message, /处理时限/)
+    assert.equal(error.code, 'ETIMEDOUT')
+    assert.equal(error.retryable, true)
+    assert.equal(error.cause?.name, 'AbortError', 'retain the underlying child-process failure for diagnosis')
+    return true
+  })
+  await gate.started()
+  controller.abort(new DOMException('local postprocessing budget expired', 'TimeoutError'))
+  await stopped
+  assert.equal(f.state.deletes, 0)
+  assert.equal([...f.state.jobs.values()][0].status, 'completed')
+  await gate.release()
+  const result = await prepareScienceMusetalkVideo(f, { signal: signal() })
+  assert.ok((await fs.stat(result.presenterPath)).size > 0)
+  assert.equal(f.state.submissions, 1); assert.equal(f.state.retries, 0)
+  assert.equal(f.state.downloads, 1, 'the completed GPU output stays reusable across local timeouts')
+})
+
 test('parent cancellation still stops normalization and resumes the completed remote job without resubmitting', async t => {
   const f = await fixture(t), controller = new AbortController(), gate = await gatedNormalization(t, f.root)
+  const cancelled = new Error('cancel local normalization')
   const running = prepareScienceMusetalkVideo(f, { signal: controller.signal })
-  const stopped = assert.rejects(running, /cancel|abort/i)
+  const stopped = assert.rejects(running, (error: unknown) => { assert.equal(error, cancelled); return true })
   await gate.started()
-  controller.abort(new Error('cancel local normalization'))
+  controller.abort(cancelled)
   await stopped
   assert.equal(f.state.deletes, 1)
   assert.equal([...f.state.jobs.values()][0].status, 'completed')
@@ -191,6 +220,18 @@ test('one full original narration is submitted, verified, normalized and cached 
   assert.deepEqual(await prepareScienceMusetalkVideo(f, { signal: signal() }), result)
   assert.equal((await fs.stat(audioPath)).mtimeMs, 1000, 'bound FLAC bytes are reused across deployments instead of re-encoding with a different FFmpeg version')
   assert.equal(f.state.submissions, 1)
+})
+
+test('a corrupted retained result is downloaded again before normalization without resubmitting GPU work', async t => {
+  const f = await fixture(t)
+  const original = await prepareScienceMusetalkVideo(f, { signal: signal() })
+  await fs.writeFile(original.presenterPath, 'invalid normalized cache')
+  await fs.writeFile(path.join(path.dirname(original.presenterPath), 'remote.mp4'), 'partial download')
+  const result = await prepareScienceMusetalkVideo(f, { signal: signal() })
+  assert.deepEqual(result, original)
+  assert.equal(f.state.downloads, 2)
+  assert.equal(f.state.submissions, 1); assert.equal(f.state.retries, 0)
+  assert.ok((await probe(result.presenterPath)).streams.some((item: any) => item.codec_type === 'video'))
 })
 
 test('native 25fps and a changed quality profile use separate results without overwriting the prior presenter', async t => {

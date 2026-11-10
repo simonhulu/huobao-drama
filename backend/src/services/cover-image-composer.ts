@@ -127,9 +127,10 @@ async function withCoverBrowser<T>(render: (browser: Browser) => Promise<T>, ext
         // Puppeteer's launch signal kills only the isolated process group it created.
         controller.abort(error)
         void browser.disconnect().catch(() => {})
-        if (completed) throw error
+        // Cleanup failure must not discard images already written by a successful render.
       } finally { clearTimeout(closeDeadline) }
     } else controller.abort()
+    if (completed) externalSignal?.throwIfAborted()
   }
 }
 

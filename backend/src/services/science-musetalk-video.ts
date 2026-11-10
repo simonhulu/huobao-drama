@@ -286,16 +286,23 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       await delay(positive('MUSETALK_POLL_INTERVAL_MS', 3000), undefined, { signal })
     }
     // Completed GPU work must not lose its local download/normalization budget.
-    // Give long narrations up to real-time postprocessing, bounded to 5-60 minutes.
-    const postprocessTimeoutMs = Math.min(60 * 60_000, Math.max(5 * 60_000, Math.ceil(main.duration * 1000)))
-    signal = AbortSignal.any([options.signal, AbortSignal.timeout(postprocessTimeoutMs)])
+    // Download, full decoding and CPU normalization share this budget on older Intel hosts.
+    const postprocessTimeoutMs = Math.min(60 * 60_000, Math.max(15 * 60_000, Math.ceil(main.duration * 3000)))
+    const postprocessDeadline = AbortSignal.timeout(postprocessTimeoutMs)
+    signal = AbortSignal.any([options.signal, postprocessDeadline])
     options.report?.('MuseTalk 口型已完成，正在下载并校验主播视频')
     const raw = path.join(work, 'remote.mp4'), temporary = path.join(work, `.${randomUUID()}.mp4`)
     try {
-      const response = await request(`${jobUrl}/result`, {}, postprocessTimeoutMs)
-      if (!response.body) throw new Error('MuseTalk 没有返回口型视频')
-      await pipeline(Readable.fromWeb(response.body as any), createWriteStream(raw), { signal })
-      if (!validHash(completed.result_sha256) || await fileHash(raw, signal) !== completed.result_sha256) throw new Error('MuseTalk 输出视频校验失败')
+      if (!validHash(completed.result_sha256)) throw new Error('MuseTalk 输出视频校验失败')
+      let reusable = false
+      try { reusable = await fileHash(raw, signal) === completed.result_sha256 }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      if (!reusable) {
+        const response = await request(`${jobUrl}/result`, {}, postprocessTimeoutMs)
+        if (!response.body) throw new Error('MuseTalk 没有返回口型视频')
+        await pipeline(Readable.fromWeb(response.body as any), createWriteStream(raw), { signal })
+        if (await fileHash(raw, signal) !== completed.result_sha256) throw new Error('MuseTalk 输出视频校验失败')
+      }
       const remote = await media(raw, signal)
       if (Math.abs(remote.duration - main.duration) > .15 || Number(remote.video.width) !== 360 || Number(remote.video.height) !== 360) {
         throw new Error('MuseTalk 输出时长或尺寸不符合要求，不能冻结或循环补齐正文')
@@ -315,6 +322,13 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       await save(checkpointPath, checkpoint)
       succeeded = true
       return { presenterPath, sourceSha256 }
+    } catch (error) {
+      options.signal.throwIfAborted()
+      if (postprocessDeadline.aborted) {
+        throw Object.assign(new Error('MuseTalk 本地主播后处理超过处理时限，已保留远程成品和原任务检查点，请继续原任务重试', { cause: error }),
+          { code: 'ETIMEDOUT', retryable: true })
+      }
+      throw error
     } finally { await fs.rm(temporary, { force: true }) }
   } finally {
     if (!succeeded && options.signal.aborted && api && remoteJobId) {
