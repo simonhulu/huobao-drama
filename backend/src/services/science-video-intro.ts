@@ -11,7 +11,7 @@ import { getVideoEncoderOptions } from './composition/video-encoder.js'
 const exec = promisify(execFile)
 const defaultIntroPath = fileURLToPath(new URL('../../../data/science-pop/assets/xiaolu-intro.mp4', import.meta.url))
 const VERSION = 5
-const HALF_BODY_LAYOUT_VERSION = 2
+const HALF_BODY_LAYOUT_VERSION = 3
 
 export interface ScienceVideoIntroInput { videoPath: string; directory: string }
 export type SciencePresenterFraming = 'closeup' | 'head-and-shoulders' | 'half-body'
@@ -153,11 +153,11 @@ function concatFilter(intro: VideoInfo, main: VideoInfo, width: number, height: 
       + `tpad=stop_mode=clone:stop_duration=${media.duration + transition},trim=duration=${media.duration + (index === 0 ? transition : 0)},setpts=PTS-STARTPTS,fps=${main.fps},settb=AVTB[v${index}]`)
   const audio = includeAudio ? concatAudioFilter(intro, main) : []
   const diameter = Math.min(width, height, Math.max(16, Math.round(Math.min(width, height) * (presenterFraming === 'half-body' ? .30 : .25) / 2) * 2))
-  // Some mobile feeds center-crop landscape videos to 3:2; leave room for that crop,
-  // the right-side controls, and the original subtitles in the bottom 18%.
+  // Retain the full circle in centered 3:2 feeds. Half-body windows sit near
+  // that edge, with a separate bottom inset above the original subtitles.
   const feedWidth = Math.min(width, height * 1.5)
-  const right = Math.ceil(((width - feedWidth) / 2 + feedWidth * .12) / 2) * 2
-  const bottom = Math.ceil(height * .18 / 2) * 2
+  const right = Math.ceil(((width - feedWidth) / 2 + feedWidth * (presenterFraming === 'half-body' ? .025 : .12)) / 2) * 2
+  const bottom = Math.ceil(height * (presenterFraming === 'half-body' ? .14 : .18) / 2) * 2
   const left = width - diameter - right, top = height - diameter - bottom
   const border = Math.max(1, Math.round(Math.min(width, height) * .002))
   const radius = diameter / 2, distance = 'hypot(X-(W-1)/2,Y-(H-1)/2)'

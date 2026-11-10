@@ -363,7 +363,7 @@ for (const dimensions of ['320x180', '300x200', '180x320']) test(`mobile feed pr
   assert.ok(presenterPixels > 500, 'the full presenter is visible in the actual encoded frame')
 })
 
-for (const dimensions of ['320x180', '180x320']) test(`larger half-body circle keeps its 30-percent diameter inside the mobile safe area at ${dimensions}`, async t => {
+for (const dimensions of ['320x180', '300x200', '180x320']) test(`half-body circle sits farther right and lower while retaining its size and mobile crop at ${dimensions}`, async t => {
   const f = await fixture(t)
   const [width, height] = dimensions.split('x').map(Number) as [number, number]
   await clip(f.videoPath, 'blue', 880, dimensions, 15, 48000, 2, 1.2)
@@ -374,8 +374,8 @@ for (const dimensions of ['320x180', '180x320']) test(`larger half-body circle k
     '-frames:v', '1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'], { encoding: 'buffer' })
   const cropWidth = Math.min(width, height * 1.5), cropLeft = (width - cropWidth) / 2
   const diameter = Math.round(Math.min(width, height) * .30 / 2) * 2
-  const right = Math.ceil((cropLeft + cropWidth * .12) / 2) * 2
-  const bottom = Math.ceil(height * .18 / 2) * 2
+  const right = Math.ceil((cropLeft + cropWidth * .025) / 2) * 2
+  const bottom = Math.ceil(height * .14 / 2) * 2
   const left = width - diameter - right, top = height - diameter - bottom
   let minX = width, minY = height, maxX = -1, maxY = -1
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
@@ -383,10 +383,10 @@ for (const dimensions of ['320x180', '180x320']) test(`larger half-body circle k
     if (stdout[index]! < 170 || stdout[index + 1]! < 160) continue
     minX = Math.min(minX, x); minY = Math.min(minY, y)
     maxX = Math.max(maxX, x); maxY = Math.max(maxY, y)
-    assert.ok(x >= cropLeft && x < cropLeft + cropWidth * .88, 'the larger circle clears feed cropping and right controls')
-    assert.ok(y < height * .82, 'the larger circle stays above the subtitle band')
+    assert.ok(x >= cropLeft && x < cropLeft + cropWidth * .975, 'the full circle stays inside the feed crop with a small right inset')
+    assert.ok(y < height * .86, 'the full circle stays above the subtitle band')
   }
-  assert.ok(Math.abs(minX - left) <= 1 && Math.abs(minY - top) <= 1, `larger circle begins at ${left},${top}, got ${minX},${minY}`)
+  assert.ok(Math.abs(minX - left) <= 1 && Math.abs(minY - top) <= 1, `lower-right circle begins at ${left},${top}, got ${minX},${minY}`)
   assert.ok(maxX - minX + 1 >= diameter - 2 && maxY - minY + 1 >= diameter - 2,
     `the encoded circle must span ${diameter}px rather than the old 25 percent: ${maxX - minX + 1}x${maxY - minY + 1}`)
 })
@@ -503,11 +503,11 @@ test('half-body framing preserves the centered source body and both gestures wit
   assert.notEqual(halfBody.videoPath, zoomed.videoPath)
   assert.notEqual(halfBody.videoPath, closeup.videoPath)
   assert.equal(halfBody.sourceSha256, zoomed.sourceSha256)
-  const body = await pixel(halfBody.videoPath, 1.35, { x: 237, y: 133, width: 4, height: 4 })
+  const body = await pixel(halfBody.videoPath, 1.35, { x: 263, y: 141, width: 4, height: 4 })
   assert.ok(body[1]! > 170 && body[0]! < 70 && body[2]! < 70, `the lower torso remains visible: ${body}`)
-  const leftHand = await pixel(halfBody.videoPath, 1.35, { x: 219, y: 116, width: 4, height: 4 })
+  const leftHand = await pixel(halfBody.videoPath, 1.35, { x: 245, y: 124, width: 4, height: 4 })
   assert.ok(leftHand[0]! < 70 && leftHand[1]! > 170 && leftHand[2]! > 170, `the left gesture remains visible: ${leftHand}`)
-  const rightHand = await pixel(halfBody.videoPath, 1.35, { x: 249, y: 116, width: 4, height: 4 })
+  const rightHand = await pixel(halfBody.videoPath, 1.35, { x: 275, y: 124, width: 4, height: 4 })
   assert.ok(rightHand[0]! > 170 && rightHand[1]! < 70 && rightHand[2]! > 170, `the right gesture remains visible: ${rightHand}`)
   assert.deepEqual(await prepareScienceVideoWithIntro({ ...f, videoPath: halfBody.videoPath },
     { ...options, presenterFraming: 'half-body' }), halfBody)
@@ -524,15 +524,15 @@ test('half-body intro motion keeps the torso and both gestures while shrinking i
     '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2', '-shortest', f.introPath])
   const result = await prepareScienceVideoWithIntro(f,
     { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath, presenterFraming: 'half-body' })
-  const body = await pixel(result.videoPath, .6, { x: 237, y: 133, width: 4, height: 4 })
+  const body = await pixel(result.videoPath, .6, { x: 263, y: 141, width: 4, height: 4 })
   assert.ok(body[1]! > 170 && body[0]! < 70 && body[2]! < 70, `intro motion retains the torso: ${body}`)
-  const leftHand = await pixel(result.videoPath, .6, { x: 220, y: 120, width: 3, height: 3 })
+  const leftHand = await pixel(result.videoPath, .6, { x: 246, y: 128, width: 3, height: 3 })
   assert.ok(leftHand[0]! < 70 && leftHand[1]! > 170 && leftHand[2]! > 170, `intro motion retains the left gesture: ${leftHand}`)
-  const rightHand = await pixel(result.videoPath, .6, { x: 249, y: 123, width: 3, height: 3 })
+  const rightHand = await pixel(result.videoPath, .6, { x: 275, y: 131, width: 3, height: 3 })
   assert.ok(rightHand[0]! > 170 && rightHand[1]! < 70 && rightHand[2]! > 170, `intro motion retains the right gesture: ${rightHand}`)
 })
 
-test('half-body layout upgrades cannot reuse an older smaller-circle cache', async t => {
+for (const previousLayout of [undefined, 2]) test(`half-body layout upgrades cannot reuse a prior layout ${previousLayout ?? 'without version'}`, async t => {
   const f = await fixture(t)
   const options = { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath, presenterFraming: 'half-body' as const }
   const first = await prepareScienceVideoWithIntro(f, options)
@@ -540,17 +540,18 @@ test('half-body layout upgrades cannot reuse an older smaller-circle cache', asy
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'))
   const entry = manifest.entries.find((entry: any) => entry.videoPath === first.videoPath)
   const oldKey = createHash('sha256').update(JSON.stringify([5, first.sourceSha256, first.introSha256,
-    await digest(f.presenterPath), 'half-body'])).digest('hex')
+    await digest(f.presenterPath), 'half-body', ...(previousLayout === undefined ? [] : [previousLayout])])).digest('hex')
   const oldPath = path.join(f.directory, `science-with-intro-${oldKey}.mp4`)
   if (oldPath !== first.videoPath) await fs.copyFile(first.videoPath, oldPath)
   entry.videoPath = oldPath
-  delete entry.presenterLayoutVersion
+  if (previousLayout === undefined) delete entry.presenterLayoutVersion
+  else entry.presenterLayoutVersion = previousLayout
   await fs.writeFile(manifestPath, JSON.stringify(manifest))
   const upgraded = await prepareScienceVideoWithIntro({ ...f, videoPath: oldPath }, options)
-  assert.notEqual(upgraded.videoPath, oldPath, 'an old half-body proof cannot authorize the enlarged-circle cache')
+  assert.notEqual(upgraded.videoPath, oldPath, 'an old half-body proof cannot authorize the repositioned-circle cache')
   assert.equal(upgraded.sourceSha256, first.sourceSha256, 'the original main remains bound without another intro')
   const updated = JSON.parse(await fs.readFile(manifestPath, 'utf8'))
-  assert.equal(updated.entries.find((entry: any) => entry.videoPath === upgraded.videoPath).presenterLayoutVersion, 2)
+  assert.equal(updated.entries.find((entry: any) => entry.videoPath === upgraded.videoPath).presenterLayoutVersion, 3)
   assert.deepEqual(await prepareScienceVideoWithIntro(f, options), upgraded)
 })
 
