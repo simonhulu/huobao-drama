@@ -73,10 +73,16 @@ function mediaUrl(value: string, pid: string, projectHash: string) {
 }
 
 function browserSessionError(error: unknown): HuashengExportApiError {
-  if (!(error instanceof HuashengBrowserError)) return new HuashengExportApiError('browser_unavailable', '花生专用浏览器未连接，请打开登录窗口')
+  if (!(error instanceof HuashengBrowserError)) {
+    const failure = new HuashengExportApiError('browser_unavailable', '花生专用浏览器未连接，请打开登录窗口')
+    failure.cause = error
+    return failure
+  }
   const code = error.code === 'login_required' ? 'login_required' : error.code === 'manual_review' ? 'invalid_response'
     : error.retryable ? 'retryable' : 'browser_unavailable'
-  return new HuashengExportApiError(code, error.message)
+  const failure = new HuashengExportApiError(code, error.message)
+  failure.cause = error
+  return failure
 }
 
 /** Project status GETs only need the existing login cookies, without opening a page. */
@@ -97,7 +103,9 @@ export async function readHuashengProductionSession(input: ProjectInput): Promis
   } catch (error) {
     input.signal.throwIfAborted()
     if (error instanceof HuashengExportApiError) throw error
-    throw new HuashengExportApiError('retryable', '读取花生登录会话失败，稍后自动重试')
+    const failure = new HuashengExportApiError('retryable', '读取花生登录会话失败，稍后自动重试')
+    failure.cause = error
+    throw failure
   } finally { await browser.disconnect().catch(() => {}) }
 }
 
