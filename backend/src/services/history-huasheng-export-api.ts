@@ -375,7 +375,8 @@ export function createHuashengExportClient(options: {
     async inspect(input: InspectInput) {
       const pid = pidOf(input.projectUrl)
       validTask(input.taskId, input.projectHash)
-      const result = await request(input, '/project/export/video/info', { pid, task_id: input.taskId, project_hash: input.projectHash })
+      // Export progress is a read-only GET; only export creation needs page attestation.
+      const result = await request(input, '/project/export/video/info', { pid, task_id: input.taskId, project_hash: input.projectHash }, undefined, undefined, API, true)
       if (typeof result.progress !== 'number' || !Number.isFinite(result.progress) || result.progress < 0 || result.progress > 100) {
         throw new HuashengExportApiError('invalid_response', '花生导出进度无效，未标记完成')
       }

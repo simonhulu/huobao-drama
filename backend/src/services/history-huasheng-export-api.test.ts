@@ -248,7 +248,55 @@ test('production cookies cache per account and expired status reads never initia
   assert.deepEqual(sessions, [first.profile, second.profile, 'history', first.profile])
 })
 
-test('export session caches stay bound to the selected account, including after login expiry', async () => {
+test('export polling uses only verified read credentials and the original project, task and version', async () => {
+  let checks = 0, requests = 0
+  const client = createHuashengExportClient({
+    session: async () => assert.fail('export polling must not open a page for attestation'),
+    productionSession: async input => {
+      assert.equal(input.browserConfig?.expectedUid, managedConfig.expectedUid)
+      checks++
+      return { cookie: auth.cookie, userAgent: auth.userAgent }
+    },
+    fetch: async (url, init) => {
+      requests++
+      const parsed = new URL(String(url))
+      assert.equal(parsed.pathname, '/api/v2/innovideo/project/export/video/info')
+      assert.deepEqual([...parsed.searchParams.entries()], [
+        ['pid', '260077516955689'], ['task_id', taskId], ['project_hash', projectHash],
+      ])
+      assert.equal(init?.method, 'GET')
+      assert.equal(init?.body, undefined)
+      assert.equal(new Headers(init?.headers).get('Cookie'), auth.cookie)
+      assert.equal(new Headers(init?.headers).get('User-Agent'), auth.userAgent)
+      return json({ progress: 100, url: videoUrl })
+    },
+  })
+  for (let poll = 0; poll < 2; poll++) {
+    assert.deepEqual(await client.inspect({ projectUrl, taskId, projectHash, browserConfig: managedConfig, signal: signal() }),
+      { progress: 100, url: videoUrl, filename: null })
+  }
+  assert.equal(checks, 2, 'every managed read must verify the current account')
+  assert.equal(requests, 2)
+})
+
+test('read-only export polling stops before GET on a changed managed identity', async () => {
+  let correctIdentity = true, requests = 0
+  const client = createHuashengExportClient({
+    session: async () => assert.fail('export polling must not initialize attestation'),
+    productionSession: async () => {
+      if (!correctIdentity) throw new HuashengExportApiError('invalid_response', '当前登录账号与绑定账号不一致')
+      return auth
+    },
+    fetch: async () => { requests++; return json({ progress: 50, url: '' }) },
+  })
+  await client.inspect({ projectUrl, taskId, projectHash, browserConfig: managedConfig, signal: signal() })
+  correctIdentity = false
+  await assert.rejects(client.inspect({ projectUrl, taskId, projectHash, browserConfig: managedConfig, signal: signal() }),
+    error => error instanceof HuashengExportApiError && error.code === 'invalid_response')
+  assert.equal(requests, 1)
+})
+
+test('export creation attestation caches stay bound to the selected account, including after login expiry', async () => {
   const first = { endpoint: 'http://127.0.0.1:9250', profile: '/tmp/science-one' }
   const second = { endpoint: 'http://127.0.0.1:9251', profile: '/tmp/science-two' }
   const sessions: string[] = [], cookies: string[] = []
@@ -259,20 +307,24 @@ test('export session caches stay bound to the selected account, including after 
       sessions.push(account)
       return { ...auth, cookie: account }
     },
-    fetch: async (_url, init) => {
+    fetch: async (url, init) => {
       const account = new Headers(init?.headers).get('Cookie')!
       cookies.push(account)
-      return expireFirst && account === first.profile ? json(null, -101) : json({ progress: 1, url: '' })
+      assert.equal(new URL(String(url)).searchParams.get('_ra'), auth.ra)
+      if (expireFirst && account === first.profile) return json(null, -101)
+      return init?.method === 'POST' ? json({ task_id: taskId, project_hash: projectHash })
+        : json({ project: { pid: 260077516955689, aspect_ratio: '16:9' } })
     },
   })
-  const inspect = (browserConfig?: typeof first) => client.inspect({ projectUrl, taskId, projectHash, signal: signal(), browserConfig })
-  await inspect(first); await inspect(second); await inspect(); await inspect(first)
+  const create = (browserConfig?: typeof first) => client.create({ projectUrl, signal: signal(), browserConfig })
+  await create(first); await create(second); await create(); await create(first)
   expireFirst = true
-  await assert.rejects(inspect(first), /登录/)
+  await assert.rejects(create(first), /登录/)
   expireFirst = false
-  await inspect(second); await inspect(first)
+  await create(second); await create(first)
   assert.deepEqual(sessions, [first.profile, second.profile, 'history', first.profile])
-  assert.deepEqual(cookies, [first.profile, second.profile, 'history', first.profile, first.profile, second.profile, first.profile])
+  assert.deepEqual(cookies, [first.profile, first.profile, second.profile, second.profile, 'history', 'history',
+    first.profile, first.profile, first.profile, second.profile, second.profile, first.profile, first.profile])
 })
 
 test('managed cached exports recheck the browser and refresh attestation when its session changes', async () => {
@@ -287,21 +339,23 @@ test('managed cached exports recheck the browser and refresh attestation when it
     session: async () => ({ ...auth, cookie: currentCookie, ra: `attestation-${++attestations}` }),
     fetch: async (url, init) => {
       requests.push({ cookie: new Headers(init?.headers).get('Cookie'), ra: new URL(String(url)).searchParams.get('_ra') })
-      return json({ progress: 1, url: '' })
+      return init?.method === 'POST' ? json({ task_id: taskId, project_hash: projectHash })
+        : json({ project: { pid: 260077516955689, aspect_ratio: '16:9' } })
     },
   })
-  const inspect = () => client.inspect({ projectUrl, taskId, projectHash, browserConfig: managedConfig, signal: signal() })
-  await inspect()
+  const create = () => client.create({ projectUrl, browserConfig: managedConfig, signal: signal() })
+  await create()
   const firstChecks = checks
-  await inspect()
+  await create()
   assert.ok(checks > firstChecks, 'a cache hit must still verify the current browser login')
   assert.equal(attestations, 1, 'an unchanged verified session may reuse its attestation')
   currentCookie = 'SESSDATA=renewed-session'
-  await inspect()
+  await create()
   assert.equal(attestations, 2)
   assert.deepEqual(requests, [
     { cookie: auth.cookie, ra: 'attestation-1' }, { cookie: auth.cookie, ra: 'attestation-1' },
-    { cookie: currentCookie, ra: 'attestation-2' },
+    { cookie: auth.cookie, ra: 'attestation-1' }, { cookie: auth.cookie, ra: 'attestation-1' },
+    { cookie: currentCookie, ra: 'attestation-2' }, { cookie: currentCookie, ra: 'attestation-2' },
   ])
 })
 
@@ -313,15 +367,17 @@ test('managed export cache hits fail closed on an identity mismatch and discard 
       return auth
     },
     session: async () => { attestations++; return auth },
-    fetch: async () => { requests++; return json({ progress: 1, url: '' }) },
+    fetch: async (_url, init) => { requests++; return init?.method === 'POST'
+      ? json({ task_id: taskId, project_hash: projectHash })
+      : json({ project: { pid: 260077516955689, aspect_ratio: '16:9' } }) },
   })
-  const inspect = () => client.inspect({ projectUrl, taskId, projectHash, browserConfig: managedConfig, signal: signal() })
-  await inspect()
+  const create = () => client.create({ projectUrl, browserConfig: managedConfig, signal: signal() })
+  await create()
   correctIdentity = false
-  await assert.rejects(inspect(), error => error instanceof HuashengExportApiError && error.code === 'login_required')
-  assert.equal(requests, 1, 'a mismatched browser must not use cached credentials for another API request')
+  await assert.rejects(create(), error => error instanceof HuashengExportApiError && error.code === 'login_required')
+  assert.equal(requests, 2, 'a mismatched browser must not use cached credentials for another API request')
   correctIdentity = true
-  await inspect()
+  await create()
   assert.equal(attestations, 2, 'recovery must obtain a fresh attestation after the mismatch')
 })
 
@@ -357,13 +413,17 @@ test('managed export cache keys distinguish expected identities even on the same
       attestations.push(input.browserConfig!.expectedUid!)
       return { ...auth, ra: input.browserConfig!.expectedUid! }
     },
-    fetch: async url => { requests.push(new URL(String(url)).searchParams.get('_ra')); return json({ progress: 1, url: '' }) },
+    fetch: async (url, init) => {
+      requests.push(new URL(String(url)).searchParams.get('_ra'))
+      return init?.method === 'POST' ? json({ task_id: taskId, project_hash: projectHash })
+        : json({ project: { pid: 260077516955689, aspect_ratio: '16:9' } })
+    },
   })
-  const inspect = (expectedUid: string) => client.inspect({ projectUrl, taskId, projectHash,
+  const create = (expectedUid: string) => client.create({ projectUrl,
     browserConfig: { ...managedConfig, expectedUid }, signal: signal() })
-  await inspect('71'); await inspect('72'); await inspect('71')
+  await create('71'); await create('72'); await create('71')
   assert.deepEqual(attestations, ['71', '72'])
-  assert.deepEqual(requests, ['71', '72', '71'])
+  assert.deepEqual(requests, ['71', '71', '72', '72', '71', '71'])
 })
 
 test('managed exports stop before dispatch if identity changes after the metadata read', async () => {
@@ -412,9 +472,9 @@ test('managed exports do not send attestation read from a browser session that c
       currentCookie = 'SESSDATA=changed-during-attestation'
       return auth
     },
-    fetch: async () => { requests++; return json({ progress: 1, url: '' }) },
+    fetch: async () => { requests++; return json({ project: { pid: 260077516955689, aspect_ratio: '16:9' } }) },
   })
-  await assert.rejects(client.inspect({ projectUrl, taskId, projectHash, browserConfig: managedConfig, signal: signal() }),
+  await assert.rejects(client.create({ projectUrl, browserConfig: managedConfig, signal: signal() }),
     error => error instanceof HuashengExportApiError && error.code === 'retryable')
   assert.equal(requests, 0)
 })
@@ -426,7 +486,7 @@ test('managed query retries stop if the browser identity changes during connecti
       if (!correctIdentity) throw new HuashengExportApiError('login_required', '当前登录账号与绑定账号不一致')
       return auth
     },
-    session: async () => auth,
+    session: async () => assert.fail('query retries must not initialize export attestation'),
     fetch: async () => {
       requests++
       if (requests === 1) { correctIdentity = false; throw new TypeError('connection closed') }
@@ -467,7 +527,7 @@ test('wrong project metadata prevents any export mutation', async () => {
 })
 
 test('HTTP 200 with a business rejection is never a successful export', async () => {
-  const client = createHuashengExportClient({ session: async () => auth, fetch: async () => json(null, -101) })
+  const client = createHuashengExportClient({ productionSession: async () => auth, fetch: async () => json(null, -101) })
   await assert.rejects(client.inspect({ projectUrl, taskId, projectHash, signal: signal() }), (e: unknown) => e instanceof HuashengExportApiError && e.code === 'login_required')
 })
 
@@ -495,7 +555,7 @@ test('successful HTTP without the creation receipt stays uncertain', async () =>
 
 test('polling preserves an unfinished export and requires a matching media URL', async () => {
   let completed = false
-  const client = createHuashengExportClient({ session: async () => auth, fetch: async () => json(completed
+  const client = createHuashengExportClient({ productionSession: async () => auth, fetch: async () => json(completed
     ? { progress: 100, url: 'https://upos-sz-mirrorcos.bilivideo.com/ttvuserboss/ttv_composite/project/sandbox/999/video_' + projectHash + '.mp4' }
     : { progress: 45, url: '', filename: '' }) })
   assert.deepEqual(await client.inspect({ projectUrl, taskId, projectHash, signal: signal() }), { progress: 45, url: null, filename: null })
@@ -505,7 +565,7 @@ test('polling preserves an unfinished export and requires a matching media URL',
 
 test('a transient export-query connection failure retries only the same GET and preserves its task identity', async () => {
   let requests = 0
-  const client = createHuashengExportClient({ session: async () => auth, fetch: async (url, init) => {
+  const client = createHuashengExportClient({ productionSession: async () => auth, fetch: async (url, init) => {
     const parsed = new URL(String(url))
     assert.equal(init?.method, 'GET')
     assert.equal(parsed.searchParams.get('task_id'), taskId)
@@ -519,12 +579,12 @@ test('a transient export-query connection failure retries only the same GET and 
 
 test('safe connection retries are bounded and cancellation stops the next query', async () => {
   let requests = 0
-  const client = createHuashengExportClient({ session: async () => auth, fetch: async () => { requests++; throw new TypeError('fetch failed') } })
+  const client = createHuashengExportClient({ productionSession: async () => auth, fetch: async () => { requests++; throw new TypeError('fetch failed') } })
   await assert.rejects(client.inspect({ projectUrl, taskId, projectHash, signal: signal() }),
     (error: unknown) => error instanceof HuashengExportApiError && error.code === 'retryable')
   assert.equal(requests, 3)
   const controller = new AbortController()
-  const canceled = createHuashengExportClient({ session: async () => auth, fetch: async () => { controller.abort(new Error('stopped')); throw new TypeError('fetch failed') } })
+  const canceled = createHuashengExportClient({ productionSession: async () => auth, fetch: async () => { controller.abort(new Error('stopped')); throw new TypeError('fetch failed') } })
   await assert.rejects(canceled.inspect({ projectUrl, taskId, projectHash, signal: controller.signal }), /stopped/)
 })
 
