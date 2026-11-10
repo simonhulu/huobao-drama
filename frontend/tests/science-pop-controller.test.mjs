@@ -64,6 +64,8 @@ test('GPU waiting has its own status and cannot be sent to single or batch Huash
   h.state.overview.jobs = [waiting]
   await h.s.refresh()
   assert.equal(h.s.statusLabel(h.s.selectedJob), '等待GPU')
+  assert.equal(h.s.statusLabel({ ...waiting, status: 'running', exportStep: 'presenter' }), '等待GPU')
+  assert.equal(h.s.statusLabel({ ...waiting, status: 'queued' }), '等待GPU')
   assert.equal(h.s.statusLabel({ ...waiting, status: 'paused' }), '已暂停')
   assert.equal(h.s.syncableJobs.length, 0)
   await h.s.runAction('sync'); await h.s.syncPendingJobs()

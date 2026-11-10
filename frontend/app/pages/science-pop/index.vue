@@ -525,7 +525,7 @@ function uploadStatusLabel(job) {
   return ({ pending: '待上传', queued: '上传排队', uploading: '上传中', uploaded: '已上传（草稿）', submitted: '已上传·待审核', published: '已发表', blocked: '上传异常', paused: '上传已暂停', not_ready: '等待成片与封面' })[uploadState(job)] || '待上传'
 }
 function statusLabel(job) {
-  if (job.presenterWait && ['waiting_remote', 'paused'].includes(job.status)) return job.status === 'paused' ? '已暂停' : '等待GPU'
+  if (job.presenterWait && ['running', 'queued', 'waiting_remote', 'paused'].includes(job.status)) return job.status === 'paused' ? '已暂停' : '等待GPU'
   if (job.status === 'running' && /同步花生/.test(job.message || '')) return '同步花生状态'
   if (job.status === 'running' && job.stage === 'export' && job.exportStep) {
     const label = ({ platform: '花生导出', download: '下载成片', presenter: '生成主播', compose: '合成成片' })[job.exportStep]
