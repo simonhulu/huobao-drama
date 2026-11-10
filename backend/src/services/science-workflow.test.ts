@@ -116,6 +116,250 @@ function pendingHuasheng(h: ReturnType<typeof fixture>, id: string, patch: Recor
   return file
 }
 
+function pendingMusetalk(h: ReturnType<typeof fixture>, id: string, patch: Record<string, unknown> = {}) {
+  const { videoPath } = legacyFinishedVideo(h, id)
+  const file = pendingHuasheng(h, id, { videoPath, mainVideoPath: videoPath, separateIntro: true, videoCompositionPending: true,
+    productionCompleted: true, exportDispatched: true, exportTask: { taskId: 'original-export', projectHash: 'a'.repeat(64) },
+    autoUpload: false, ...patch })
+  return { file, videoPath }
+}
+
+test('GPU waiting survives repeated offline checks and restart, then finishes the original main and covers', async t => {
+  let now = Date.now(), ready = false, checks = 0, gpuJobs = 0, composites = 0
+  t.mock.method(Date, 'now', () => now)
+  const h = fixture(t, { presenterMode: 'musetalk',
+    checkMusetalkAvailability: async ({ signal }) => {
+      signal?.throwIfAborted(); checks++
+      return { ready, message: '远程 GPU 正被 H3 占用' }
+    },
+    prepareMusetalkPresenter: async input => {
+      assert.equal(ready, true); gpuJobs++
+      return { presenterPath: input.videoPath, sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+    },
+    prepareVideo: async input => {
+      composites++; fs.mkdirSync(input.directory, { recursive: true })
+      const videoPath = path.join(input.directory, 'with-presenter.mp4')
+      fs.writeFileSync(videoPath, 'intro+original-main+presenter')
+      return { videoPath, introSha256: 'a'.repeat(64), sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+    },
+  }), job = await prepared(h)
+  const { file, videoPath } = pendingMusetalk(h, job.id, { automaticRetry: { attempt: 3, maxAttempts: 3, nextRetryAt: new Date(now + 300_000).toISOString() } })
+  const binding = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const account = h.hs.readyBrowserConfig.bind(h.hs)
+  t.mock.method(h.hs, 'readyBrowserConfig', (...args: Parameters<typeof h.hs.readyBrowserConfig>) => {
+    assert.equal(ready, true, 'GPU waiting must precede any platform account check')
+    return account(...args)
+  })
+  h.service.produce(job.id, undefined, { waitForPresenter: true }); await h.service.waitForIdle()
+  const waiting = h.service.detail(job.id)
+  assert.equal(waiting.status, 'waiting_remote'); assert.equal(waiting.stage, 'export'); assert.equal(waiting.exportStep, 'presenter')
+  assert.equal(Date.parse(waiting.presenterWait!.nextCheckAt) - now, 60_000)
+  assert.equal(waiting.automaticRetry, undefined); assert.equal(waiting.failureKind, undefined)
+  assert.equal(waiting.autoUpload, false); assert.equal(checks, 1)
+  const beforeSync = fs.readFileSync(file, 'utf8')
+  assert.throws(() => h.service.sync(job.id), /等待.*GPU/)
+  assert.deepEqual(h.service.syncPending(), { started: [], skipped: [job.id] })
+  assert.equal(fs.readFileSync(file, 'utf8'), beforeSync)
+  assert.deepEqual(h.service.runAutomaticExports(), [])
+  await h.service.stop()
+  const restored = new ScienceWorkflowService(h.options); t.after(() => restored.stop())
+  for (let round = 0; round < 2; round++) {
+    now += 60_001
+    assert.deepEqual(restored.runAutomaticExports(), [job.id]); await restored.waitForIdle()
+    const current = restored.detail(job.id)
+    assert.equal(current.status, 'waiting_remote'); assert.equal(current.presenterWait?.requestedAt, waiting.presenterWait?.requestedAt)
+    assert.equal(current.automaticRetry, undefined); assert.equal(current.failureKind, undefined)
+    assert.equal(gpuJobs + composites + h.calls.productionInspect + h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+    assert.deepEqual(restored.runAutomaticExports(), [])
+  }
+  ready = true; now += 60_001
+  assert.deepEqual(restored.runAutomaticExports(), [job.id]); await restored.waitForIdle()
+  const finished = restored.detail(job.id), saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(finished.status, 'ready'); assert.equal(finished.presenterWait, undefined); assert.equal(finished.videoCompositionPending, false)
+  assert.equal(finished.autoUpload, false); assert.ok(finished.landscapeCoverUrl); assert.ok(finished.portraitCoverUrl)
+  for (const field of ['projectUrl', 'checkpoint', 'productionScriptHash', 'productionAccountName', 'exportTask', 'script'])
+    assert.deepEqual(saved[field], binding[field])
+  assert.equal(saved.mainVideoPath, videoPath); assert.equal(fs.readFileSync(videoPath, 'utf8'), 'finished-video')
+  assert.equal(gpuJobs, 1); assert.equal(composites, 1); assert.equal(checks, 4)
+  assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+  assert.deepEqual(restored.runAutomaticExports(), [])
+})
+
+test('stopping a GPU waiter revokes its persisted schedule across restart', async t => {
+  let now = Date.now(), checks = 0
+  t.mock.method(Date, 'now', () => now)
+  const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async () => { checks++; return { ready: false, message: 'GPU 忙' } },
+    prepareMusetalkPresenter: async () => assert.fail('a stopped waiter cannot start GPU generation') }), job = await prepared(h)
+  const { file, videoPath } = pendingMusetalk(h, job.id, { autoUpload: true })
+  h.service.produce(job.id, undefined, { waitForPresenter: true }); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).autoUpload, true)
+  h.service.cancel(job.id)
+  assert.equal(h.service.detail(job.id).status, 'paused'); assert.equal(h.service.detail(job.id).presenterWait, undefined)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).automaticDelivery, false)
+  await h.service.stop()
+  const restored = new ScienceWorkflowService(h.options); t.after(() => restored.stop())
+  now += 120_000
+  assert.deepEqual(restored.runAutomaticExports(), []); await restored.waitForIdle()
+  assert.equal(checks, 1); assert.equal(restored.detail(job.id).autoUpload, true)
+  assert.equal(fs.readFileSync(videoPath, 'utf8'), 'finished-video')
+  assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+})
+
+test('shutdown during a GPU availability probe preserves waiting intent while explicit cancellation revokes it', async t => {
+  for (const stop of ['shutdown', 'cancel'] as const) {
+    await t.test(stop, async t => {
+      let now = Date.now(), entered!: () => void
+      t.mock.method(Date, 'now', () => now)
+      const started = new Promise<void>(resolve => { entered = resolve })
+      const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async ({ signal }) => {
+        entered()
+        await new Promise<void>((_, reject) => { signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }) })
+        throw new Error('unreachable')
+      }, prepareMusetalkPresenter: async () => assert.fail('cancellation must never submit GPU work') }), job = await prepared(h)
+      const { file } = pendingMusetalk(h, job.id)
+      h.service.produce(job.id, undefined, { waitForPresenter: true }); await started
+      if (stop === 'shutdown') await h.service.stop()
+      else { h.service.cancel(job.id); await h.service.waitForIdle() }
+      const paused = h.service.detail(job.id), saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+      assert.equal(paused.status, 'paused'); assert.equal(Boolean(paused.presenterWait), stop === 'shutdown')
+      assert.equal(saved.automaticDelivery, stop === 'shutdown')
+      h.options.checkMusetalkAvailability = async () => ({ ready: false, message: 'GPU 忙' })
+      const restored = new ScienceWorkflowService(h.options); t.after(() => restored.stop())
+      now += 60_001
+      assert.deepEqual(restored.runAutomaticExports(), stop === 'shutdown' ? [job.id] : []); await restored.waitForIdle()
+      assert.equal(restored.detail(job.id).status, stop === 'shutdown' ? 'waiting_remote' : 'paused')
+      assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+    })
+  }
+})
+
+test('GPU wait intent is durable before asynchronous startup and survives immediate service shutdown', async t => {
+  const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async () => assert.fail('shutdown before work must not probe GPU') }), job = await prepared(h)
+  const { file } = pendingMusetalk(h, job.id)
+  h.service.produce(job.id, undefined, { waitForPresenter: true })
+  assert.ok(JSON.parse(fs.readFileSync(file, 'utf8')).presenterWait)
+  await h.service.stop()
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(saved.status, 'paused'); assert.equal(saved.automaticDelivery, true); assert.ok(saved.presenterWait)
+  assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+})
+
+test('GPU readiness identity and protocol failures stop waiting without consuming automatic retries', async t => {
+  let failure = 'MuseTalk 模型身份不一致', checks = 0
+  const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async () => { checks++; throw new Error(failure) },
+    prepareMusetalkPresenter: async () => assert.fail('identity failures must not start GPU generation') }), job = await prepared(h)
+  pendingMusetalk(h, job.id)
+  for (const message of ['MuseTalk 模型身份不一致', 'MuseTalk 状态响应格式无效']) {
+    failure = message
+    h.service.produce(job.id, undefined, { waitForPresenter: true }); await h.service.waitForIdle()
+    const blocked = h.service.detail(job.id)
+    assert.equal(blocked.status, 'needs_attention'); assert.equal(blocked.failureKind, 'action_required')
+    assert.match(blocked.message, new RegExp(message)); assert.equal(blocked.presenterWait, undefined); assert.equal(blocked.automaticRetry, undefined)
+    assert.deepEqual(h.service.runAutomaticExports(), [])
+  }
+  assert.equal(checks, 2); assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+})
+
+test('GPU waiting rejects tasks without a pending local presenter or with an upload binding', async t => {
+  const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async () => assert.fail('invalid wait must not probe GPU') }), job = await prepared(h)
+  assert.throws(() => h.service.produce(job.id, undefined, { waitForPresenter: true }), /正片|主播|合成/)
+  const { file } = pendingMusetalk(h, job.id)
+  const valid = JSON.parse(fs.readFileSync(file, 'utf8'))
+  for (const patch of [{ videoCompositionPending: false }, { separateIntro: false }, { videoPath: undefined },
+    { mainVideoPath: path.join(h.root, 'missing-main.mp4') }, { upload: { submitted: true, saved: false, articleId: '12345' } },
+    { uploadAttempt: { id: 'bound-upload' } }]) {
+    fs.writeFileSync(file, JSON.stringify({ ...valid, ...patch }))
+    const before = fs.readFileSync(file, 'utf8')
+    assert.throws(() => h.service.produce(job.id, undefined, { waitForPresenter: true }), /正片|主播|合成|素材|上传/)
+    assert.equal(fs.readFileSync(file, 'utf8'), before)
+  }
+  assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+})
+
+test('GPU wait recovery requires explicit delivery intent and due waiting or paused state', async t => {
+  const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async () => assert.fail('unauthorized wait must remain idle') }), job = await prepared(h)
+  const { file } = pendingMusetalk(h, job.id), valid = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const presenterWait = { requestedAt: new Date().toISOString(), nextCheckAt: new Date(Date.now() - 1000).toISOString() }
+  for (const patch of [{ automaticDelivery: false }, { automaticDelivery: undefined }, { status: 'needs_attention' },
+    { presenterWait: { ...presenterWait, nextCheckAt: new Date(Date.now() + 300_000).toISOString() } }]) {
+    fs.writeFileSync(file, JSON.stringify({ ...valid, automaticDelivery: true, automaticProduction: true, status: 'waiting_remote', presenterWait, ...patch }))
+    assert.deepEqual(h.service.runAutomaticExports(), []); await h.service.waitForIdle()
+  }
+  assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+})
+
+test('produce HTTP accepts an explicit GPU wait without changing upload intent and rejects nonboolean values', async t => {
+  let checks = 0
+  const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async () => { checks++; return { ready: false, message: 'GPU 忙' } },
+    prepareMusetalkPresenter: async () => assert.fail('waiting routes must not start GPU work') }), job = await prepared(h)
+  pendingMusetalk(h, job.id, { autoUpload: true })
+  const post = (data: unknown) => h.route.request(`/jobs/${job.id}/produce`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+  assert.equal((await post({ waitForPresenter: 'true' })).status, 400)
+  assert.equal((await post({ waitForPresenter: true, unexpected: true })).status, 400)
+  assert.equal((await post({ waitForPresenter: true })).status, 202); await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'waiting_remote'); assert.equal(h.service.detail(job.id).autoUpload, true)
+  assert.equal(checks, 1); assert.equal(h.calls.upload, 0)
+})
+
+test('batch continuation preserves a GPU wait without probing early or falling through to covers or upload', async t => {
+  let checks = 0
+  const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async () => { checks++; return { ready: false, message: 'GPU 忙' } },
+    prepareMusetalkPresenter: async () => assert.fail('batch wait must not start GPU work') }), job = await prepared(h)
+  pendingMusetalk(h, job.id, { collectionId: 'original-batch' })
+  const produce = h.service.produce.bind(h.service)
+  t.mock.method(h.service, 'produce', (...[id, upload, options]: Parameters<ScienceWorkflowService['produce']>) => produce(id, upload, { ...options, waitForPresenter: true }))
+  await assert.rejects(h.service.runBatchJob(job.id, 'videos', new AbortController().signal),
+    error => error instanceof Error && /等待.*GPU/.test(error.message) && (error as { retryable?: boolean }).retryable === true)
+  assert.equal(checks, 1); assert.equal(h.service.detail(job.id).status, 'waiting_remote')
+  for (const mode of ['videos', 'upload'] as const) {
+    await assert.rejects(h.service.runBatchJob(job.id, mode, new AbortController().signal), /等待.*GPU/)
+    assert.equal(checks, 1); assert.equal(h.service.detail(job.id).autoUpload, false)
+  }
+  assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport + h.calls.upload, 0)
+})
+
+for (const mode of ['videos', 'upload'] as const) {
+  test(`a real ${mode} collection observes a local GPU waiter until its original delivery completes`, { timeout: 5000 }, async t => {
+    let now = Date.now(), ready = false, checks = 0, gpuJobs = 0, entered!: () => void
+    const waiting = new Promise<void>(resolve => { entered = resolve })
+    t.mock.method(Date, 'now', () => now)
+    const h = fixture(t, { presenterMode: 'musetalk', checkMusetalkAvailability: async () => { checks++; entered(); return { ready, message: 'GPU 忙' } },
+      prepareMusetalkPresenter: async input => {
+        gpuJobs++; return { presenterPath: input.videoPath, sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+      }, prepareVideo: async input => ({ videoPath: input.videoPath, introSha256: 'a'.repeat(64), sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }),
+    })
+    const create = h.service.create.bind(h.service)
+    t.mock.method(h.service, 'create', (...[input, options]: Parameters<ScienceWorkflowService['create']>) => {
+      const job = create(input, options)
+      h.service.patch(job.id, { transcript: '完整原稿', script: '完整的中文科普二创稿，必须保留原文稿和成片。' })
+      pendingMusetalk(h, job.id, { autoUpload: mode === 'upload' })
+      h.service.produce(job.id, undefined, { waitForPresenter: true })
+      return h.service.detail(job.id)
+    })
+    const collection = new ScienceCollectionService({ stateRoot: path.join(h.root, 'gpu-collection'), workflow: h.service,
+      collect: async options => {
+        await options.onCandidate({ videoId: 'abcdefghijk', sourceUrl, title: '原始科普任务', authorName: 'source',
+          observedAt: new Date().toISOString(), collectionUrl: options.url })
+        options.report({ stage: 'exhausted', message: '来源已入库' })
+      },
+    })
+    t.after(() => collection.stop())
+    collection.saveSettings({ youtubeChannels: ['https://www.youtube.com/@ScienceOne/videos'], targetCount: 1, mode })
+    const run = collection.start({ requestId: `gpu-wait-${mode}`, mode, huashengAccountName: h.h.accountName, baijiahaoAccountName: h.b.accountName })
+    await waiting; await h.service.waitForIdle(); await new Promise(resolve => setTimeout(resolve, 300))
+    const pending = collection.overview().runs[0]!, job = h.service.jobsForCollection(run.id)[0]!
+    assert.equal(pending.counts.completed, 0); assert.equal(pending.counts.failed, 0); assert.equal(pending.items[0]?.status, 'running')
+    assert.equal(collection.overview().activeRun?.id, run.id); assert.equal(checks, 1); assert.equal(gpuJobs, 0)
+    assert.equal(job.autoUpload, mode === 'upload'); assert.deepEqual(h.service.runAutomaticExports(), [])
+    ready = true; now += 60_001
+    assert.deepEqual(h.service.runAutomaticExports(), [job.id]); await h.service.waitForIdle(); await collection.waitForIdle()
+    const finished = collection.overview().runs[0]!
+    assert.equal(finished.status, 'completed'); assert.equal(finished.counts.completed, 1); assert.equal(finished.counts.failed, 0)
+    assert.equal(gpuJobs, 1); assert.equal(checks, 2); assert.equal(h.calls.produce + h.calls.export + h.calls.downloadExport, 0)
+    assert.equal(h.calls.upload, mode === 'upload' ? 1 : 0); assert.equal(h.service.detail(job.id).autoUpload, mode === 'upload')
+  })
+}
+
 test('intro-only science productions submit only the main narration and prepend the intro without any presenter or lip sync', async t => {
   const h = fixture(t), job = await prepared(h), order: string[] = []
   const greeting = '大家好，我是小鹭，你们的冷知识讲解员。'

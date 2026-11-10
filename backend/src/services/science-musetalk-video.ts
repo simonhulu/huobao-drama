@@ -75,6 +75,23 @@ async function stop(child: ChildProcess) {
   })
 }
 
+function sshStartupError(stderr: string, launchCode?: string, timedOut = false): Error {
+  let message = 'MuseTalk SSH 隧道启动失败，请检查 SSH 配置'
+  if (launchCode === 'ENOENT') message = '未找到 SSH 客户端，请检查运行环境和 PATH'
+  else if (launchCode) message = 'MuseTalk SSH 客户端无法启动，请检查运行环境和执行权限'
+  else if (/host key verification failed|remote host identification has changed|offending .* key/i.test(stderr)) {
+    message = 'MuseTalk SSH 主机密钥校验失败，请核对远端主机密钥配置'
+  } else if (/permission denied|authentication failed|too many authentication failures|no more authentication methods|no supported authentication methods|sign_and_send_pubkey|no such identity|load key|unprotected private key|bad permissions|bad owner or permissions/i.test(stderr)) {
+    message = 'MuseTalk SSH 认证失败，请检查凭据或密钥配置'
+  } else if (/bad configuration|bad .*specification|bad port|unsupported option|could not open user config|address already in use|cannot assign requested address/i.test(stderr)) {
+    message = 'MuseTalk SSH 选项或端口配置无效，请检查 SSH 配置'
+  } else if (timedOut || /connection timed out|operation timed out|connection refused|no route to host|network is unreachable|connection reset|connection closed|connection aborted|could not resolve hostname/i.test(stderr)) {
+    return Object.assign(new Error(timedOut ? 'MuseTalk SSH 隧道连接超时' : 'MuseTalk SSH 连接失败，远端暂不可达'),
+      { code: timedOut ? 'ETIMEDOUT' : 'MUSETALK_SSH_UNAVAILABLE' })
+  }
+  return Object.assign(new Error(message), { code: 'MUSETALK_SSH_CONFIG' })
+}
+
 async function openApi(signal: AbortSignal): Promise<Api> {
   signal.throwIfAborted()
   if (process.env.MUSETALK_API_URL?.trim()) return { apiUrl: origin(process.env.MUSETALK_API_URL.trim()), async close() {} }
@@ -102,10 +119,13 @@ async function openApi(signal: AbortSignal): Promise<Api> {
     env.SSH_ASKPASS = askpass; env.SSH_ASKPASS_REQUIRE = 'force'; env.MUSETALK_ASKPASS_PASSWORD = password; env.DISPLAY = 'musetalk:0'
   } else env.SSH_ASKPASS_REQUIRE = 'never'
   let child: ChildProcess
-  try { signal.throwIfAborted(); child = spawn('ssh', args, { stdio: 'ignore', env }) }
+  try { signal.throwIfAborted(); child = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'], env }) }
   catch (error) { if (askpass) await fs.rm(askpass, { force: true }); throw error }
-  let failed = false, closing: Promise<void> | undefined
-  child.on('error', () => { failed = true })
+  let failed = false, closed = false, launchCode: string | undefined, stderr = '', closing: Promise<void> | undefined
+  // Keep diagnostics bounded and private; expose only the classified safe error.
+  child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString().slice(0, Math.max(0, 8192 - stderr.length)) })
+  child.on('error', error => { failed = true; launchCode = (error as NodeJS.ErrnoException).code })
+  child.once('close', () => { closed = true })
   const close = () => closing ??= (async () => {
     await stop(child)
     if (askpass) await fs.rm(askpass, { force: true })
@@ -114,11 +134,11 @@ async function openApi(signal: AbortSignal): Promise<Api> {
     const deadline = Date.now() + 15_000
     while (Date.now() < deadline) {
       signal.throwIfAborted()
-      if (failed || child.exitCode !== null || child.signalCode !== null) throw new Error('MuseTalk SSH 隧道启动失败，请检查远端连接配置')
+      if (failed || closed) throw sshStartupError(stderr, launchCode)
       if (await connects(port)) return { apiUrl: `http://127.0.0.1:${port}`, close }
       await delay(150, undefined, { signal })
     }
-    throw new Error('MuseTalk SSH 隧道连接超时')
+    throw sshStartupError(stderr, launchCode, true)
   } catch (error) { await close(); signal.throwIfAborted(); throw error }
 }
 
@@ -149,6 +169,42 @@ function identity(value: any): Identity {
   if (value?.model !== MODEL || value?.source_revision !== REVISION || !/^[A-Za-z0-9_-]{1,160}$/.test(value?.avatar_id || '')
     || !validHash(value?.reference_sha256) || ![15, 20, 25].includes(value?.fps)) throw new Error('MuseTalk 服务的模型、头像或帧率校验失败')
   return { model: value.model, source_revision: value.source_revision, avatar_id: value.avatar_id, reference_sha256: value.reference_sha256, fps: value.fps }
+}
+
+export async function checkScienceMusetalkAvailability(options: { signal: AbortSignal }): Promise<{ ready: boolean; message: string }> {
+  options.signal.throwIfAborted()
+  const deadline = AbortSignal.timeout(22_000), signal = AbortSignal.any([options.signal, deadline])
+  let api: Api | undefined
+  try {
+    api = await openApi(signal)
+    const response = await fetch(`${api.apiUrl}/health`, { signal })
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {})
+      if ([408, 429].includes(response.status) || response.status >= 500 && response.status <= 599) {
+        return { ready: false, message: 'MuseTalk 服务暂不可用，等待 GPU 服务恢复' }
+      }
+      throw new Error(`MuseTalk 健康检查失败（HTTP ${response.status}）`)
+    }
+    const health = await response.json() as any
+    signal.throwIfAborted()
+    if (health?.status === 'loading') return { ready: false, message: 'MuseTalk 正在加载主播缓存，等待服务就绪' }
+    identity(health)
+    if (health.ok === true && health.status === 'ready') return { ready: true, message: 'MuseTalk 服务已就绪' }
+    throw new Error('MuseTalk 健康检查返回异常服务状态，请检查服务配置及运行情况')
+  } catch (error) {
+    options.signal.throwIfAborted()
+    const failure = error as { code?: string; cause?: { code?: string } }
+    const code = failure?.cause?.code || failure?.code || ''
+    if (deadline.aborted || error instanceof DOMException && error.name === 'TimeoutError'
+      || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|UND_ERR_/i.test(code)
+      || error instanceof TypeError && /fetch failed|terminated|network|socket/i.test(error.message)
+      || code === 'MUSETALK_SSH_UNAVAILABLE') {
+      return { ready: false, message: 'MuseTalk 服务暂不可达，等待 GPU 服务恢复' }
+    }
+    throw error
+  } finally {
+    try { await api?.close() } finally { options.signal.throwIfAborted() }
+  }
 }
 
 function validateJob(value: any, checkpoint: Checkpoint): RemoteJob {

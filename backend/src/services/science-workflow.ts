@@ -74,6 +74,7 @@ export interface ScienceJob {
   failureKind?: 'temporary' | 'action_required'
   retry?: { operation: string; attempt: number; maxAttempts: number; nextRetryAt: string }
   automaticRetry?: { attempt: number; maxAttempts: number; nextRetryAt: string }
+  presenterWait?: { requestedAt: string; nextCheckAt: string }
   uploadRetry?: { attempt: number; nextRetryAt: string }
   huashengSync?: { checkedAt: string; status: huasheng.HuashengProductionObservation['status'] | 'error'; message: string; exportProgress?: number; error?: string }
   huashengCheck?: { checkedAt: string; status: huasheng.HuashengProductionObservation['status'] | 'error'; message: string; error?: string }
@@ -113,6 +114,7 @@ export interface ScienceWorkflowOptions {
   prepareIntroPreview?: typeof import('./science-video-intro.js').prepareScienceVideoIntroPreview
   preparePresenter?: typeof import('./science-presenter-video.js').prepareSciencePresenterVideo
   prepareMusetalkPresenter?: typeof import('./science-musetalk-video.js').prepareScienceMusetalkVideo
+  checkMusetalkAvailability?: typeof import('./science-musetalk-video.js').checkScienceMusetalkAvailability
   reviseUploadCovers?: typeof import('./social-auto-upload.js').updateSocialUploadVideoCovers
   rewrite?: typeof recreateScienceScript
   browser?: Pick<typeof huasheng, 'runHuashengBrowserJob'>
@@ -547,10 +549,18 @@ export class ScienceWorkflowService {
     job = await this.releaseSourceMedia(job)
     return { ...job.media.cleanup }
   }
-  produce(id: string, upload?: boolean, options: { automatic?: boolean } = {}) {
+  produce(id: string, upload?: boolean, options: { automatic?: boolean; waitForPresenter?: boolean } = {}) {
     const job = this.read(id)
     upload ??= job.autoUpload === true
     if (this.isExecuting(job)) return this.publicJob(job)
+    const waitForPresenter = options.waitForPresenter === true || Boolean(job.presenterWait)
+    if (waitForPresenter) {
+      const presenterMode = this.options.presenterMode ?? (process.env.SCIENCE_PRESENTER_MODE?.trim() || 'musetalk')
+      if (presenterMode !== 'musetalk' || !job.separateIntro || job.videoCompositionPending === false || !job.videoPath
+        || job.uploadAttempt || job.upload) throw new ScienceWorkflowError('只有已下载正片、尚待主播合成且未绑定上传的 MuseTalk 任务可以等待 GPU')
+      this.localFile(id, job.videoPath)
+      this.localFile(id, job.mainVideoPath || job.videoPath)
+    }
     if (job.script.length > 10_000) throw new ScienceWorkflowError('华生文稿最多 10000 字符，请先缩短文稿后再制作')
     if (!job.huashengAccountName) throw new ScienceWorkflowError('请先选择此任务的华生账号')
     this.hs.get(job.huashengAccountName)
@@ -559,8 +569,29 @@ export class ScienceWorkflowService {
     const hash = digest(job.script)
     if (job.productionScriptHash && (job.productionScriptHash !== hash || job.productionAccountName !== job.huashengAccountName)) throw new ScienceWorkflowError('制作文稿或账号与原检查点不一致')
     this.modify(id, { autoUpload: upload, automaticProduction: !job.collectionId, automaticDelivery: true,
+      ...(waitForPresenter ? { status: 'waiting_remote' as const, stage: 'export' as const, exportStep: 'presenter' as const,
+        presenterWait: job.presenterWait || { requestedAt: new Date().toISOString(), nextCheckAt: new Date(Date.now() + 60_000).toISOString() } } : {}),
       ...(!options.automatic ? { automaticRetry: undefined } : {}) })
     return this.launch(id, async signal => {
+      signal.throwIfAborted()
+      if (waitForPresenter) {
+        this.modify(id, { stage: 'export', exportStep: 'presenter', automaticRetry: undefined })
+        try {
+          const check = this.options.checkMusetalkAvailability || (await import('./science-musetalk-video.js')).checkScienceMusetalkAvailability
+          const availability = await check({ signal })
+          signal.throwIfAborted()
+          if (!availability.ready) {
+            this.modify(id, { status: 'waiting_remote', presenterWait: { ...this.read(id).presenterWait!, nextCheckAt: new Date(Date.now() + 60_000).toISOString() },
+              retry: undefined, automaticRetry: undefined, failureKind: undefined })
+            this.report(id, `等待远程主播 GPU 就绪，约 60 秒后自动检查：${safeMessage(availability.message)}`, 'export')
+            return
+          }
+          this.modify(id, { presenterWait: undefined })
+        } catch (error) {
+          if (!signal.aborted) this.modify(id, { presenterWait: undefined })
+          throw error
+        }
+      }
       if (!this.read(id).script.trim()) await this.prepareScript(id, signal)
       signal.throwIfAborted()
       let current = this.read(id)
@@ -1186,6 +1217,7 @@ export class ScienceWorkflowService {
   /** Reconcile the original project and automatically deliver a confirmed finished production. */
   sync(id: string, options: { automatic?: boolean } = {}) {
     const job = this.read(id)
+    if (job.presenterWait) throw new ScienceWorkflowError('任务正在等待远程主播 GPU，就绪后会自动继续，无需同步花生状态')
     if (this.isExecuting(job)) throw new ScienceWorkflowError('此任务已有操作正在执行，正在自动处理原项目，可只查询制作进度')
     if (!job.projectUrl) throw new ScienceWorkflowError('此任务尚未绑定花生项目，请先继续整理素材或开始制作')
     if (!job.huashengAccountName) throw new ScienceWorkflowError('请先绑定此任务的花生账号')
@@ -1289,7 +1321,7 @@ export class ScienceWorkflowService {
   syncPending() {
     const started: string[] = [], skipped: string[] = []
     for (const job of this.all()) {
-      if (this.isExecuting(job) || !job.projectUrl || !['needs_attention', 'paused', 'waiting_remote', 'awaiting_export'].includes(job.status)
+      if (this.isExecuting(job) || job.presenterWait || !job.projectUrl || !['needs_attention', 'paused', 'waiting_remote', 'awaiting_export'].includes(job.status)
         || job.videoPath || job.uploadAttempt || job.upload || ['covers', 'upload', 'completed'].includes(job.stage)) { skipped.push(job.id); continue }
       try { this.sync(job.id); started.push(job.id) }
       catch (error) { if (!(error instanceof ScienceWorkflowError || error instanceof SocialUploadAccountError)) throw error; skipped.push(job.id) }
@@ -1300,7 +1332,20 @@ export class ScienceWorkflowService {
   runAutomaticExports() {
     const started: string[] = []
     for (const job of this.all()) {
-      if (this.isExecuting(job) || job.automaticRetry && Date.parse(job.automaticRetry.nextRetryAt) > Date.now()) continue
+      if (this.isExecuting(job)) continue
+      if (job.presenterWait) {
+        if (job.automaticDelivery !== true || !['waiting_remote', 'paused'].includes(job.status)
+          || !(Date.parse(job.presenterWait.nextCheckAt) <= Date.now())) continue
+        try { this.produce(job.id, job.autoUpload === true, { automatic: true, waitForPresenter: true }); started.push(job.id) }
+        catch (error) {
+          if (!(error instanceof ScienceWorkflowError || error instanceof SocialUploadAccountError)) throw error
+          this.modify(job.id, { presenterWait: undefined, status: 'needs_attention', failureKind: 'action_required',
+            automaticDelivery: false, automaticProduction: false, automaticRetry: undefined })
+          this.report(job.id, safeMessage(error), 'export')
+        }
+        continue
+      }
+      if (job.automaticRetry && Date.parse(job.automaticRetry.nextRetryAt) > Date.now()) continue
       if (job.stage === 'upload' && job.automaticDelivery !== false
         && (job.uploadRetry || job.uploadAttempt?.status === 'uncertain' && job.failureKind !== 'action_required')) {
         if (job.uploadRetry && Date.parse(job.uploadRetry.nextRetryAt) > Date.now()) continue
@@ -1389,13 +1434,13 @@ export class ScienceWorkflowService {
   }
   cancel(id: string) {
     const active = this.running.get(id)
-    if (active) { this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined }); active.controller.abort(); this.report(id, '正在停止本机执行；平台已提交的制作和上传会保留检查点') }
+    if (active) { this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined, presenterWait: undefined }); active.controller.abort(); this.report(id, '正在停止本机执行；平台已提交的制作和上传会保留检查点') }
     else if (this.isExecuting(this.read(id))) throw new ScienceWorkflowError('任务由另一进程执行，请在原工作台停止')
     else if (['queued', 'retry_wait', 'waiting_remote', 'awaiting_export'].includes(this.read(id).status)) {
-      this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined, status: 'paused' })
+      this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined, presenterWait: undefined, status: 'paused' })
       this.report(id, '自动制作已暂停，素材、原项目和导出检查点保留')
     }
-    else this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined })
+    else this.modify(id, { automaticDelivery: false, automaticProduction: false, automaticRetry: undefined, uploadRetry: undefined, presenterWait: undefined })
     return this.detail(id)
   }
   async waitForIdle() { await Promise.all([...this.running.values()].map(value => value.done)) }
@@ -1416,6 +1461,7 @@ export class ScienceWorkflowService {
       try { if (signal.aborted) cancel(); await handle.done; signal.throwIfAborted() }
       finally { signal.removeEventListener('abort', cancel) }
       const result = this.detail(id)
+      if (result.presenterWait) throw new ScienceWorkflowError(result.message, 409, true)
       if (['needs_attention', 'paused', 'retry_wait'].includes(result.status)) throw new ScienceWorkflowError(result.message, 409, result.failureKind === 'temporary')
       return result
     }
@@ -1427,6 +1473,7 @@ export class ScienceWorkflowService {
       if (!job.script.trim()) throw new ScienceWorkflowError('任务未生成完整科普文稿')
       return job
     }
+    if (job.presenterWait) throw new ScienceWorkflowError(job.message, 409, true)
     if (!job.videoUrl || job.videoCompositionPending) job = await run(() => this.produce(id, mode === 'upload'))
     if (!job.videoUrl) throw new ScienceWorkflowError('华生成片尚未下载完成')
     if ((!job.landscapeCoverUrl || !job.portraitCoverUrl) && (mode === 'videos' || !job.hasUploadAttempt))

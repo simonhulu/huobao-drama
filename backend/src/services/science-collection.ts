@@ -82,11 +82,12 @@ function atomicWrite(file: string, value: unknown) {
 const defaults = (): ScienceCollectionSettings => ({ youtubeChannels: [], targetCount: 5, mode: 'upload', huashengAccountName: null, baijiahaoAccountName: null })
 function reached(run: ScienceCollectionRun) { return run.targetCount !== null && run.counts.selected >= run.targetCount }
 function awaitingWorkflow(job: ScienceJob) {
-  return job.executionActive === true || job.status === 'retry_wait' && Boolean(job.automaticRetry || job.uploadRetry)
+  return job.executionActive === true || Boolean(job.presenterWait) || job.status === 'retry_wait' && Boolean(job.automaticRetry || job.uploadRetry)
 }
 function achieved(job: ScienceJob, run: ScienceCollectionRun) {
   if (job.deletedAt || job.status === 'running' || awaitingWorkflow(job)) return false
   if (run.mode === 'drafts') return Boolean(job.script.trim())
+  if (job.videoCompositionPending) return false
   if (run.mode === 'videos') return Boolean(job.videoUrl) && job.huashengAccountName === run.huashengAccountName
   return Boolean(job.status === 'completed' && job.upload?.submitted === true && job.upload.saved === false
     && job.upload.accountName === run.baijiahaoAccountName && job.videoUrl)
@@ -411,7 +412,7 @@ export class ScienceCollectionService {
       let result: ScienceJob
       for (;;) {
         while (job && awaitingWorkflow(job)) {
-          if (!observedExecution) this.report(id, job.status === 'retry_wait'
+          if (!observedExecution) this.report(id, job.presenterWait ? `正在等待远程主播 GPU：${item.title}` : job.status === 'retry_wait'
             ? `正在等待原任务自动重试：${item.title}` : `正在等待原任务执行完成：${item.title}`)
           observedExecution = true
           await delay(250, undefined, { signal })
@@ -429,7 +430,7 @@ export class ScienceCollectionService {
         catch (error) {
           signal.throwIfAborted()
           job = this.workflow.jobsForCollection(id).find(value => value.id === jobId)
-          if (!(job?.status === 'retry_wait' && (job.automaticRetry || job.uploadRetry))) throw error
+          if (!job || !awaitingWorkflow(job)) throw error
         }
       }
       this.verifyOwner(id, signal)

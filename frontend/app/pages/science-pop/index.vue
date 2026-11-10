@@ -45,7 +45,7 @@
           <div v-if="selectedJob.uploadCheck || selectedJob.huashengCheck" class="recovery-check" role="status"><template v-for="(check, name) in { upload: selectedJob.uploadCheck, huasheng: selectedJob.huashengCheck }" :key="name"><p v-if="check"><strong>{{ name === 'upload' ? '上传核对' : '花生查询' }}</strong><time>{{ formatTime(check.checkedAt) }}</time><span>{{ check.message }}</span></p></template></div>
           <div v-if="selectedJob.projectUrl" class="project-sync">
             <button class="btn btn-sm" :disabled="!!actionBusy || batchSyncBusy" @click="runAction('check-huasheng')"><Search :size="13" :class="{ spin: actionBusy === 'check-huasheng' }" />只查询制作进度</button>
-            <button class="btn btn-sm" :disabled="isRunning || !!actionBusy || batchSyncBusy" @click="runAction('sync')"><LoaderCircle v-if="actionBusy === 'sync'" :size="13" class="spin" /><RefreshCw v-else :size="13" />{{ actionBusy === 'sync' ? '正在接续…' : isRunning && ['produce', 'export'].includes(selectedJob.stage) ? '正在自动接续' : '同步花生状态' }}</button>
+            <button class="btn btn-sm" :disabled="isRunning || !!actionBusy || batchSyncBusy || !!selectedJob.presenterWait" @click="runAction('sync')"><LoaderCircle v-if="actionBusy === 'sync'" :size="13" class="spin" /><RefreshCw v-else :size="13" />{{ actionBusy === 'sync' ? '正在接续…' : isRunning && ['produce', 'export'].includes(selectedJob.stage) ? '正在自动接续' : '同步花生状态' }}</button>
             <div v-if="visibleHuashengSync" class="sync-result" role="status"><span>上次查询 {{ formatTime(visibleHuashengSync.checkedAt) }}</span><p :class="{ 'sync-error': visibleHuashengSync.status === 'error' }">{{ visibleHuashengSync.error || visibleHuashengSync.message }}<template v-if="visibleHuashengSync.exportProgress !== undefined"> · 导出 {{ Math.round(visibleHuashengSync.exportProgress) }}%</template></p></div>
             <span class="sync-note">完成后自动导出下载，并按原生产设置继续。</span>
           </div>
@@ -256,7 +256,7 @@ const filteredJobs = computed(() => {
     ? filtered.sort((a, b) => (Date.parse(b.updatedAt || b.createdAt) || 0) - (Date.parse(a.updatedAt || a.createdAt) || 0))
     : filtered
 })
-const syncableJobs = computed(() => jobs.value.filter(job => job.projectUrl && !job.videoUrl && !job.hasUploadAttempt && !job.upload && job.stage !== 'upload'
+const syncableJobs = computed(() => jobs.value.filter(job => job.projectUrl && !job.presenterWait && !job.videoUrl && !job.hasUploadAttempt && !job.upload && job.stage !== 'upload'
   && !taskExecuting(job) && ['needs_attention', 'paused', 'waiting_remote', 'awaiting_export', 'retry_wait'].includes(job.status)))
 const tabs = [{ id: 'script', label: '文稿与账号' }, { id: 'output', label: '成片与上传' }, { id: 'log', label: '运行记录' }]
 const steps = [{ id: 'download', label: '素材与原稿' }, { id: 'rewrite', label: '二创文稿' }, { id: 'produce', label: '花生制作' }, { id: 'export', label: '导出成片' }, { id: 'covers', label: '横竖封面' }, { id: 'upload', label: '百家号发表' }]
@@ -525,6 +525,7 @@ function uploadStatusLabel(job) {
   return ({ pending: '待上传', queued: '上传排队', uploading: '上传中', uploaded: '已上传（草稿）', submitted: '已上传·待审核', published: '已发表', blocked: '上传异常', paused: '上传已暂停', not_ready: '等待成片与封面' })[uploadState(job)] || '待上传'
 }
 function statusLabel(job) {
+  if (job.presenterWait && ['waiting_remote', 'paused'].includes(job.status)) return job.status === 'paused' ? '已暂停' : '等待GPU'
   if (job.status === 'running' && /同步花生/.test(job.message || '')) return '同步花生状态'
   if (job.status === 'running' && job.stage === 'export' && job.exportStep) {
     const label = ({ platform: '花生导出', download: '下载成片', presenter: '生成主播', compose: '合成成片' })[job.exportStep]
@@ -621,7 +622,7 @@ async function saveDraft() {
 async function runAction(action, payload = {}) {
   if (actionBusy.value || batchSyncBusy.value || !selectedJob.value || isRunning.value && !['cancel', 'check-huasheng'].includes(action)) return
   if (action === 'produce' && isQueuedCollectionJob(selectedJob.value)) { actionError.value = '该任务由所属批次调度，请查看所属批次并沿用原生产设置继续。'; return }
-  if (action === 'sync' && !selectedJob.value.projectUrl) return
+  if (action === 'sync' && (!selectedJob.value.projectUrl || selectedJob.value.presenterWait)) return
   const id = selectedId.value
   actionBusy.value = action; actionError.value = ''; actionNotice.value = ''; mutationVersion++; detailSequence++; detailLoading.value = false
   try {

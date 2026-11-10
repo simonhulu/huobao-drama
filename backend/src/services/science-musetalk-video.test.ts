@@ -7,7 +7,7 @@ import { createServer } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { prepareScienceMusetalkVideo } from './science-musetalk-video.js'
+import { checkScienceMusetalkAvailability, prepareScienceMusetalkVideo } from './science-musetalk-video.js'
 
 const exec = promisify(execFile)
 const sha = (value: Uint8Array) => createHash('sha256').update(value).digest('hex')
@@ -31,9 +31,10 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2,
     avatar_id: 'xiaolu-r3-fixture', reference_sha256: '1'.repeat(64), fps: remoteFps }
   const state = { submissions: 0, retries: 0, deletes: 0, polls: 0, downloads: 0, pending: false, wrongAudio: false, dropSubmission: false, dropSubmissions: 0,
     loadingReads: 0, failedPoll: false, onPoll: undefined as (() => void) | undefined, onResult: undefined as (() => void) | undefined,
-    jobs: new Map<string, any>(), uploaded: undefined as Buffer | undefined }
+    jobs: new Map<string, any>(), requests: [] as string[], uploaded: undefined as Buffer | undefined }
   const server = createServer(async (request, response) => {
     try {
+      state.requests.push(`${request.method} ${request.url}`)
       const send = (data: unknown) => { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(data)) }
       if (request.url === '/health') { const loading = state.loadingReads-- > 0; send({ ...identity, ok: !loading, status: loading ? 'loading' : 'ready' }); return }
       if (request.url === '/v1/lipsync' && request.method === 'POST') {
@@ -104,6 +105,168 @@ function remoteBudget(t: TestContext) {
   })
   return { expire: () => controller.abort(new DOMException('remote budget expired', 'TimeoutError')), budgets }
 }
+
+test('the availability probe only reads health and creates no task files when the model is ready', async t => {
+  const f = await fixture(t), before = await fs.readdir(f.root, { recursive: true })
+  const result = await checkScienceMusetalkAvailability({ signal: signal() })
+  assert.equal(result.ready, true)
+  assert.ok(result.message)
+  assert.deepEqual(f.state.requests, ['GET /health'])
+  assert.deepEqual(await fs.readdir(f.root, { recursive: true }), before)
+  assert.equal(f.state.submissions, 0); assert.equal(f.state.retries, 0); assert.equal(f.state.deletes, 0)
+})
+
+test('the availability probe reports loading without polling or creating a GPU task', async t => {
+  const f = await fixture(t); f.state.loadingReads = 1
+  const result = await checkScienceMusetalkAvailability({ signal: signal() })
+  assert.equal(result.ready, false)
+  assert.match(result.message, /加载/)
+  assert.deepEqual(f.state.requests, ['GET /health'])
+  assert.equal(f.state.jobs.size, 0)
+})
+
+test('the availability probe waits for a loading service before its identity is available', async t => {
+  await fixture(t)
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ ok: false, status: 'loading' }))
+  assert.equal((await checkScienceMusetalkAvailability({ signal: signal() })).ready, false)
+})
+
+test('the availability probe returns a safe waiting result for an offline service', async t => {
+  const f = await fixture(t), calls: string[] = []
+  t.mock.method(globalThis, 'fetch', async (url: unknown, options: RequestInit) => {
+    calls.push(`${options.method || 'GET'} ${new URL(String(url)).pathname}`)
+    throw new TypeError('fetch failed: private-credential', { cause: Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }) })
+  })
+  const result = await checkScienceMusetalkAvailability({ signal: signal() })
+  assert.equal(result.ready, false)
+  assert.ok(result.message)
+  assert.doesNotMatch(result.message, /private-credential|127\.0\.0\.1/)
+  assert.deepEqual(calls, ['GET /health'])
+  assert.equal(f.state.jobs.size, 0)
+})
+
+test('the availability probe has a bounded deadline for a stalled health response', async t => {
+  await fixture(t)
+  const deadline = new AbortController()
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    assert.ok(milliseconds >= 20_000 && milliseconds <= 25_000)
+    return deadline.signal
+  })
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, options: RequestInit) => {
+    deadline.abort(new DOMException('health deadline expired', 'TimeoutError'))
+    options.signal!.throwIfAborted()
+    throw new Error('unreachable')
+  })
+  assert.equal((await checkScienceMusetalkAvailability({ signal: signal() })).ready, false)
+})
+
+test('the availability probe blocks changed models, revisions, avatars and frame rates instead of waiting', async t => {
+  const f = await fixture(t), original = { ...f.identity }
+  for (const changed of [{ model: 'wrong-model' }, { source_revision: 'wrong-revision' }, { avatar_id: '../wrong-avatar' },
+    { reference_sha256: 'not-a-hash' }, { fps: 30 }]) {
+    Object.assign(f.identity, original, changed)
+    await assert.rejects(checkScienceMusetalkAvailability({ signal: signal() }), /模型、头像或帧率校验失败/)
+  }
+  assert.ok(f.state.requests.every(request => request === 'GET /health'))
+  assert.equal(f.state.jobs.size, 0)
+})
+
+test('the availability probe throws invalid configuration without making a network request', async t => {
+  await fixture(t)
+  process.env.MUSETALK_API_URL = 'http://remote.invalid:8789'
+  t.mock.method(globalThis, 'fetch', async () => { assert.fail('invalid configuration must never reach the network') })
+  await assert.rejects(checkScienceMusetalkAvailability({ signal: signal() }), /本机 HTTP/)
+})
+
+test('the availability probe preserves explicit parent cancellation before and during the health request', async t => {
+  await fixture(t)
+  const before = new AbortController(), beforeReason = new Error('cancel before health probe')
+  before.abort(beforeReason)
+  await assert.rejects(checkScienceMusetalkAvailability({ signal: before.signal }), (error: unknown) => error === beforeReason)
+  const during = new AbortController(), duringReason = new Error('cancel during health probe')
+  t.mock.method(globalThis, 'fetch', async () => {
+    during.abort(duringReason)
+    throw new DOMException('The operation was aborted', 'AbortError')
+  })
+  await assert.rejects(checkScienceMusetalkAvailability({ signal: during.signal }), (error: unknown) => error === duringReason)
+})
+
+test('the availability probe waits only for temporary HTTP failures and blocks unexpected health responses', async t => {
+  const f = await fixture(t)
+  let status = 503, body: unknown = {}
+  t.mock.method(globalThis, 'fetch', async () => Response.json(body, { status }))
+  for (status of [408, 429, 500, 503]) assert.equal((await checkScienceMusetalkAvailability({ signal: signal() })).ready, false)
+  for (status of [401, 403, 404]) await assert.rejects(checkScienceMusetalkAvailability({ signal: signal() }), /HTTP/)
+  status = 200; body = { ...f.identity, ok: false, status: 'failed' }
+  await assert.rejects(checkScienceMusetalkAvailability({ signal: signal() }), /异常服务状态/)
+})
+
+test('the availability probe closes its SSH tunnel and removes temporary authentication files on every outcome', async t => {
+  const configurationFailures = ['auth', 'host-key', 'bad-key', 'bad-option', 'unknown-exit', 'missing-client']
+  for (const mode of ['ready', 'loading', 'invalid', 'offline', 'timeout', ...configurationFailures, 'cancel-connect', 'cancel-health']) await t.test(mode, async t => {
+    const f = await fixture(t), controller = new AbortController(), cancelled = new Error('cancel probe SSH fixture')
+    const bin = path.join(f.root, 'bin'), statePath = path.join(f.root, 'ssh-state.json')
+    await fs.mkdir(bin)
+    const wrapper = `#!${process.execPath}
+const fs=require('node:fs'),http=require('node:http'),mode=${JSON.stringify(mode)},filename=${JSON.stringify(statePath)};
+const state={pid:process.pid,askpass:process.env.SSH_ASKPASS,requests:[]};const save=()=>{fs.writeFileSync(filename+'.tmp',JSON.stringify(state));fs.renameSync(filename+'.tmp',filename)};save();
+const failures={offline:'ssh: connect to host probe.invalid port 22: Connection refused',timeout:'ssh: connect to host probe.invalid port 22: Operation timed out',
+auth:'probe@private-host: Permission denied (publickey,password). private-output-canary',
+'host-key':'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! private-output-canary',
+'bad-key':'Load key "/private-output-canary": invalid format','bad-option':'Bad configuration option: private-output-canary',
+'unknown-exit':'private-output-canary'};
+if(failures[mode]){process.stderr.write(failures[mode],()=>process.exit(255));return;}
+process.on('SIGTERM',()=>process.exit(0));
+if(mode==='cancel-connect'){setInterval(()=>{},1000)}else{
+const args=process.argv.slice(2),forward=args[args.indexOf('-L')+1],port=Number(forward.split(':')[1]);
+http.createServer((request,response)=>{state.requests.push(request.method+' '+request.url);save();if(mode==='cancel-health')return;
+response.setHeader('Content-Type','application/json');response.end(JSON.stringify({...${JSON.stringify(f.identity)},
+model:mode==='invalid'?'wrong-model':${JSON.stringify(f.identity.model)},ok:mode!=='loading',status:mode==='loading'?'loading':'ready'}));}).listen(port,'127.0.0.1');}
+`
+    await fs.writeFile(path.join(bin, 'ssh'), wrapper, { mode: 0o700 })
+    const replacements = { PATH: `${bin}${path.delimiter}${process.env.PATH || ''}`, MUSETALK_SSH_HOST: 'probe.invalid',
+      MUSETALK_SSH_USER: 'probe', MUSETALK_SSH_PORT: '22', MUSETALK_REMOTE_HOST: '127.0.0.1', MUSETALK_REMOTE_PORT: '8789',
+      MUSETALK_SSH_PASSWORD: 'fixture-password' }
+    const previous = new Map(Object.keys(replacements).map(name => [name, process.env[name]]))
+    t.after(() => { for (const [name, value] of previous) { if (value === undefined) delete process.env[name]; else process.env[name] = value } })
+    Object.assign(process.env, replacements)
+    delete process.env.MUSETALK_API_URL
+    if (mode === 'missing-client') { await fs.rm(path.join(bin, 'ssh')); process.env.PATH = bin }
+    const writes = t.mock.method(fs, 'writeFile')
+    const running = checkScienceMusetalkAvailability({ signal: controller.signal })
+    const finished = mode === 'invalid' ? assert.rejects(running, /模型、头像或帧率校验失败/)
+      : configurationFailures.includes(mode) ? assert.rejects(running, (error: any) => {
+        assert.equal(error.code, 'MUSETALK_SSH_CONFIG')
+        assert.doesNotMatch(error.message, /private-output-canary|private-host|fixture-password/)
+        assert.equal(error.cause, undefined, 'SSH diagnostic output must stay private')
+        return true
+      })
+      : mode.startsWith('cancel') ? assert.rejects(running, (error: unknown) => error === cancelled)
+        : assert.doesNotReject(running.then(result => { assert.equal(result.ready, mode === 'ready') }))
+    if (mode.startsWith('cancel')) {
+      let started = false
+      for (let attempt = 0; attempt < 200; attempt++) {
+        try {
+          const state = JSON.parse(await fs.readFile(statePath, 'utf8'))
+          if (mode === 'cancel-connect' || state.requests.length > 0) { started = true; break }
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      controller.abort(cancelled)
+      assert.equal(started, true, 'cancellation must reach the actual tunnel or health request')
+    }
+    await finished
+    const authenticationFiles = writes.mock.calls.map(call => String(call.arguments[0])).filter(filename => path.basename(filename).startsWith('musetalk-askpass-'))
+    assert.equal(authenticationFiles.length, 1)
+    await assert.rejects(fs.access(authenticationFiles[0]!), { code: 'ENOENT' })
+    if (mode !== 'missing-client') {
+      const state = JSON.parse(await fs.readFile(statePath, 'utf8'))
+      assert.throws(() => process.kill(state.pid, 0), { code: 'ESRCH' }, 'the probe must not leave SSH running')
+      assert.ok(state.requests.every((request: string) => request === 'GET /health'))
+    }
+    await assert.rejects(fs.access(f.directory), { code: 'ENOENT' }, 'the probe must not create a task directory')
+  })
+})
 
 test('a long narration gets a duration-sized default remote budget and preserves its pending job on expiry', async t => {
   const f = await fixture(t), duration = 1045.056

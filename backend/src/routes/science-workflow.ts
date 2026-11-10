@@ -64,8 +64,8 @@ export function createScienceWorkflowRoute(options: { service?: ScienceWorkflowS
   app.patch('/jobs/:id', async c => response(c, service().patch(c.req.param('id'), sciencePatchSchema.parse(await body(c)))))
   app.post('/jobs/:id/prepare', async c => { empty.parse(await body(c)); return response(c, service().produce(c.req.param('id')), 202) })
   app.post('/jobs/:id/produce', async c => {
-    const input = z.object({ upload: z.boolean().optional() }).strict().parse(await body(c))
-    return response(c, service().produce(c.req.param('id'), input.upload), 202)
+    const input = z.object({ upload: z.boolean().optional(), waitForPresenter: z.boolean().optional() }).strict().parse(await body(c))
+    return response(c, service().produce(c.req.param('id'), input.upload, { waitForPresenter: input.waitForPresenter }), 202)
   })
   app.post('/jobs/:id/upload', async c => { empty.parse(await body(c)); return response(c, service().upload(c.req.param('id')), 202) })
   app.post('/jobs/:id/check-upload', async c => { empty.parse(await body(c)); return response(c, service().checkUpload(c.req.param('id')), 202) })

@@ -63,7 +63,7 @@ function fixture(t: any, config: {
     cancel(id) {
       canceled.push(id)
       const job = jobs.get(id)!
-      job.status = 'paused'; job.automaticRetry = undefined; job.uploadRetry = undefined
+      job.status = 'paused'; job.automaticRetry = undefined; job.uploadRetry = undefined; job.presenterWait = undefined
       return structuredClone(job)
     },
     validateBatchAccounts(mode, hs, bj) {
@@ -407,6 +407,30 @@ test('a batch waits through a scheduled workflow retry and its background execut
   const result = h.service.overview().runs[0]!
   assert.equal(result.status, 'completed'); assert.equal(result.counts.completed, 1); assert.equal(result.counts.failed, 0)
   assert.equal(h.calls.length, 1); assert.equal(h.creates(), 1)
+})
+
+test('an owned GPU waiter survives collection service shutdown but a user batch stop revokes it', async t => {
+  for (const shutdown of [true, false]) {
+    let entered!: () => void
+    const waiting = new Promise<void>(resolve => { entered = resolve })
+    const presenterWait = { requestedAt: new Date().toISOString(), nextCheckAt: new Date(Date.now() + 60_000).toISOString() }
+    const h = fixture(t, { lists: { [channels[0]!]: [candidate(1)] }, run: async job => {
+      Object.assign(job, { status: 'waiting_remote', stage: 'export', executionActive: false, videoUrl: '/original-main.mp4',
+        videoCompositionPending: true, presenterWait, message: '等待远程主播 GPU' })
+      entered(); throw new ScienceWorkflowError(job.message, 409, true)
+    } })
+    const run = h.service.start({ requestId: `gpu-stop-${shutdown}`, targetCount: 1, mode: 'videos' })
+    await waiting; await nextTurn()
+    const job = [...h.jobs.values()][0]!
+    assert.equal(h.service.overview().activeRun?.id, run.id)
+    assert.equal(h.service.overview().runs[0]!.counts.completed, 0)
+    if (shutdown) await h.service.stop()
+    else { h.service.stopRun(run.id); await h.service.waitForIdle() }
+    assert.deepEqual(h.canceled, shutdown ? [] : [job.id])
+    assert.deepEqual(job.presenterWait, shutdown ? presenterWait : undefined)
+    assert.equal(h.service.overview().runs[0]!.status, shutdown ? 'interrupted' : 'stopped')
+    assert.equal(h.calls.length, 1)
+  }
 })
 
 test('a batch keeps observing an upload retry and accepts only the final bound publication receipt', async t => {

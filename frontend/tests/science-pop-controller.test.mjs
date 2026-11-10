@@ -57,6 +57,18 @@ async function harness(t) {
   t.after(() => { app.unmount(); assert.equal(timers.size, 0); assert.equal(listeners.size, 0) })
   await flush(); return { s: app._instance.setupState, state, timers, listeners }
 }
+test('GPU waiting has its own status and cannot be sent to single or batch Huasheng sync', async t => {
+  const h = await harness(t)
+  const waiting = job('first', { status: 'waiting_remote', stage: 'export', videoCompositionPending: true,
+    projectUrl: 'https://www.huasheng.cn/video/123', presenterWait: { requestedAt: '2026-11-10T04:00:00Z', nextCheckAt: '2026-11-10T04:01:00Z' } })
+  h.state.overview.jobs = [waiting]
+  await h.s.refresh()
+  assert.equal(h.s.statusLabel(h.s.selectedJob), '等待GPU')
+  assert.equal(h.s.statusLabel({ ...waiting, status: 'paused' }), '已暂停')
+  assert.equal(h.s.syncableJobs.length, 0)
+  await h.s.runAction('sync'); await h.s.syncPendingJobs()
+  assert.equal(h.state.requests.filter(item => item.method === 'POST').length, 0)
+})
 test('attention queue puts the most recently updated task first after refresh without changing selection or other queues', async t => {
   const h = await harness(t)
   h.state.overview.jobs = [
