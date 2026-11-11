@@ -157,15 +157,14 @@ export class HistoryHuashengExportService {
       .run(this.owner, hostname(), process.pid, Date.now(), this.timer ? 'automatic' : 'selected')
   }
   private keepHeartbeat() {
+    if (this.heartbeat) return
     // The first write runs synchronously from start/runPending, outside their
     // promise handlers. Report contention just like later heartbeat ticks.
     try { this.recordHeartbeat() } catch (error) { this.options.onError?.(error) }
-    if (!this.heartbeat) {
-      this.heartbeat = setInterval(() => {
-        try { this.recordHeartbeat() } catch (error) { this.options.onError?.(error) }
-      }, 5000)
-      this.heartbeat.unref()
-    }
+    this.heartbeat = setInterval(() => {
+      try { this.recordHeartbeat() } catch (error) { this.options.onError?.(error) }
+    }, 5000)
+    this.heartbeat.unref()
   }
   private releaseHeartbeat() {
     if (this.timer || this.draining || this.selectedDrain) return

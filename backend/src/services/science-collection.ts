@@ -264,7 +264,16 @@ export class ScienceCollectionService {
     try { if (JSON.parse(fs.readFileSync(this.lockFile, 'utf8')).token === token) fs.rmSync(this.lockFile) } catch { /* A missing/replaced lock is never removed. */ }
   }
   private launch(run: StoredRun, automaticRecovery = false) {
-    const token = this.acquire(run.id), controller = new AbortController()
+    const token = this.acquire(run.id)
+    try {
+      if (automaticRecovery) {
+        const current = this.read(run.id)
+        if (current.stopRequested || current.collectionStopRequested || JSON.stringify(current) !== JSON.stringify(run))
+          throw new ScienceWorkflowError('原批次状态已变化，保留最新记录等待下次核对')
+        run = current
+      }
+    } catch (error) { this.release(token); throw error }
+    const controller = new AbortController()
     const handle: LiveRun = { id: run.id, token, controller, done: Promise.resolve() }
     live.set(this.stateRoot, handle)
     try {
@@ -391,7 +400,7 @@ export class ScienceCollectionService {
     if (!job || job.deletedAt || ['completed', 'deleted'].includes(item.status) || achieved(job, run)
       || job.uploadStatus === 'uncertain' || job.huashengAccountName !== run.huashengAccountName
       || job.baijiahaoAccountName !== run.baijiahaoAccountName || ['failed', 'unknown'].includes(job.status)
-      || job.status === 'paused' && job.automaticRecoveryAllowed === false) return false
+      || job.automaticRecoveryAllowed === false) return false
     if (awaitingWorkflow(job)) return true
     if (item.status === 'failed' || !['draft', 'queued', 'running', 'ready', 'completed', 'paused', 'waiting_remote', 'awaiting_export'].includes(job.status)) return false
     if (job.status === 'paused') return !/手动|人工|用户/.test(job.message)
@@ -804,6 +813,8 @@ export class ScienceCollectionService {
     const run = runs.find(run => (run.processing?.status === 'interrupted' || !run.processing && run.status === 'interrupted')
       && run.stopRequested !== true && !alive(run.ownerPid) && (!run.collection || !isActive(run.collection.status))
       && this.hasAutomaticWork(run))
+      ?? runs.filter(run => this.processingBlockerRecovered(run, runs) && this.hasAutomaticWork(run))
+        .sort((a, b) => this.latestSuccessAt(b) - this.latestSuccessAt(a))[0]
     if (!run) return started
     try {
       this.workflow.validateBatchAccounts(run.mode, run.huashengAccountName, run.baijiahaoAccountName)
@@ -820,6 +831,22 @@ export class ScienceCollectionService {
       if (!(error instanceof ScienceWorkflowError)) throw error
       return started
     }
+  }
+  private latestSuccessAt(run: StoredRun) {
+    return this.workflow.jobsForCollection(run.id).reduce((latest, job) => {
+      const at = Date.parse(job.updatedAt)
+      return achieved(job, run) && job.huashengAccountName === run.huashengAccountName
+        && job.baijiahaoAccountName === run.baijiahaoAccountName && Number.isFinite(at) ? Math.max(latest, at) : latest
+    }, 0)
+  }
+  private processingBlockerRecovered(run: StoredRun, runs: StoredRun[]) {
+    if (process.env.SCIENCE_COLLECTION_REFILL_ENABLED !== '1' || run.processing?.status !== 'needs_attention'
+      || !batchBlocker(run.processing.message) || run.stopRequested || run.collectionStopRequested || alive(run.ownerPid)
+      || !run.collection || !['completed', 'needs_attention'].includes(run.collection.status)) return false
+    const blockedAt = Date.parse(run.updatedAt)
+    return Number.isFinite(blockedAt) && runs.some(other => other.mode === run.mode
+      && other.huashengAccountName === run.huashengAccountName && other.baijiahaoAccountName === run.baijiahaoAccountName
+      && this.latestSuccessAt(other) > blockedAt)
   }
   private refillPaused(runs: StoredRun[], settings: ScienceCollectionSettings, jobsByRun: Map<string, ScienceJob[]>) {
     const relevant = runs.filter(run => run.mode === settings.mode && run.huashengAccountName === settings.huashengAccountName

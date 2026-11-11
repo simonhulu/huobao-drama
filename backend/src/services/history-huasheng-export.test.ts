@@ -560,6 +560,46 @@ test('worker status reflects durable live heartbeats, not enabled configuration'
   assert.equal(reader.overview().worker.status, 'stopped')
 })
 
+test('idle polling preserves the five-second heartbeat cadence and stop removes its worker record', async t => {
+  const f = fixture(t)
+  f.db.exec(`CREATE TABLE heartbeat_test_writes(count INTEGER NOT NULL);
+    INSERT INTO heartbeat_test_writes VALUES(0);
+    CREATE TRIGGER count_heartbeat_insert AFTER INSERT ON history_huasheng_export_workers
+      BEGIN UPDATE heartbeat_test_writes SET count=count+1; END;
+    CREATE TRIGGER count_heartbeat_update AFTER UPDATE ON history_huasheng_export_workers
+      BEGIN UPDATE heartbeat_test_writes SET count=count+1; END;`)
+  const writes = () => (f.db.prepare('SELECT count FROM heartbeat_test_writes').get() as { count: number }).count
+  const heartbeat = () => (f.db.prepare('SELECT heartbeat_at FROM history_huasheng_export_workers').get() as { heartbeat_at: number }).heartbeat_at
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.now() })
+  f.service.start()
+  await f.service.runPending()
+  const initial = heartbeat()
+  assert.equal(f.service.listJobs().length, 0)
+  assert.equal(writes(), 1, 'Starting and immediately polling an empty queue must write only one heartbeat')
+  for (let second = 0; second < 4; second++) {
+    t.mock.timers.tick(1000)
+    await f.service.runPending()
+    assert.equal(writes(), 1, 'An empty one-second poll must not refresh the existing heartbeat')
+    assert.equal(heartbeat(), initial)
+  }
+  t.mock.timers.tick(999)
+  await f.service.runPending()
+  assert.equal(writes(), 1)
+  t.mock.timers.tick(1)
+  await f.service.runPending()
+  assert.equal(writes(), 2, 'The five-second heartbeat must still refresh the worker record')
+  assert.equal(heartbeat(), initial + 5000)
+  assert.equal(f.service.worker.status, 'running')
+  await f.service.stop()
+  assert.equal(f.service.worker.status, 'stopped')
+  assert.equal((f.db.prepare('SELECT count(*) AS count FROM history_huasheng_export_workers').get() as { count: number }).count, 0)
+  t.mock.timers.tick(15_000)
+  assert.equal(writes(), 2, 'Stopping must clear both the poll and heartbeat timers')
+  assert.deepEqual(f.calls.create, [])
+  assert.deepEqual(f.calls.inspect, [])
+  assert.deepEqual(f.calls.download, [])
+})
+
 test('a transient initial heartbeat write cannot throw out of the polling loop', async t => {
   const f = fixture(t)
   const errors: unknown[] = []

@@ -456,6 +456,125 @@ test('a successful later job can still clear a blocker newer than manual authori
   assert.equal(h.visits.length, 1); assert.equal(h.calls.includes(old.jobs[0]!.id), false)
 })
 
+test('a later success resumes safe original stock without replacing its persisted retry scope', async t => {
+  const h = fixture(t)
+  h.service.saveSettings({mode: 'upload'})
+  const old = h.seed(7, {mode: 'upload', status: 'needs_attention', updatedAt: later(2000),
+    processing: {status: 'needs_attention', message: '花生账号登录态无法核验'}})
+  Object.assign(old.jobs[0]!, {status: 'needs_attention', message: '原请求结果不明'})
+  old.run.items[0].status = 'failed'
+  Object.assign(old.jobs[1]!, {status: 'completed', videoUrl: '/assets/success.mp4', updatedAt: later(3000),
+    upload: {staged: true, saved: false, submitted: true, published: true, publicationStatus: 'published', accountName: 'bj-current',
+      articleId: 'original-article', publishedUrl: 'https://baijiahao.baidu.com/', editorUrl: 'https://baijiahao.baidu.com/', targetId: 'original', engine: 'test'}})
+  Object.assign(old.jobs[2]!, {status: 'ready', automaticRecoveryAllowed: false, videoUrl: '/assets/preview.mp4'})
+  Object.assign(old.jobs[3]!, {status: 'ready', videoUrl: '/assets/unknown.mp4', uploadStatus: 'uncertain'})
+  const jobIds = old.jobs.map(job => job.id)
+  old.run.retry = {jobIds, startedAt: timestamp, finishedAt: later(2000), completed: 0, failed: 1}
+  old.run.pendingRetryJobIds = [...jobIds]
+  fs.writeFileSync(old.filename, JSON.stringify(old.run))
+  const restarted = h.restart()
+  assert.deepEqual(restarted.runAutomaticRecovery(), [old.id])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.calls, [old.jobs[4]!.id])
+  const saved = JSON.parse(fs.readFileSync(old.filename, 'utf8'))
+  assert.deepEqual(saved.retry.jobIds, jobIds)
+  assert.equal(saved.targetCount, 7); assert.equal(saved.items.length, 7)
+  assert.equal(h.visits.length, 0); assert.equal(h.intents().length, 0)
+})
+
+test('recovery prefers the batch with the latest successful output and keeps its original full scope', async t => {
+  const h = fixture(t)
+  const old = h.seed(4, {status: 'needs_attention', updatedAt: later(2000),
+    processing: {status: 'needs_attention', message: '花生账号登录态无法核验'}})
+  Object.assign(old.jobs[0]!, {status: 'ready', videoUrl: '/assets/success.mp4', updatedAt: later(3000)})
+  const newer = h.seed(3, {createdAt: later(1000), updatedAt: later(2000), status: 'needs_attention',
+    processing: {status: 'needs_attention', message: '花生专用浏览器未连接'}})
+  const untouched = fs.readFileSync(newer.filename, 'utf8')
+  assert.deepEqual(h.restart().runAutomaticRecovery(), [old.id])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.calls, [old.jobs[1]!.id])
+  const saved = JSON.parse(fs.readFileSync(old.filename, 'utf8'))
+  assert.equal(saved.retry, undefined); assert.equal(saved.targetCount, 4)
+  assert.deepEqual(saved.items.map((item: {jobId: string}) => item.jobId), old.jobs.map(job => job.id))
+  assert.equal(fs.readFileSync(newer.filename, 'utf8'), untouched)
+  assert.equal(h.visits.length, 0)
+})
+
+test('an unsuccessful recovery needs a newer successful result before another attempt', async t => {
+  const h = fixture(t)
+  h.service.saveSettings({youtubeChannels: []})
+  const old = h.seed(2, {status: 'needs_attention', updatedAt: later(2000),
+    processing: {status: 'needs_attention', message: '花生账号额度不足'}})
+  Object.assign(old.jobs[0]!, {status: 'ready', videoUrl: '/assets/success.mp4', updatedAt: later(3000)})
+  h.options.workflow!.runBatchJob = async id => { h.calls.push(id); throw new ScienceWorkflowError('花生账号额度不足') }
+  const restarted = h.restart()
+  assert.deepEqual(restarted.runAutomaticRecovery(), [old.id])
+  await restarted.waitForIdle()
+  assert.equal(restarted.overview().runs.find(run => run.id === old.id)?.processing?.status, 'needs_attention')
+  restarted.runAutomaticRecovery()
+  assert.deepEqual(h.calls, [old.jobs[1]!.id])
+})
+
+for (const change of ['processing-stop', 'collection-stop', 'scope-edited'] as const)
+  test(`automatic recovery preserves a concurrent ${change} after selection`, t => {
+    const h = fixture(t)
+    h.service.saveSettings({youtubeChannels: []})
+    const old = h.seed(2, {status: 'needs_attention', updatedAt: later(2000),
+      processing: {status: 'needs_attention', message: '花生账号登录态无法核验'}})
+    Object.assign(old.jobs[0]!, {status: 'ready', videoUrl: '/assets/success.mp4', updatedAt: later(3000)})
+    const validate = h.options.workflow!.validateBatchAccounts
+    let changed: string | undefined
+    h.options.workflow!.validateBatchAccounts = (...args) => {
+      const current = JSON.parse(fs.readFileSync(old.filename, 'utf8'))
+      current.updatedAt = later(4000)
+      if (change === 'processing-stop') { current.stopRequested = true; current.processing.status = 'stopped' }
+      if (change === 'collection-stop') current.collectionStopRequested = true
+      if (change === 'scope-edited') current.targetCount = 100
+      changed = JSON.stringify(current)
+      fs.writeFileSync(old.filename, changed)
+      return validate(...args)
+    }
+    assert.deepEqual(h.restart().runAutomaticRecovery(), [])
+    assert.ok(changed)
+    assert.equal(fs.readFileSync(old.filename, 'utf8'), changed)
+    assert.deepEqual(h.calls, [])
+    assert.equal(fs.existsSync(path.join(h.root, 'worker.lock')), false)
+  })
+
+for (const scenario of ['disabled', 'older', 'equal', 'invalid-success', 'invalid-blocker', 'other-mode',
+  'other-huasheng', 'other-baijiahao', 'deleted', 'unfinished', 'composition-pending', 'stopped', 'live-owner',
+  'non-platform-failure'] as const) test(`a later success does not resume unsafe stock: ${scenario}`, t => {
+  const h = fixture(t, {enabled: scenario !== 'disabled'})
+  const old = h.seed(1, {status: 'needs_attention', updatedAt: scenario === 'invalid-blocker' ? 'invalid' : later(2000),
+    processing: {status: 'needs_attention', message: scenario === 'non-platform-failure' ? '原封面请求结果不明' : '花生账号额度不足'},
+    ...(scenario === 'stopped' ? {stopRequested: true} : {}),
+    ...(scenario === 'live-owner' ? {ownerPid: process.ppid} : {})})
+  h.seed(1, {status: 'completed', processing: {status: 'completed', message: 'Done'},
+    ...(scenario === 'other-mode' ? {mode: 'drafts'} : {}),
+    ...(scenario === 'other-huasheng' ? {huashengAccountName: 'hs-other'} : {}),
+    ...(scenario === 'other-baijiahao' ? {baijiahaoAccountName: 'bj-other'} : {})},
+  {status: scenario === 'unfinished' ? 'running' : 'ready', videoUrl: '/assets/success.mp4',
+    updatedAt: scenario === 'older' ? later(1000) : scenario === 'equal' ? later(2000)
+      : scenario === 'invalid-success' ? 'invalid' : later(3000),
+    ...(scenario === 'deleted' ? {deletedAt: later(3000)} : {}),
+    ...(scenario === 'composition-pending' ? {videoCompositionPending: true} : {})})
+  const before = fs.readFileSync(old.filename, 'utf8')
+  h.restart().runAutomaticRecovery()
+  assert.equal(h.calls.includes(old.jobs[0]!.id), false)
+  assert.equal(fs.readFileSync(old.filename, 'utf8'), before)
+})
+
+for (const status of ['draft', 'queued', 'ready', 'waiting_remote', 'awaiting_export'] as const)
+  test(`automatic recovery honors revoked delivery permission for ${status} jobs`, t => {
+    const h = fixture(t)
+    const old = h.seed(1, {status: 'interrupted', processing: {status: 'interrupted', message: 'Interrupted'}},
+      {status, automaticRecoveryAllowed: false, message: '原任务已停止自动交付'})
+    const before = fs.readFileSync(old.filename, 'utf8')
+    h.restart().runAutomaticRecovery()
+    assert.equal(h.calls.includes(old.jobs[0]!.id), false)
+    assert.equal(fs.readFileSync(old.filename, 'utf8'), before)
+  })
+
 for (const outcome of ['completed', 'deleted'] as const) test(`explicit processing resume clears stop after every item became ${outcome} in the background`, async t => {
   const h = fixture(t), original = h.seed(1)
   h.service.stopProcessing(original.id)
