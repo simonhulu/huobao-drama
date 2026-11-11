@@ -64,24 +64,34 @@ class AccountBrowserConnectionError(RuntimeError):
     issue = "connection_failed"
 
 
-async def cleanup_stale_baijiahao_pages(config, endpoint, *, account_name=None):
+async def cleanup_stale_baijiahao_pages(config, endpoint, *, account_name=None, preserve_target_ids=None):
     request = {"endpoint": endpoint, "stateRoot": config["stateRoot"], "platform": "baijiahao"}
     if account_name is not None:
         request["accountName"] = account_name
+    if preserve_target_ids:
+        request["preserveTargetIds"] = preserve_target_ids
     process = await asyncio.create_subprocess_exec(
         "node", str(Path(__file__).with_name("stale_pages.mjs")),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stage = "子进程响应超时"
     try:
-        # Cold checkpoint scans on an external disk can exceed the browser-only timeout.
-        output, _ = await asyncio.wait_for(process.communicate(json.dumps(request).encode()), timeout=45)
+        output, diagnostics = await asyncio.wait_for(process.communicate(json.dumps(request).encode()), timeout=45)
+        stage = "清理结果校验"
         if process.returncode != 0 or len(output) > 256 * 1024:
+            try:
+                phase = json.loads(diagnostics[:4096]).get("phase")
+                stage = {"startup": "清理进程启动", "browser_connect": "浏览器连接",
+                         "target_inventory": "页面清单读取", "checkpoint_scan": "上传检查点读取",
+                         "target_cleanup": "旧页面关闭"}.get(phase, stage)
+            except (ValueError, TypeError, AttributeError):
+                pass
             raise ValueError("cleanup failed")
         result = json.loads(output)
         if not isinstance(result, dict) or not isinstance(result.get("closedTargetIds"), list):
             raise ValueError("invalid cleanup result")
         return result
     except (TimeoutError, ValueError) as error:
-        raise AccountBrowserConnectionError("百家号旧页面清理未完成，请重试连接；原登录和上传检查点已保留") from error
+        raise AccountBrowserConnectionError(f"百家号旧页面清理未完成（{stage}），请重试连接；原登录和上传检查点已保留") from error
     finally:
         if process.returncode is None:
             process.kill()
@@ -204,7 +214,8 @@ def session_directory(config, name, digest):
     return directory
 
 
-async def connect_account_browser(playwright, config, account_name, expected_digest=None, *, candidate_storage=None):
+async def connect_account_browser(playwright, config, account_name, expected_digest=None, *, candidate_storage=None,
+                                  preserve_target_ids=None):
     name = validate_account_name(account_name)
     if candidate_storage is None:
         storage, digest = account_storage(config, name)
@@ -299,7 +310,8 @@ async def connect_account_browser(playwright, config, account_name, expected_dig
             write_private(state_file, state)
             raise RuntimeError(f"后台浏览器启动失败：{startup_error}；原登录资料已保留，请重新上传")
         if HISTORY_ACCOUNTS.get(name, "baijiahao") == "baijiahao":
-            await cleanup_stale_baijiahao_pages(config, endpoint, account_name=name)
+            cleanup_options = {"preserve_target_ids": preserve_target_ids} if preserve_target_ids else {}
+            await cleanup_stale_baijiahao_pages(config, endpoint, account_name=name, **cleanup_options)
         browser = await connect_managed_cdp(playwright, endpoint, browser_path)
         if not browser.contexts:
             raise RuntimeError("历史账号后台会话未就绪，请重新检查" if name in HISTORY_ACCOUNTS
@@ -309,8 +321,8 @@ async def connect_account_browser(playwright, config, account_name, expected_dig
             # The persistent profile retains refreshed login cookies. Reopening
             # an idle browser must not overwrite them with the old import.
             # A migrated macOS profile can lose every cookie when encryption is unavailable.
-            # Restore only an empty restarted named session; preserve refreshed profile cookies.
-            if not state.get("initialized") or (fresh and name not in HISTORY_ACCOUNTS and not await context.cookies()):
+            # Restore only an empty restarted session; preserve refreshed profile cookies.
+            if not state.get("initialized") or (fresh and not await context.cookies()):
                 await context.add_cookies(storage["cookies"])
             # Storage state from SAU may include localStorage as well as cookies.
             # The init script belongs to this live context and persists across

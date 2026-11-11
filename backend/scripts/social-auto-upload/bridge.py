@@ -358,7 +358,14 @@ async def connect_upload_browser(playwright, config, payload, state=None):
     name = payload.get("accountName")
     if name is not None:
         validate_named_target(payload)
-        result = await connect_account_browser(playwright, config, name, (state or {}).get("accountCredentialDigest"))
+        checkpoint = state or {}
+        preserved = []
+        for binding in (checkpoint, checkpoint.get("result"), checkpoint.get("preservedEditor")):
+            target_id = binding.get("targetId") if isinstance(binding, dict) else None
+            if isinstance(target_id, str) and target_id and target_id not in preserved:
+                preserved.append(target_id)
+        connection_options = {"preserve_target_ids": preserved} if preserved else {}
+        result = await connect_account_browser(playwright, config, name, checkpoint.get("accountCredentialDigest"), **connection_options)
         if name in HISTORY_ACCOUNTS:
             try:
                 await history_sessions.check_background_login(result[0], HISTORY_ACCOUNTS[name], login_state)

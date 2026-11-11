@@ -479,15 +479,22 @@ class PublicationTest(unittest.IsolatedAsyncioTestCase):
         original = self.state['details']['metadata']
         events = []
         async def verify(_page, actual):
-            self.assertIs(actual, original); events.append('verified')
+            if not events:
+                self.assertIs(actual, original)
+                events.append('verified_original')
+            else:
+                self.assertEqual(events, ['verified_original', 'topic'])
+                self.assertIs(actual, metadata)
+                events.append('verified_topic')
         async def add(_page, _payload, actual):
+            self.assertEqual(events, ['verified_original'])
             self.assertIs(actual, original); events.append('topic'); return metadata
         helper = SimpleNamespace(_verify_metadata=verify)
         with patch.object(bridge, 'verify_saved_baijiahao_covers', new=AsyncMock()), \
                 patch.object(bridge, 'add_optional_topics', new=add, create=True):
             await bridge.publication_preflight_saved(self.page, self.payload, self.state,
                                                      (None, None, None, helper), prepare_file=self.file)
-        self.assertEqual(events, ['verified', 'topic'])
+        self.assertEqual(events, ['verified_original', 'topic', 'verified_topic'])
         self.assertEqual(json.loads(self.file.read_text())['details']['metadata'], metadata)
         self.assertEqual(self.posts, 0)
 

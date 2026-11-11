@@ -111,6 +111,62 @@ test('keeps an idle blank when no protected task page remains', async t => {
   assert.equal(result.createdTargetId, null);
 });
 
+test('does not scan old checkpoints when the browser has no pages to clean', async t => {
+  const inventory = [
+    target('LOGIN', '/v2/', 'passport.baidu.com'),
+    target('OTHER', '/platform', 'channels.weixin.qq.com'),
+    target('SETTINGS', '/builder/rc/settings'),
+    {targetId: 'WORKER', type: 'worker', url: 'https://baijiahao.baidu.com/service-worker.js'},
+  ];
+  const h = await fixture(t, inventory, ['{broken']);
+  const scan = t.mock.method(fs, 'lstat', async () => { throw new Error('Unexpected checkpoint scan'); });
+  for (const blank of [false, true]) {
+    if (blank) inventory.push({targetId: 'IDLE_BLANK', type: 'page', url: 'about:blank'});
+    const result = await h.run();
+    assert.deepEqual(result.closedTargetIds, []);
+    assert.equal(result.createdTargetId, null);
+    assert.equal(result.checkpointCount, 0);
+    assert.equal(result.malformedCheckpoints, 0);
+  }
+  assert.equal(scan.mock.callCount(), 0);
+  assert.deepEqual(h.calls.map(call => call.method), [
+    'Target.getTargets', 'disconnect', 'Target.getTargets', 'disconnect',
+  ]);
+});
+
+test('explicit preservation of every eligible target skips all checkpoint I/O', async t => {
+  const ids = ['EDITOR', 'HOME', 'LIST', 'CONTENT', 'BOUND_BLANK'];
+  const h = await fixture(t, [target('EDITOR'), target('HOME', '/builder/rc/home'),
+    target('LIST', '/builder/rc/clue'), target('CONTENT', '/builder/rc/content'),
+    {targetId: 'BOUND_BLANK', type: 'page', url: 'about:blank'},
+    target('LOGIN', '/v2/', 'passport.baidu.com')], [
+    {phase: 'staged', targetId: 'EDITOR'}, {phase: 'unrecognized', targetId: 'BOUND_BLANK'}, '{broken',
+  ]);
+  const scans = ['lstat', 'readdir', 'readFile'].map(method => t.mock.method(fs, method, async () => {
+    throw new Error('Unexpected checkpoint I/O for fully preserved targets');
+  }));
+  const result = await h.run({preserveTargetIds: ids, checkpointTimeoutMs: 1});
+  assert.equal(result.preservedCount, ids.length);
+  assert.equal(result.checkpointCount, 0);
+  assert.equal(result.malformedCheckpoints, 0);
+  assert.deepEqual(result.closedTargetIds, []);
+  assert.equal(result.createdTargetId, null);
+  for (const scan of scans) assert.equal(scan.mock.callCount(), 0);
+  assert.deepEqual(h.calls.map(call => call.method), ['Target.getTargets', 'disconnect']);
+});
+
+test('partial explicit preservation retains full scanning and malformed-state protection', async t => {
+  const h = await fixture(t, [target('STAGED'), target('UNKNOWN'), target('LIST', '/builder/rc/clue')], [
+    {phase: 'staged', targetId: 'STAGED'}, '{broken',
+  ]);
+  const result = await h.run({preserveTargetIds: ['STAGED']});
+  assert.equal(result.checkpointCount, 1);
+  assert.equal(result.malformedCheckpoints, 1);
+  assert.equal(result.preservedCount, 2);
+  assert.deepEqual(result.closedTargetIds, ['LIST']);
+  assert.equal(h.calls.some(call => call.method === 'Target.closeTarget' && call.params.targetId !== 'LIST'), false);
+});
+
 test('preserves all active and uncertain checkpoint targets, including nested editors', async t => {
   const h = await fixture(t, ['A', 'B', 'C', 'D', 'E'].map(id => target(id)), [
     {phase: 'staged', targetId: 'A', result: {targetId: 'B'}, preservedEditor: {targetId: 'C'}},
@@ -121,6 +177,49 @@ test('preserves all active and uncertain checkpoint targets, including nested ed
   assert.equal(result.preservedCount, 5);
   assert.deepEqual(result.closedTargetIds, []);
   assert.equal(h.calls.some(c => c.method === 'Target.createTarget'), false);
+});
+
+test('scans all checkpoints with bounded parallel disk reads before closing pages', async t => {
+  const states = Array.from({length: 33}, (_, i) => ({phase: 'staged', targetId: i === 32 ? 'ACTIVE' : `OTHER${i}`}));
+  const h = await fixture(t, [target('ACTIVE')], states);
+  const readFile = fs.readFile.bind(fs);
+  let active = 0;
+  let maximum = 0;
+  let completed = 0;
+  t.mock.method(fs, 'readFile', async (...args) => {
+    active++;
+    maximum = Math.max(maximum, active);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 2));
+      return await readFile(...args);
+    } finally {active--; completed++;}
+  });
+  const result = await h.run();
+  assert.equal(completed, states.length);
+  assert.ok(maximum > 1 && maximum <= 8, `Concurrent reads: ${maximum}`);
+  assert.equal(result.checkpointCount, states.length);
+  assert.equal(result.preservedCount, 1);
+  assert.deepEqual(result.closedTargetIds, []);
+});
+
+test('a checkpoint scan timeout closes no pages and stops scheduling disk reads', async t => {
+  const h = await fixture(t, [target('ACTIVE')], Array.from({length: 24}, () => ({phase: 'staged', targetId: 'ACTIVE'})));
+  const readFile = fs.readFile.bind(fs);
+  const releases = [];
+  const reads = t.mock.method(fs, 'readFile', async (...args) => {
+    await new Promise(resolve => releases.push(resolve));
+    return readFile(...args);
+  });
+  await assert.rejects(h.run({checkpointTimeoutMs: 30}), error => {
+    assert.equal(error.cleanupPhase, 'checkpoint_scan');
+    return /checkpoint scan timed out/.test(error.message);
+  });
+  const started = reads.mock.callCount();
+  assert.ok(started > 0 && started <= 8);
+  releases.forEach(release => release());
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(reads.mock.callCount(), started);
+  assert.deepEqual(h.calls.map(call => call.method), ['Target.getTargets', 'disconnect']);
 });
 
 test('closes a submitted original tab only with a consistent platform receipt', async t => {

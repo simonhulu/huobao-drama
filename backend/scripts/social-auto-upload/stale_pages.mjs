@@ -39,7 +39,7 @@ function collectTargetIds(value, targets) {
   }
 }
 
-async function checkpointProtection(stateRoot, preserved) {
+async function checkpointProtection(stateRoot, preserved, signal) {
   const jobs = path.join(path.resolve(stateRoot), 'jobs');
   let directories;
   try {
@@ -51,21 +51,29 @@ async function checkpointProtection(stateRoot, preserved) {
   }
   let checkpointCount = 0;
   let malformedCheckpoints = 0;
-  for (const directory of directories) {
-    if (!directory.isDirectory()) continue;
-    const file = path.join(jobs, directory.name, 'state.json');
-    try {
-      const stat = await fs.lstat(file);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8 * 1024 * 1024) throw new Error('Invalid checkpoint');
-      const state = JSON.parse(await fs.readFile(file, 'utf8'));
-      if (!state || typeof state !== 'object' || Array.isArray(state) || typeof state.phase !== 'string') throw new Error('Invalid checkpoint');
-      checkpointCount++;
-      collectTargetIds(state.preservedEditor, preserved);
-      if (!confirmedTerminal(state)) collectTargetIds(state, preserved);
-    } catch (error) {
-      if (error.code !== 'ENOENT') malformedCheckpoints++;
+  let nextDirectory = 0;
+  async function scan() {
+    while (!signal.aborted && nextDirectory < directories.length) {
+      const directory = directories[nextDirectory++];
+      if (!directory.isDirectory()) continue;
+      const file = path.join(jobs, directory.name, 'state.json');
+      try {
+        const stat = await fs.lstat(file);
+        if (signal.aborted) return;
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8 * 1024 * 1024) throw new Error('Invalid checkpoint');
+        const state = JSON.parse(await fs.readFile(file, {encoding: 'utf8', signal}));
+        if (signal.aborted) return;
+        if (!state || typeof state !== 'object' || Array.isArray(state) || typeof state.phase !== 'string') throw new Error('Invalid checkpoint');
+        checkpointCount++;
+        collectTargetIds(state.preservedEditor, preserved);
+        if (!confirmedTerminal(state)) collectTargetIds(state, preserved);
+      } catch (error) {
+        if (error.code !== 'ENOENT') malformedCheckpoints++;
+      }
     }
   }
+  // Keep external-disk latency from multiplying by every historical upload.
+  await Promise.all(Array.from({length: Math.min(8, directories.length)}, scan));
   return {checkpointCount, malformedCheckpoints};
 }
 
@@ -77,8 +85,7 @@ export async function cleanupStalePages(endpoint, options, connect = puppeteer.c
       || !options || typeof options.stateRoot !== 'string' || !options.stateRoot
       || (options.platform && options.platform !== 'baijiahao')) throw new Error('Invalid browser cleanup configuration');
   const preserved = new Set(options.preserveTargetIds || []);
-  const checkpoint = await checkpointProtection(options.stateRoot, preserved);
-  const deadline = Date.now() + Math.max(1, Math.min(Number(options.timeoutMs) || 10000, 10000));
+  let deadline = Date.now() + Math.max(1, Math.min(Number(options.timeoutMs) || 10000, 10000));
   const bounded = async action => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error('Browser page cleanup timed out');
@@ -90,22 +97,22 @@ export async function cleanupStalePages(endpoint, options, connect = puppeteer.c
     } finally { clearTimeout(timer); }
   };
   const outcome = {closedTargetIds: [], failedTargetIds: [], preservedCount: 0, createdTargetId: null,
-    timedOut: false, ...checkpoint};
+    timedOut: false, checkpointCount: 0, malformedCheckpoints: 0};
   let browser;
+  let phase = 'browser_connect';
   try {
     // Browser-level CDP does not initialize a retained, possibly stuck page.
     browser = await bounded(() => connect({browserURL: endpoint, defaultViewport: null, protocolTimeout: 2000,
       networkEnabled: false, issuesEnabled: false, targetFilter: target => target.type() === 'browser'}));
+    phase = 'target_inventory';
     const session = await bounded(() => browser.target().createCDPSession());
     const {targetInfos} = await bounded(() => session.send('Target.getTargets'));
     if (!Array.isArray(targetInfos)) throw new Error('Invalid browser target inventory');
-    const candidates = [];
-    const oldBlankTargets = [];
+    const cleanupTargets = [];
     for (const target of targetInfos) {
       if (target.type !== 'page' || typeof target.targetId !== 'string') continue;
       if (target.url === 'about:blank') {
-        if (preserved.has(target.targetId) || checkpoint.malformedCheckpoints) outcome.preservedCount++;
-        else oldBlankTargets.push(target.targetId);
+        cleanupTargets.push({targetId: target.targetId, pathname: 'about:blank'});
         continue;
       }
       let location;
@@ -113,11 +120,43 @@ export async function cleanupStalePages(endpoint, options, connect = puppeteer.c
       if (location.protocol !== 'https:' || location.hostname !== 'baijiahao.baidu.com'
           || location.username || location.password || location.port
           || (!readablePaths.has(location.pathname) && location.pathname !== '/builder/rc/edit')) continue;
-      if (preserved.has(target.targetId) || (checkpoint.malformedCheckpoints && location.pathname === '/builder/rc/edit')) {
+      cleanupTargets.push({targetId: target.targetId, pathname: location.pathname});
+    }
+    // All live candidates are already protected, so no checkpoint can enable cleanup.
+    if (cleanupTargets.every(target => preserved.has(target.targetId))) {
+      outcome.preservedCount = cleanupTargets.length;
+      return outcome;
+    }
+    // An empty browser or its single idle blank never needs checkpoint I/O.
+    if (cleanupTargets.length <= 1 && cleanupTargets.every(target => target.pathname === 'about:blank')) {
+      outcome.preservedCount = cleanupTargets.filter(target => preserved.has(target.targetId)).length;
+      return outcome;
+    }
+    const checkpointStarted = Date.now();
+    phase = 'checkpoint_scan';
+    let checkpointTimer;
+    let checkpoint;
+    const checkpointAbort = new AbortController();
+    try {
+      checkpoint = await Promise.race([checkpointProtection(options.stateRoot, preserved, checkpointAbort.signal), new Promise((_, reject) => {
+        checkpointTimer = setTimeout(() => reject(new Error('Upload checkpoint scan timed out')),
+          Math.max(1, Math.min(Number(options.checkpointTimeoutMs) || 15000, 15000)));
+      })]);
+    } finally {clearTimeout(checkpointTimer); checkpointAbort.abort();}
+    deadline += Date.now() - checkpointStarted;
+    Object.assign(outcome, checkpoint);
+    const candidates = [];
+    const oldBlankTargets = [];
+    for (const target of cleanupTargets) {
+      if (target.pathname === 'about:blank') {
+        if (preserved.has(target.targetId) || checkpoint.malformedCheckpoints) outcome.preservedCount++;
+        else oldBlankTargets.push(target.targetId);
+      } else if (preserved.has(target.targetId) || (checkpoint.malformedCheckpoints && target.pathname === '/builder/rc/edit')) {
         outcome.preservedCount++;
       } else candidates.push(target.targetId);
     }
     if (!candidates.length && (!oldBlankTargets.length || !outcome.preservedCount)) return outcome;
+    phase = 'target_cleanup';
     if (candidates.length) {
       const replacement = await bounded(() => session.send('Target.createTarget', {url: 'about:blank', background: true}));
       if (typeof replacement.targetId !== 'string' || !replacement.targetId) throw new Error('Replacement browser page was not created');
@@ -134,6 +173,9 @@ export async function cleanupStalePages(endpoint, options, connect = puppeteer.c
       }
     }
     return outcome;
+  } catch (error) {
+    error.cleanupPhase = phase;
+    throw error;
   } finally {
     if (browser) await browser.disconnect();
   }
@@ -148,8 +190,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
     const {endpoint, ...options} = JSON.parse(input);
     process.stdout.write(JSON.stringify(await cleanupStalePages(endpoint, options)));
-  } catch {
-    process.stderr.write('Stale browser page cleanup failed\n');
+  } catch (error) {
+    process.stderr.write(JSON.stringify({phase: error.cleanupPhase || 'startup', message: 'Stale browser page cleanup failed'}) + '\n');
     process.exitCode = 1;
   }
 }

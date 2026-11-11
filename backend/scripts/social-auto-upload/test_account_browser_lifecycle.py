@@ -125,7 +125,8 @@ class PersistentLoginTest(unittest.IsolatedAsyncioTestCase):
             account_browser.write_private(file, {'cookies': [{'name': 'login', 'value': 'old-import'}], 'origins': []})
             executable = root / 'chrome'
             executable.touch()
-            context = SimpleNamespace(pages=[], add_cookies=AsyncMock(), add_init_script=AsyncMock())
+            context = SimpleNamespace(pages=[], cookies=AsyncMock(return_value=[{'name': 'login', 'value': 'refreshed-profile'}]),
+                                      add_cookies=AsyncMock(), add_init_script=AsyncMock())
             browser = SimpleNamespace(contexts=[context])
             playwright = SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=AsyncMock(return_value=browser)))
             launches = []
@@ -149,6 +150,7 @@ class PersistentLoginTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first[2], second[2])
             self.assertEqual(len(launches), 2)
             context.add_cookies.assert_awaited_once()
+            context.cookies.assert_awaited_once()
             self.assertEqual(sum(c.kwargs.get("script") != account_browser.SILENT_MEDIA_SCRIPT for c in context.add_init_script.await_args_list), 2)
 
 

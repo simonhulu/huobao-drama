@@ -34,6 +34,49 @@ class ManagedConnectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connect.await_count, 2)
 
 
+class StalePageCleanupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_preserved_task_targets_reach_node_cleanup_input(self):
+        process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(
+            b'{"closedTargetIds":[],"preservedCount":2}', b'')), kill=Mock(), wait=AsyncMock())
+        with patch.object(account_browser.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)):
+            await account_browser.cleanup_stale_baijiahao_pages({'stateRoot': '/state'}, 'http://127.0.0.1:12345',
+                account_name='first', preserve_target_ids=['STAGED', 'ORIGINAL'])
+        self.assertEqual(json.loads(process.communicate.await_args.args[0]), {
+            'endpoint': 'http://127.0.0.1:12345', 'stateRoot': '/state', 'platform': 'baijiahao',
+            'accountName': 'first', 'preserveTargetIds': ['STAGED', 'ORIGINAL'],
+        })
+        process.kill.assert_not_called()
+
+    async def test_checkpoint_failure_reports_fixed_stage_without_diagnostic_details(self):
+        process = SimpleNamespace(returncode=1, communicate=AsyncMock(return_value=(b'',
+            b'{"phase":"checkpoint_scan","message":"private checkpoint path"}')), kill=Mock(), wait=AsyncMock())
+        with patch.object(account_browser.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)):
+            with self.assertRaises(account_browser.AccountBrowserConnectionError) as failure:
+                await account_browser.cleanup_stale_baijiahao_pages({'stateRoot': '/state'}, 'http://127.0.0.1:12345')
+        self.assertIn('上传检查点读取', str(failure.exception))
+        self.assertIn('原登录和上传检查点已保留', str(failure.exception))
+        self.assertNotIn('private', str(failure.exception))
+        process.kill.assert_not_called()
+
+    async def test_timeout_kills_only_its_own_cleanup_process(self):
+        process = SimpleNamespace(returncode=None, communicate=AsyncMock(side_effect=TimeoutError()),
+                                  kill=Mock(), wait=AsyncMock())
+        with patch.object(account_browser.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)):
+            with self.assertRaisesRegex(account_browser.AccountBrowserConnectionError, '子进程响应超时'):
+                await account_browser.cleanup_stale_baijiahao_pages({'stateRoot': '/state'}, 'http://127.0.0.1:12345')
+        process.kill.assert_called_once_with()
+        process.wait.assert_awaited_once_with()
+
+    async def test_unstructured_stderr_does_not_leak_into_connection_error(self):
+        process = SimpleNamespace(returncode=1, communicate=AsyncMock(return_value=(b'', b'private cookie path')),
+                                  kill=Mock(), wait=AsyncMock())
+        with patch.object(account_browser.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)):
+            with self.assertRaises(account_browser.AccountBrowserConnectionError) as failure:
+                await account_browser.cleanup_stale_baijiahao_pages({'stateRoot': '/state'}, 'http://127.0.0.1:12345')
+        self.assertIn('清理结果校验', str(failure.exception))
+        self.assertNotIn('private', str(failure.exception))
+
+
 class BackgroundStartupTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cleanup = self.enterContext(patch.object(account_browser, "cleanup_stale_baijiahao_pages", AsyncMock()))
@@ -58,7 +101,8 @@ class BackgroundStartupTest(unittest.IsolatedAsyncioTestCase):
         (self.profile / "DevToolsActivePort").write_text("19998\n/devtools/browser/AAA-123\n")
         executable = root / "chrome"
         executable.touch()
-        self.context = SimpleNamespace(pages=[], add_cookies=AsyncMock(), add_init_script=AsyncMock())
+        self.context = SimpleNamespace(pages=[], cookies=AsyncMock(return_value=[{"name": "login", "value": "refreshed"}]),
+                                       add_cookies=AsyncMock(), add_init_script=AsyncMock())
         self.browser = SimpleNamespace(contexts=[self.context])
         self.connect = AsyncMock(return_value=self.browser)
         self.playwright = SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=self.connect))
@@ -124,6 +168,23 @@ class BackgroundStartupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["startupFailure"]["message"], "Chrome 退出（9）")
         self.assertGreater(state["startupFailure"]["at"], 0)
 
+    async def test_restarted_history_session_restores_snapshot_when_profile_cookies_are_empty(self):
+        self.exit_codes = [None]
+        self.ready_pid = 101
+        self.context.cookies.return_value = []
+        storage, _ = account_browser.account_storage(self.config, self.account)
+        await account_browser.connect_account_browser(self.playwright, self.config, self.account)
+        self.context.add_cookies.assert_awaited_once_with(storage["cookies"])
+        self.assertEqual(self.login_file.read_bytes(), b"refreshed profile login")
+
+    async def test_live_history_session_is_not_replaced_when_its_cookie_store_is_empty(self):
+        self.context.cookies.return_value = []
+        with patch.object(account_browser, "alive", return_value=True):
+            await account_browser.connect_account_browser(self.playwright, self.config, self.account)
+        self.process.assert_not_called()
+        self.context.cookies.assert_not_awaited()
+        self.context.add_cookies.assert_not_awaited()
+
     async def test_live_process_with_unready_port_times_out_without_second_launch(self):
         self.exit_codes = [None]
         with self.assertRaisesRegex(RuntimeError, "后台浏览器启动失败：Chrome 调试端口未就绪.*原登录资料已保留"):
@@ -139,7 +200,7 @@ class BackgroundStartupTest(unittest.IsolatedAsyncioTestCase):
 
 class NamedAccountBrowserTest(unittest.TestCase):
     def setUp(self):
-        self.enterContext(patch.object(account_browser, "cleanup_stale_baijiahao_pages", AsyncMock()))
+        self.cleanup = self.enterContext(patch.object(account_browser, "cleanup_stale_baijiahao_pages", AsyncMock()))
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -249,6 +310,46 @@ class NamedAccountBrowserTest(unittest.TestCase):
             self.assertEqual(asyncio.run(bridge.connect_upload_browser("playwright", self.config, payload, {"accountCredentialDigest": "old"})),
                              ("browser", "endpoint", "digest"))
             named.assert_awaited_once_with("playwright", self.config, "first", "old")
+
+    def test_loaded_staged_targets_reach_original_named_session_cleanup(self):
+        _, digest = account_browser.account_storage(self.config, 'first')
+        directory = account_browser.session_directory(self.config, 'first', digest)
+        profile = directory / 'profile'
+        profile.mkdir()
+        (profile / 'DevToolsActivePort').write_text('19999\n/devtools/browser/ABC-123\n')
+        account_browser.write_private(directory / 'session.json', {
+            'pid': 100, 'accountName': 'first', 'credentialDigest': digest, 'initialized': True,
+        })
+        context = SimpleNamespace(pages=[], add_cookies=AsyncMock(), add_init_script=AsyncMock())
+        browser = SimpleNamespace(contexts=[context])
+        connect = AsyncMock(return_value=browser)
+        playwright = SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=connect))
+        payload = {'target': 'baijiahao-video', 'accountName': 'first'}
+        state = {'phase': 'staged', 'targetId': 'STAGED', 'accountCredentialDigest': digest,
+                 'result': {'targetId': 'STAGED', 'saved': False, 'published': False},
+                 'preservedEditor': {'targetId': 'ORIGINAL'}}
+        before = json.dumps(state, sort_keys=True)
+        with patch.object(account_browser, 'alive', return_value=True), \
+                patch.object(account_browser, 'endpoint_matches', return_value=True), \
+                patch.object(account_browser.subprocess, 'Popen') as launch, \
+                patch.object(bridge, 'connect_platform_browser', side_effect=AssertionError('No shared browser')):
+            result = asyncio.run(bridge.connect_upload_browser(playwright, self.config, payload, state))
+        self.assertEqual(result, (browser, 'http://127.0.0.1:19999', digest))
+        self.cleanup.assert_awaited_once_with(self.config, 'http://127.0.0.1:19999', account_name='first',
+                                            preserve_target_ids=['STAGED', 'ORIGINAL'])
+        connect.assert_awaited_once_with('ws://127.0.0.1:19999/devtools/browser/ABC-123', timeout=40000, is_local=True)
+        launch.assert_not_called()
+        context.add_cookies.assert_not_awaited()
+        context.add_init_script.assert_not_awaited()
+        self.assertEqual(json.dumps(state, sort_keys=True), before)
+
+    def test_missing_or_unbound_state_keeps_original_named_connection_signature(self):
+        payload = {'target': 'baijiahao-video', 'accountName': 'first'}
+        for state in (None, {}, {'targetId': None, 'result': [], 'preservedEditor': {'targetId': ''}}):
+            with self.subTest(state=state), patch.object(bridge, 'connect_account_browser',
+                    AsyncMock(return_value=('browser', 'endpoint', 'digest'))) as named:
+                asyncio.run(bridge.connect_upload_browser('pw', self.config, payload, state))
+                named.assert_awaited_once_with('pw', self.config, 'first', None)
 
     def test_account_change_cannot_reuse_another_accounts_job_or_receipt(self):
         asset = self.root / "video.mp4"
