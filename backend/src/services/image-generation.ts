@@ -1,5 +1,7 @@
 import { db, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 import { getActiveConfig, getConfigById, type AIConfig as ImportedAIConfig } from './ai.js'
 
 interface ResolvedImageConfig {
@@ -36,6 +38,8 @@ import {
 import type { AIConfig } from './adapters/types'
 import type { TaskContext } from './tasks/types.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess, logTaskWarn, redactUrl } from '../utils/task-logger.js'
+import { createDurableImageRelayCheckpoint, durableImageRelayCheckpointPath, isDurableImageRelayConfig,
+  readDurableImageRelayCheckpoint, recoverDurableImageRelay, downloadDurableImageRelayResult } from './durable-image-relay.js'
 
 interface GenerateImageParams {
   storyboardId?: number
@@ -52,6 +56,7 @@ interface GenerateImageParams {
   configId?: number
   seed?: number
   style?: string
+  durableRelay?: true
 }
 
 export class ImageGenerationLimiter {
@@ -152,6 +157,8 @@ export function createImageGenerationRecord(params: GenerateImageParams): number
   const resolved = resolveImageConfig(params.configId)
   if (!resolved) throw new Error('No active image AI config')
   const { config } = resolved
+  if (params.durableRelay && (params.configId == null || resolved.fallback || !isDurableImageRelayConfig(config)
+    || params.referenceImages?.length)) throw new Error('Durable image relay requires a new text-only record with an explicit relay config')
 
   const res = db.insert(schema.imageGenerations).values({
     storyboardId: params.storyboardId,
@@ -174,6 +181,10 @@ export function createImageGenerationRecord(params: GenerateImageParams): number
   }).run()
 
   const lastId = Number(res.lastInsertRowid)
+  if (params.durableRelay) {
+    const record = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, lastId)).get()!
+    createDurableImageRelayCheckpoint(relayCheckpointPath(lastId), record, params.configId!, config)
+  }
   logTaskStart('ImageTask', 'enqueue', {
     id: lastId,
     provider: config.provider,
@@ -200,7 +211,7 @@ export async function generateImage(params: GenerateImageParams): Promise<number
   if (!resolved) throw new Error('No active image AI config')
 
   const lastId = createImageGenerationRecord(params)
-  processImageGeneration(lastId, resolved.config)
+  processImageGeneration(lastId, resolved.config, params.durableRelay ? params.configId : undefined)
   return lastId
 }
 
@@ -209,6 +220,7 @@ export interface ExecuteImageGenerationOptions {
   taskContext?: TaskContext<any>
   allowSynchronousImage?: boolean
   singleSubmission?: boolean
+  durableRelay?: true
 }
 
 export interface ExecuteImageGenerationResult {
@@ -229,6 +241,21 @@ export function getImageGenerationState(id: number) {
   return record || null
 }
 
+function relayCheckpointPath(id: number) {
+  return durableImageRelayCheckpointPath(path.resolve(db.$client.name), id)
+}
+
+/** Only birth-bound relay records may recover an interrupted admission. */
+export function canRecoverDurableImageRelayAdmission(id: number, configId: number): boolean {
+  try {
+    const record = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).get()
+    const config = getConfigById(configId)
+    if (!record || !config) return false
+    const saved = readDurableImageRelayCheckpoint(relayCheckpointPath(id), record, configId, config)
+    return !record.taskId || record.taskId === saved.taskId
+  } catch { return false }
+}
+
 export async function executeImageGeneration(
   generationId: number,
   options: ExecuteImageGenerationOptions = {},
@@ -236,10 +263,14 @@ export async function executeImageGeneration(
   const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, generationId)).all()
   const record = rows[0]
   if (!record) throw new Error(`Image generation ${generationId} not found`)
+  if (!options.durableRelay && existsSync(relayCheckpointPath(generationId))) {
+    throw new Error('Durable image relay record requires its explicit recovery opt-in')
+  }
 
   const resolved = resolveImageConfig(options.configId)
   if (!resolved) throw new Error('No active image AI config')
   const { config, fallback } = resolved
+  if (options.durableRelay && (options.configId == null || fallback)) throw new Error('Durable image relay cannot fall back to another config')
 
   if (fallback && record.provider !== config.provider) {
     logTaskWarn('ImageTask', 'updating-record-provider-model-on-fallback', {
@@ -257,7 +288,8 @@ export async function executeImageGeneration(
   options.taskContext?.progress('Starting image generation', 0, 2)
   await runWithProviderLifecycleLimit(config.provider, () =>
     runImageGeneration(generationId, config, options.taskContext,
-      options.allowSynchronousImage === true, options.singleSubmission === true))
+      options.allowSynchronousImage === true, options.singleSubmission === true,
+      options.durableRelay ? options.configId : undefined))
   options.taskContext?.progress('Image generation finished', 2, 2)
 
   const [updated] = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, generationId)).all()
@@ -277,12 +309,30 @@ async function runImageGeneration(
   taskContext?: TaskContext<any>,
   allowSynchronousImage = false,
   singleSubmission = false,
+  durableRelayConfigId?: number,
 ): Promise<void> {
   try {
     const rows = db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, id)).all()
     const record = rows[0]
     if (!record) return
     if (record.status === 'completed' && record.localPath) return
+
+    if (durableRelayConfigId !== undefined) {
+      const filename = relayCheckpointPath(id)
+      const saved = readDurableImageRelayCheckpoint(filename, record, durableRelayConfigId, config)
+      if (record.taskId && record.taskId !== saved.taskId) throw new Error('Durable image relay task identity changed; original task preserved')
+      db.update(schema.imageGenerations).set({ taskId: saved.taskId, status: 'processing', updatedAt: now() })
+        .where(eq(schema.imageGenerations.id, id)).run()
+      const relayTransport = { signal: taskContext?.signal, responseTimeoutMs: IMAGE_POLL_RESPONSE_TIMEOUT_MS,
+        fetch: ((url, init) => imageGenerationLimiter.run(() => globalThis.fetch(url, init))) as typeof globalThis.fetch }
+      const imageUrl = await recoverDurableImageRelay({ filename, record, configId: durableRelayConfigId, config,
+        deadlineAt: resolveImagePollDeadlineMs(record.createdAt, IMAGE_POLL_TIMEOUT_MS),
+        ...relayTransport })
+      const image = await downloadDurableImageRelayResult(imageUrl, relayTransport)
+      await handleImageCompleteBase64(id, config.provider, image.data, image.mimeType)
+      return
+    }
+    if (existsSync(relayCheckpointPath(id))) throw new Error('Durable image relay record requires its explicit recovery opt-in')
 
     if (record.taskId && record.status === 'processing' && config.provider.toLowerCase() === 'egaki-chatgpt') {
       const existingJob = getEgakiChatGptImageJob(record.taskId)
@@ -489,29 +539,31 @@ async function runImageGeneration(
   } catch (err: any) {
     const error = err instanceof Error ? err : new Error(String(err))
     const classification = classifyImageError(error)
+    const relayError = durableRelayConfigId !== undefined && ['image_relay_pending', 'image_relay_terminal'].includes(err.code)
+    const errorCode = relayError ? err.code : classification.code
     logTaskError('ImageTask', 'process', {
       id,
       provider: config.provider,
       error: err.message,
-      errorCode: classification.code,
-      retryable: classification.retryable,
+      errorCode,
+      retryable: relayError ? err.retryable : classification.retryable,
     })
     logTaskPayload('ImageTask', 'error detail', {
       id,
       provider: config.provider,
-      errorCode: classification.code,
+      errorCode,
       errorMessage: err.message,
     })
     db.update(schema.imageGenerations)
-      .set({ status: 'failed', errorMsg: err.message, lastErrorCode: classification.code, lastErrorDetail: err.message, updatedAt: now() })
+      .set({ status: 'failed', errorMsg: err.message, lastErrorCode: errorCode, lastErrorDetail: err.message, updatedAt: now() })
       .where(eq(schema.imageGenerations.id, id))
       .run()
     throw err
   }
 }
 
-function processImageGeneration(id: number, config: AIConfig): void {
-  runWithProviderLifecycleLimit(config.provider, () => runImageGeneration(id, config)).catch(err => {
+function processImageGeneration(id: number, config: AIConfig, durableRelayConfigId?: number): void {
+  runWithProviderLifecycleLimit(config.provider, () => runImageGeneration(id, config, undefined, false, false, durableRelayConfigId)).catch(err => {
     logTaskError('ImageTask', 'process', { id, error: err.message })
     console.error(`Image generation ${id} failed:`, err)
   })

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { eq } from 'drizzle-orm'
 import Database from 'better-sqlite3'
 import { AiProviderError, classifyImageError, computeRetryDelay } from '../utils/error-taxonomy.js'
@@ -11,7 +12,8 @@ const dbDir = mkdtempSync(join(tmpdir(), 'huobao-image-limiter-'))
 process.env.DB_PATH = join(dbDir, 'test.db')
 process.env.STORAGE_PATH = join(dbDir, 'static')
 
-const { ImageGenerationLimiter, executeImageGeneration, readProviderJsonWithinDeadline, resolveImagePollDeadlineMs } = await import('./image-generation.js')
+const { ImageGenerationLimiter, createImageGenerationRecord, executeImageGeneration, canRecoverDurableImageRelayAdmission,
+  readProviderJsonWithinDeadline, resolveImagePollDeadlineMs } = await import('./image-generation.js')
 const { db, schema } = await import('../db/index.js')
 
 const png1x1 = Buffer.from(
@@ -478,4 +480,124 @@ test('singleSubmission prevents HTTP retries after an ambiguous timeout while or
     if (originalProxyProviders == null) delete process.env.IMAGE_PROXY_ENABLED_PROVIDERS
     else process.env.IMAGE_PROXY_ENABLED_PROVIDERS = originalProxyProviders
   }
+})
+
+function relayFixture(t: import('node:test').TestContext) {
+  const ts = new Date().toISOString()
+  const configId = Number(db.insert(schema.aiServiceConfigs).values({
+    serviceType: 'image', provider: 'gpt-image2', name: 'Explicit durable relay fixture',
+    baseUrl: 'http://127.0.0.1:18080', apiKey: 'fake-relay-key', model: JSON.stringify(['gpt-image-2']),
+    createdAt: ts, updatedAt: ts,
+  }).run().lastInsertRowid)
+  for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'IMAGE_HTTP_PROXY', 'IMAGE_HTTPS_PROXY']) {
+    const original = process.env[key]
+    process.env[key] = 'http://127.0.0.1:9'
+    t.after(() => { if (original == null) delete process.env[key]; else process.env[key] = original })
+  }
+  const generationId = createImageGenerationRecord({ configId, durableRelay: true,
+    prompt: 'Portrait cover background', imageType: 'science_cover_base', size: '1152x1536', frameType: '3:4' })
+  const record = () => db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, generationId)).get()!
+  const completed = () => Response.json({ id: record().taskId, status: 'completed', data: {
+    url: `http://127.0.0.1:18080/assets/${record().taskId}/${createHash('sha256').update(png1x1).digest('hex')}.png`,
+  } })
+  return { configId, generationId, record, completed }
+}
+
+test('explicit birth-bound relay recovers a lost 202 and persists its original task before any dispatch', async t => {
+  const f = relayFixture(t), calls: string[] = []
+  let reserved = false
+  assert.equal(canRecoverDurableImageRelayAdmission(f.generationId, f.configId), true)
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/assets/')) return new Response(png1x1, { headers: { 'content-type': 'image/png' } })
+    calls.push(init!.method!)
+    assert.match(f.record().taskId!, /^[a-f0-9]{64}$/)
+    if (init!.method === 'GET') return reserved ? f.completed() : new Response('', { status: 404 })
+    reserved = true
+    throw new TypeError('fetch failed after relay persisted its reservation')
+  })
+  const result = await executeImageGeneration(f.generationId, { configId: f.configId, durableRelay: true, singleSubmission: true })
+  assert.deepEqual(calls, ['GET', 'POST', 'GET'])
+  assert.equal(f.record().status, 'completed')
+  assert.deepEqual(readFileSync(join(process.env.STORAGE_PATH!, '..', result.local_path)), png1x1)
+})
+
+test('birth-bound relay survives admission and poll interruption and the next executor only fetches the same task', async t => {
+  const f = relayFixture(t), calls: string[] = []
+  let submitted = false, disconnected = true
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/assets/')) return new Response(png1x1)
+    calls.push(init!.method!)
+    if (init!.method === 'POST') { submitted = true; throw new TypeError('lost 202') }
+    if (!submitted) return new Response('', { status: 404 })
+    if (disconnected) throw new TypeError('poll disconnected')
+    return f.completed()
+  })
+  const options = { configId: f.configId, durableRelay: true as const, singleSubmission: true }
+  await assert.rejects(executeImageGeneration(f.generationId, options), { code: 'image_relay_pending', retryable: true })
+  const taskId = f.record().taskId
+  assert.equal(f.record().status, 'failed')
+  disconnected = false
+  await executeImageGeneration(f.generationId, options)
+  assert.equal(f.record().taskId, taskId)
+  assert.equal(f.record().status, 'completed')
+  assert.deepEqual(calls, ['GET', 'POST', 'GET', 'GET'])
+})
+
+test('an old direct submission cannot acquire relay provenance by passing the execute opt-in', async t => {
+  const f = relayFixture(t), ts = new Date().toISOString()
+  const directId = Number(db.insert(schema.imageGenerations).values({
+    provider: 'gpt-image2', model: 'gpt-image-2', prompt: 'Original direct submission', size: '1152x1536',
+    status: 'failed', errorMsg: 'fetch failed', lastErrorCode: 'provider_timeout', createdAt: ts, updatedAt: ts,
+  }).run().lastInsertRowid)
+  let requests = 0
+  t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('must not reach network') })
+  assert.equal(canRecoverDurableImageRelayAdmission(directId, f.configId), false)
+  await assert.rejects(executeImageGeneration(directId, { configId: f.configId, durableRelay: true }), /ENOENT/)
+  assert.equal(requests, 0)
+  assert.equal(db.select().from(schema.imageGenerations).where(eq(schema.imageGenerations.id, directId)).get()!.taskId, null)
+})
+
+test('relay execution rejects changed authentication and missing explicit opt-in before any network request', async t => {
+  const f = relayFixture(t)
+  let requests = 0
+  t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('must not reach network') })
+  await assert.rejects(executeImageGeneration(f.generationId, { configId: f.configId }), /explicit recovery opt-in/)
+  db.update(schema.aiServiceConfigs).set({ apiKey: 'changed-relay-key' }).where(eq(schema.aiServiceConfigs.id, f.configId)).run()
+  assert.equal(canRecoverDurableImageRelayAdmission(f.generationId, f.configId), false)
+  await assert.rejects(executeImageGeneration(f.generationId, { configId: f.configId, durableRelay: true }), /does not match/)
+  assert.equal(requests, 0)
+})
+
+test('inactive relay config never lets fallback mutate its original provider, model or task identity', async t => {
+  const f = relayFixture(t), ts = new Date().toISOString()
+  db.update(schema.imageGenerations).set({ taskId: 'a'.repeat(64), status: 'failed' })
+    .where(eq(schema.imageGenerations.id, f.generationId)).run()
+  db.update(schema.aiServiceConfigs).set({ isActive: false }).where(eq(schema.aiServiceConfigs.id, f.configId)).run()
+  db.insert(schema.aiServiceConfigs).values({
+    serviceType: 'image', provider: 'other-provider', name: 'Unrelated active fallback', priority: 9999,
+    baseUrl: 'https://fallback.invalid', apiKey: 'unrelated-key', model: JSON.stringify(['other-model']),
+    createdAt: ts, updatedAt: ts,
+  }).run()
+  const before = f.record()
+  let requests = 0
+  t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('must not reach network') })
+  await assert.rejects(executeImageGeneration(f.generationId, { configId: f.configId }), /explicit recovery opt-in/)
+  assert.deepEqual(f.record(), before)
+  await assert.rejects(executeImageGeneration(f.generationId, { configId: f.configId, durableRelay: true }), /cannot fall back/)
+  assert.deepEqual(f.record(), before)
+  assert.equal(requests, 0)
+})
+
+test('executor can reclaim a completed relay cache after the original twenty-minute generation deadline', async t => {
+  const f = relayFixture(t), calls: string[] = []
+  const beyondDeadline = Date.parse(f.record().createdAt) + 21 * 60_000
+  t.mock.method(Date, 'now', () => beyondDeadline)
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push(`${init!.method} ${String(input).includes('/assets/') ? 'asset' : 'task'}`)
+    if (String(input).includes('/assets/')) return new Response(png1x1)
+    return f.completed()
+  })
+  await executeImageGeneration(f.generationId, { configId: f.configId, durableRelay: true })
+  assert.equal(f.record().status, 'completed')
+  assert.deepEqual(calls, ['GET task', 'GET asset'])
 })

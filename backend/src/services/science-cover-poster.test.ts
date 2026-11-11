@@ -62,6 +62,27 @@ async function fixture(t: any) {
   return { input, options, images, states, requests, executes, composed, calls: () => calls }
 }
 
+async function uncertainPortrait(t: any) {
+  const f = await fixture(t), execute = f.images.execute
+  f.images.execute = async (id, configId, signal) => {
+    if (id === 2) {
+      f.states.set(id, { status: 'failed', taskId: null, localPath: null, errorMsg: 'fetch failed', lastErrorCode: 'provider_timeout' })
+      throw new Error('fetch failed')
+    }
+    return execute(id, configId, signal)
+  }
+  await assert.rejects(generateScienceCoverPosters(f.input, f.options), /封面底图 2.*提交结果未确认/)
+  f.images.config = async id => id === 8 ? { id: 8, identity: 'relay-config', durableRelay: true } : { id: 7, identity: 'same-config' }
+  f.images.execute = (id, configId, signal) => {
+    assert.equal(configId, 8)
+    return execute(id, 7, signal)
+  }
+  const checkpointFile = path.join(f.input.directory, 'poster-checkpoint.json')
+  const checkpoint = () => fs.readFile(checkpointFile, 'utf8').then(JSON.parse)
+  const recovery = { format: 'portrait' as const, expectedGenerationId: 2, configId: 8, recoveryId: 'missing-portrait-v1' }
+  return { ...f, checkpointFile, checkpoint, recovery }
+}
+
 test('strict-tool design generates independently composed posters, preserves instruction and reuses both completed formats', async t => {
   const f = await fixture(t)
   const result = await generateScienceCoverPosters(f.input, f.options)
@@ -169,6 +190,165 @@ test('an uncertain portrait submission names its base and preserves the plan and
   assert.deepEqual(f.composed, ['landscape'])
   assert.equal(f.requests.length, 2)
   assert.equal(f.calls(), 1)
+})
+
+test('an explicit missing-only replacement archives the uncertain attempt and preserves the original landscape and plan', async t => {
+  const f = await uncertainPortrait(t), before = await f.checkpoint(), oldState = structuredClone(f.states.get(2))
+  const landscapeFile = path.join(f.input.directory, 'cover-landscape.jpg'), landscape = await fs.readFile(landscapeFile)
+  const options = { ...f.options, replacement: f.recovery }
+  const result = await generateScienceCoverPosters(f.input, options)
+  const after = await f.checkpoint()
+  assert.equal(f.requests.length, 3)
+  assert.equal(f.requests[2]!.configId, 8)
+  assert.equal(f.requests[2]!.prompt, f.requests[1]!.prompt)
+  assert.equal(f.requests[2]!.frameType, '3:4')
+  assert.deepEqual(f.states.get(2), oldState, 'the original uncertain provider record is retained')
+  assert.deepEqual(after.images.landscape, before.images.landscape)
+  assert.deepEqual(after.outputs.landscape, before.outputs.landscape)
+  assert.deepEqual(await fs.readFile(landscapeFile), landscape)
+  assert.deepEqual(after.plan, before.plan)
+  assert.equal(after.revision, before.revision)
+  assert.equal(after.inputHash, before.inputHash)
+  assert.equal(after.images.portrait.generationId, 3)
+  assert.equal(after.replacements.length, 1)
+  assert.equal(after.replacements[0].recoveryId, f.recovery.recoveryId)
+  assert.deepEqual(after.replacements[0].previous, before.images.portrait)
+  assert.equal(after.replacements[0].replacement.generationId, 3)
+  assert.equal(after.replacements[0].replacement.config.id, 8)
+  assert.equal(after.replacements[0].replacement.dispatched, false, 'replacement intent precedes dispatch')
+  assert.ok(Number.isFinite(Date.parse(after.replacements[0].replacedAt)))
+  assert.deepEqual(await generateScienceCoverPosters(f.input, options), result)
+  assert.equal(f.requests.length, 3, 'replaying the same recovery cannot create another attempt')
+  assert.equal(f.calls(), 1)
+  assert.deepEqual(f.composed, ['landscape', 'portrait'])
+})
+
+test('a persisted replacement resumes the same image after a lost admission acknowledgement only with its durable binding', async t => {
+  const f = await uncertainPortrait(t), execute = f.images.execute
+  let restored = false
+  f.images.execute = async (id, configId, signal) => {
+    assert.equal(id, 3)
+    const saved = await f.checkpoint()
+    assert.equal(saved.images.portrait.generationId, 3)
+    assert.equal(saved.replacements[0].previous.generationId, 2)
+    if (!restored) {
+      f.states.set(id, { status: 'failed', taskId: null, localPath: null, errorMsg: 'fetch failed', lastErrorCode: 'provider_timeout' })
+      throw new Error('fetch failed')
+    }
+    return execute(id, configId, signal)
+  }
+  const options = { ...f.options, replacement: f.recovery }
+  await assert.rejects(generateScienceCoverPosters(f.input, options), /封面底图 3.*提交结果未确认/)
+  const pending = await fs.readFile(f.checkpointFile, 'utf8')
+  await assert.rejects(generateScienceCoverPosters(f.input, options), /封面底图 3.*已提交但未取得任务编号/)
+  assert.equal(await fs.readFile(f.checkpointFile, 'utf8'), pending)
+  assert.equal(f.requests.length, 3)
+  f.images.canRecoverAdmission = async (id, configId) => {
+    assert.equal(id, 3); assert.equal(configId, 8)
+    return true
+  }
+  restored = true
+  await generateScienceCoverPosters(f.input, options)
+  assert.equal(f.requests.length, 3)
+  assert.equal((await f.checkpoint()).replacements.length, 1)
+  assert.deepEqual(f.composed, ['landscape', 'portrait'])
+})
+
+test('concurrent attempts to recover one poster cannot create two replacements', async t => {
+  const f = await uncertainPortrait(t), create = f.images.create
+  let release!: () => void, entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const creating = new Promise<void>(resolve => { entered = resolve })
+  f.images.create = async input => { entered(); await gate; return create(input) }
+  const options = { ...f.options, replacement: f.recovery }
+  const first = generateScienceCoverPosters(f.input, options)
+  await creating
+  try { await assert.rejects(generateScienceCoverPosters(f.input, options), /正在生成/) }
+  finally { release() }
+  await first
+  assert.equal(f.requests.length, 3)
+  assert.equal((await f.checkpoint()).replacements.length, 1)
+})
+
+test('replaying a replacement after a rejected model fallback keeps the same paid lineage', async t => {
+  const f = await uncertainPortrait(t), execute = f.images.execute
+  f.images.config = async id => id === 8
+    ? { id: 8, identity: 'relay-config', durableRelay: true, models: ['unsupported', 'supported'] }
+    : { id: 7, identity: 'same-config' }
+  f.images.execute = async (id, configId, signal) => {
+    if (id === 3) {
+      f.states.set(id, { ...f.states.get(id)!, status: 'failed', lastErrorCode: 'unsupported_model', errorMsg: 'Unsupported model' })
+      throw new Error('Unsupported model')
+    }
+    return execute(id, configId, signal)
+  }
+  const options = { ...f.options, replacement: f.recovery }
+  await generateScienceCoverPosters(f.input, options)
+  const saved = await f.checkpoint()
+  assert.equal(saved.replacements[0].replacement.generationId, 3)
+  assert.equal(saved.images.portrait.generationId, 4)
+  assert.deepEqual(saved.images.portrait.rejectedModels, [{ generationId: 3, model: 'unsupported' }])
+  await generateScienceCoverPosters(f.input, options)
+  assert.equal(f.requests.length, 4)
+})
+
+test('a recovery id cannot be rebound or replaced by a second recovery for the same format', async t => {
+  const f = await uncertainPortrait(t)
+  await generateScienceCoverPosters(f.input, { ...f.options, replacement: f.recovery })
+  const before = await fs.readFile(f.checkpointFile, 'utf8')
+  for (const replacement of [
+    { ...f.recovery, expectedGenerationId: 3 },
+    { ...f.recovery, configId: 9 },
+    { ...f.recovery, format: 'landscape' as const },
+    { ...f.recovery, recoveryId: 'second-paid-replacement' },
+  ]) await assert.rejects(generateScienceCoverPosters(f.input, { ...f.options, replacement }), /已绑定其他请求|已有替代请求/)
+  assert.equal(await fs.readFile(f.checkpointFile, 'utf8'), before)
+  assert.equal(f.requests.length, 3)
+})
+
+test('missing-only recovery rejects known tasks, completed bases and non-relay configurations before creating another record', async t => {
+  for (const changed of ['wrong-id', 'known-task', 'completed', 'saved-base', 'ordinary-config', 'unsubmitted', 'completed-output'] as const) {
+    const f = await uncertainPortrait(t)
+    if (changed === 'known-task') f.states.set(2, { ...f.states.get(2)!, taskId: 'original-provider-task' })
+    if (changed === 'completed') f.states.set(2, { ...f.states.get(2)!, status: 'completed' })
+    if (changed === 'saved-base') f.states.set(2, { ...f.states.get(2)!, localPath: 'original-base.png' })
+    if (changed === 'ordinary-config') f.images.config = async () => ({ id: 8, identity: 'ordinary-config' })
+    if (changed === 'unsubmitted' || changed === 'completed-output') {
+      const saved = await f.checkpoint()
+      if (changed === 'unsubmitted') saved.images.portrait.dispatched = false
+      else saved.outputs.portrait = { sha256: 'original-completed-output' }
+      await fs.writeFile(f.checkpointFile, JSON.stringify(saved))
+    }
+    const before = await fs.readFile(f.checkpointFile, 'utf8')
+    await assert.rejects(generateScienceCoverPosters(f.input, { ...f.options,
+      replacement: { ...f.recovery, ...(changed === 'wrong-id' ? { expectedGenerationId: 999 } : {}) } }),
+    /编号已变化|已有结果或任务编号|持久恢复|已有底图或成品/)
+    assert.equal(await fs.readFile(f.checkpointFile, 'utf8'), before)
+    assert.equal(f.requests.length, 2)
+  }
+})
+
+test('missing-only recovery refuses changed content or an invalid other-format output and never redesigns the original', async t => {
+  const f = await uncertainPortrait(t)
+  const options = { ...f.options, replacement: f.recovery }
+  const before = await fs.readFile(f.checkpointFile, 'utf8')
+  await assert.rejects(generateScienceCoverPosters({ ...f.input, script: f.input.script + '新结论。' }, options), /已绑定其他文稿/)
+  await assert.rejects(generateScienceCoverPosters({ ...f.input, revision: 2 }, options), /已绑定其他文稿/)
+  await fs.writeFile(path.join(f.input.directory, 'cover-landscape.jpg'), 'damaged landscape')
+  await assert.rejects(generateScienceCoverPosters(f.input, options), /另一画幅的原成品完整且匹配/)
+  assert.equal(await fs.readFile(f.checkpointFile, 'utf8'), before)
+  assert.equal(f.requests.length, 2)
+  assert.equal(f.calls(), 1)
+})
+
+test('a recovery requires an existing plan and validates its operator binding before any design or image request', async t => {
+  const f = await fixture(t)
+  const replacement = { format: 'portrait' as const, expectedGenerationId: 2, configId: 8, recoveryId: 'missing-portrait-v1' }
+  await assert.rejects(generateScienceCoverPosters(f.input, { ...f.options, replacement }), /原版本的完整封面检查点/)
+  for (const invalid of [{ recoveryId: '' }, { recoveryId: undefined }, { expectedGenerationId: 0 }, { configId: NaN }, { format: 'square' }])
+    await assert.rejects(generateScienceCoverPosters(f.input, { ...f.options, replacement: { ...replacement, ...invalid } as any }), /恢复参数无效/)
+  assert.equal(f.calls(), 0)
+  assert.equal(f.requests.length, 0)
 })
 
 test('a rejected model advances only through the configured list and retains the selected provider job across restart', async t => {

@@ -37,12 +37,13 @@ const formats = [
 ] as const
 type FormatKey = typeof formats[number]['key']
 interface ImageState { status: string | null; taskId: string | null; localPath: string | null; errorMsg: string | null; lastErrorCode: string | null; model?: string | null }
-interface ConfigBinding { id: number; identity: string; models?: string[] }
+interface ConfigBinding { id: number; identity: string; models?: string[]; durableRelay?: boolean }
 export interface SciencePosterImageRuntime {
   config(id?: number): Promise<ConfigBinding>
   create(input: { prompt: string; size: string; frameType: string; imageType: string; configId: number; model?: string }): Promise<number>
   state(id: number): Promise<ImageState | null>
   execute(id: number, configId: number, signal: AbortSignal): Promise<string>
+  canRecoverAdmission?(id: number, configId: number): Promise<boolean>
 }
 interface ImageCheckpoint {
   generationId: number; config: ConfigBinding; dispatched: boolean
@@ -54,6 +55,9 @@ interface PosterCheckpoint {
   plan?: ScienceCoverPlan
   images: Partial<Record<FormatKey, ImageCheckpoint>>
   outputs: Partial<Record<FormatKey, { sha256: string; compositionHash?: string; presenterSha256?: string }>>
+  replacements?: Array<{
+    recoveryId: string; format: FormatKey; previous: ImageCheckpoint; replacement: ImageCheckpoint; replacedAt: string
+  }>
 }
 export interface SciencePosterInput {
   title: string; script: string; sourceTitle?: string; instruction?: string; directory: string; revision: number; presenterPath?: string
@@ -61,6 +65,7 @@ export interface SciencePosterInput {
 export interface SciencePosterOptions {
   signal: AbortSignal
   report?: (message: string) => void
+  replacement?: { format: FormatKey; expectedGenerationId: number; configId: number; recoveryId: string }
   profile?: { style: string; toolName: string; systemPrompt: string; imageBrief: string; imageType: string; kicker?: string }
   dependencies?: {
     call?: typeof callTextModel
@@ -72,7 +77,13 @@ export interface SciencePosterOptions {
 
 async function writeJson(file: string, value: unknown) {
   const temporary = `${file}.${randomUUID()}.tmp`
-  try { await fs.writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 }); await fs.rename(temporary, file) }
+  try {
+    const handle = await fs.open(temporary, 'wx', 0o600)
+    try { await handle.writeFile(JSON.stringify(value, null, 2)); await handle.sync() } finally { await handle.close() }
+    await fs.rename(temporary, file)
+    const directory = await fs.open(path.dirname(file), 'r')
+    try { await directory.sync() } finally { await directory.close() }
+  }
   finally { await fs.rm(temporary, { force: true }) }
 }
 async function readCheckpoint(file: string): Promise<PosterCheckpoint | null> {
@@ -141,17 +152,31 @@ userInstruction是用户本次封面偏好，尽量执行其画面、色彩和�
 }
 
 async function defaultImageRuntime(): Promise<SciencePosterImageRuntime> {
-  const [{ db }, images, { parseAIConfigModels }] = await Promise.all([import('../db/index.js'), import('./image-generation.js'), import('./ai.js')])
+  const [{ db }, images, { parseAIConfigModels }, { isDurableImageRelayConfig }] = await Promise.all([
+    import('../db/index.js'), import('./image-generation.js'), import('./ai.js'), import('./durable-image-relay.js'),
+  ])
+  const isRelay = (configId: number) => {
+    const row = db.$client.prepare("SELECT provider,base_url FROM ai_service_configs WHERE service_type='image' AND is_active=1 AND id=?")
+      .get(configId) as { provider: string; base_url: string } | undefined
+    return Boolean(row && isDurableImageRelayConfig({ provider: row.provider, baseUrl: row.base_url }))
+  }
   return {
     async config(id) {
+      if (id === undefined && process.env.SCIENCE_COVER_IMAGE_CONFIG_ID?.trim()) {
+        const configured = process.env.SCIENCE_COVER_IMAGE_CONFIG_ID.trim()
+        if (!/^[1-9]\d*$/.test(configured) || !Number.isSafeInteger(Number(configured))) throw new Error('SCIENCE_COVER_IMAGE_CONFIG_ID 必须为有效的图片配置编号')
+        id = Number(configured)
+      }
       const query = id === undefined
         ? "SELECT id,provider,base_url,model,settings FROM ai_service_configs WHERE service_type='image' AND is_active=1 ORDER BY priority DESC,id LIMIT 1"
         : "SELECT id,provider,base_url,model,settings FROM ai_service_configs WHERE service_type='image' AND is_active=1 AND id=?"
       const row = (id === undefined ? db.$client.prepare(query).get() : db.$client.prepare(query).get(id)) as { id: number; provider: string; base_url: string; model: string; settings: string } | undefined
       if (!row) throw new Error('原图片生成服务不可用，请先配置或恢复图片服务后继续封面步骤')
-      return { id: row.id, identity: hash(JSON.stringify([row.id, row.provider, row.base_url, row.model, row.settings])), models: parseAIConfigModels(row.model) }
+      return { id: row.id, identity: hash(JSON.stringify([row.id, row.provider, row.base_url, row.model, row.settings])), models: parseAIConfigModels(row.model),
+        ...(isDurableImageRelayConfig({ provider: row.provider, baseUrl: row.base_url }) ? { durableRelay: true } : {}) }
     },
-    async create(input) { return images.createImageGenerationRecord(input) },
+    async create(input) { return images.createImageGenerationRecord({ ...input, ...(isRelay(input.configId) ? { durableRelay: true } : {}) }) },
+    async canRecoverAdmission(id, configId) { return images.canRecoverDurableImageRelayAdmission(id, configId) },
     async state(id) {
       const state = images.getImageGenerationState(id)
       const row = db.$client.prepare('SELECT model FROM image_generations WHERE id=?').get(id) as { model: string | null } | undefined
@@ -168,6 +193,7 @@ async function defaultImageRuntime(): Promise<SciencePosterImageRuntime> {
       // shared executor does not accidentally submit that task a second time.
       db.$client.prepare("UPDATE image_generations SET status='processing' WHERE id=? AND task_id IS NOT NULL AND task_id<>'' AND status='failed'").run(id)
       const result = await images.executeImageGeneration(id, { configId, singleSubmission: true, allowSynchronousImage: true,
+        ...(isRelay(configId) ? { durableRelay: true } : {}),
         taskContext: { taskId: id, payload: {}, attempts: 1, signal, progress: () => {}, event: () => {}, isCancelRequested: () => signal.aborted } })
       return result.local_path
     },
@@ -198,6 +224,12 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
   if (!input.title.trim() || !input.script.trim()) throw new Error('独立封面需要当前标题和完整文稿')
   if (!Number.isSafeInteger(input.revision) || input.revision < 1) throw new Error('封面版本无效')
   if ((input.instruction || '').length > 1000) throw new Error('封面指令不能超过 1000 字')
+  const replacement = options.replacement
+  if (replacement && (!formats.some(format => format.key === replacement.format)
+    || !Number.isSafeInteger(replacement.expectedGenerationId) || replacement.expectedGenerationId < 1
+    || !Number.isSafeInteger(replacement.configId) || replacement.configId < 1
+    || typeof replacement.recoveryId !== 'string'
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(replacement.recoveryId))) throw new Error('缺失底图恢复参数无效')
   const directory = path.resolve(input.directory)
   const style = options.profile?.style || SCIENCE_COVER_STYLE
   if (activeDirectories.has(directory)) throw new Error('该版本封面正在生成，请勿重复提交')
@@ -209,7 +241,9 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
     await fs.mkdir(directory, { recursive: true })
     const checkpointPath = path.join(directory, 'poster-checkpoint.json')
     const inputHash = hash(JSON.stringify([style, input.revision, input.title, input.script, input.sourceTitle || '', input.instruction || '']))
-    const checkpoint: PosterCheckpoint = await readCheckpoint(checkpointPath) || { version: 1, style, inputHash,
+    const existing = await readCheckpoint(checkpointPath)
+    if (replacement && (!existing || !existing.plan)) throw new Error('缺失底图恢复需要原版本的完整封面检查点')
+    const checkpoint: PosterCheckpoint = existing || { version: 1, style, inputHash,
       revision: input.revision, images: {}, outputs: {} }
     if (checkpoint.version !== 1 || checkpoint.style !== style || checkpoint.inputHash !== inputHash || checkpoint.revision !== input.revision
       || !checkpoint.images || !checkpoint.outputs) throw new Error('封面目录已绑定其他文稿或指令，请为新设计使用新版本')
@@ -221,6 +255,39 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
     }
     const plan = validatePlan(checkpoint.plan, input.script)
     let runtime: SciencePosterImageRuntime | undefined
+    let replacementConfig: ConfigBinding | undefined
+    if (replacement) {
+      const image = checkpoint.images[replacement.format]
+      const history = checkpoint.replacements || []
+      const prior = history.find(item => item.recoveryId === replacement.recoveryId)
+      if (prior) {
+        if (prior.format !== replacement.format || prior.previous.generationId !== replacement.expectedGenerationId
+          || prior.replacement.config.id !== replacement.configId || !image
+          || image.config.id !== prior.replacement.config.id || image.config.identity !== prior.replacement.config.identity
+          || image.generationId !== prior.replacement.generationId
+            && !image.rejectedModels?.some(item => item.generationId === prior.replacement.generationId))
+          throw new Error('缺失底图恢复编号已绑定其他请求，已保留原恢复记录')
+      } else {
+        if (history.some(item => item.format === replacement.format)) throw new Error('该底图已有替代请求，请继续原恢复编号')
+        if (!image || image.generationId !== replacement.expectedGenerationId) throw new Error('待恢复的原底图编号已变化，请核对检查点')
+        if (checkpoint.outputs[replacement.format] || image.localPath || image.sha256 || !image.dispatched
+          || await verifyImage(path.join(directory, `cover-${replacement.format}.jpg`)))
+          throw new Error('仅能替换已提交但结果未知的缺失底图，不能替换已有底图或成品')
+        runtime = options.dependencies?.images || await defaultImageRuntime()
+        const state = await runtime.state(image.generationId)
+        if (!state || state.status === 'completed' || state.taskId || state.localPath)
+          throw new Error('原底图已有结果或任务编号，请恢复原任务，不能创建替代请求')
+        replacementConfig = await runtime.config(replacement.configId)
+        if (replacementConfig.id !== replacement.configId || replacementConfig.durableRelay !== true)
+          throw new Error('替代底图必须明确绑定可持久恢复的图片 Relay 配置')
+      }
+      for (const other of formats.filter(format => format.key !== replacement.format)) {
+        const output = checkpoint.outputs[other.key]
+        if (!output || output.compositionHash !== compositionHash
+          || !await verifyImage(path.join(directory, `cover-${other.key}.jpg`), output.sha256, other))
+          throw new Error('仅补缺失底图需要另一画幅的原成品完整且匹配，已保留原版本')
+      }
+    }
     for (const format of formats) {
       options.signal.throwIfAborted()
       const outputPath = path.join(directory, `cover-${format.key}.jpg`)
@@ -234,15 +301,21 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
         ? `${plan.landscapeTextSide === 'text-left' ? '左侧' : '右侧'}50%是干净暗背景供后期排字，主体在另一侧，占画面约一半。`
         : '竖版3:4；上方45%是干净暗背景供后期排字，主体在下方55%，保持完整重要特征。'}${presenterSource
         ? `后期会加入真实主播半身照片，${format.key === 'landscape' ? plan.landscapeTextSide === 'text-left' ? '右下角约28%宽、58%高' : '左下角约28%宽、58%高' : '右下角约40%宽、46%高'}请保留背景空间，主题主体的重要辨识部位避开该区域，不要生成任何主持人。` : ''}`
-      const createImage = async (config: ConfigBinding, model = config.models?.[0], rejectedModels?: ImageCheckpoint['rejectedModels']) => {
+      const createImage = async (config: ConfigBinding, model = config.models?.[0], rejectedModels?: ImageCheckpoint['rejectedModels'], previous?: ImageCheckpoint) => {
         options.signal.throwIfAborted()
         const created: ImageCheckpoint = { generationId: await runtime!.create({ prompt, size: format.size, frameType: format.frameType,
           imageType: options.profile?.imageType || 'science_cover_base', configId: config.id, ...(model ? { model } : {}) }), config, dispatched: false,
           ...(model ? { model } : {}), ...(rejectedModels ? { rejectedModels } : {}) }
         checkpoint.images[format.key] = created
+        if (previous) checkpoint.replacements = [...(checkpoint.replacements || []), {
+          recoveryId: replacement!.recoveryId, format: format.key, previous: structuredClone(previous),
+          replacement: structuredClone(created), replacedAt: new Date().toISOString(),
+        }]
         await save()
         return created
       }
+      if (replacementConfig && replacement?.format === format.key)
+        image = await createImage(replacementConfig, undefined, undefined, image)
       image ??= await createImage(await runtime.config())
       let basePath = image.localPath
       if (!basePath || !await verifyImage(basePath, image.sha256)) {
@@ -267,7 +340,8 @@ export async function generateScienceCoverPosters(input: SciencePosterInput, opt
             retriedRejectedModel = retryRejectedModel = true
             options.report?.('正在重新尝试原封面模型，检查图片服务是否已恢复')
           }
-          if (image.dispatched && !state.taskId && !retryRejectedModel && !(state.status === 'failed' && definiteRejections.has(state.lastErrorCode || '')))
+          if (image.dispatched && !state.taskId && !retryRejectedModel && !(state.status === 'failed' && definiteRejections.has(state.lastErrorCode || ''))
+            && !await runtime.canRecoverAdmission?.(image.generationId, image.config.id))
             throw new Error(`封面底图 ${image.generationId} 已提交但未取得任务编号，原检查点${checkpoint.outputs.landscape ? '和已完成横图' : ''}已保留；请核对该请求，或仅重做缺失底图`)
           options.report?.(`正在${image.dispatched ? '继续查询' : '生成'}${format.key === 'landscape' ? '横版' : '竖版'}独立海报底图`)
           options.signal.throwIfAborted()
