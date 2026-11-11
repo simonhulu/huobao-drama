@@ -149,3 +149,25 @@ test('registered pins are rechecked before each unlink and preserve all remainin
   assert.equal(manifest.status,'retained')
   assert.equal(manifest.files.find((file: any) => file.path === part).status,'retained')
 })
+
+test('isolated scans recheck newly registered pins before releasing the next file', async t => {
+  const f = await fixture(t), databasePath = path.join(f.input.directory, 'references.db')
+  const db = new Database(databasePath)
+  t.after(() => db.close())
+  const part = f.filename + '.part'
+  await fs.writeFile(part, 'partial bytes')
+  db.exec('CREATE TABLE storage_artifacts(id INTEGER,path TEXT,pinned INTEGER);CREATE TABLE storage_artifact_refs(artifact_id INTEGER,owner_type TEXT,owner_id TEXT)')
+  let unlinks = 0
+  const result = await releaseSourceMediaFiles({ ...f.input, matchesFile: name => name.startsWith('source.mp4'),
+    referenceOptions: { projectRoot: f.input.directory, databasePath, isolated: true } }, async filename => {
+    unlinks++
+    assert.equal(filename, f.filename)
+    db.prepare('INSERT INTO storage_artifacts VALUES(1,?,1)').run(part)
+    await fs.unlink(filename)
+  })
+  assert.equal(unlinks, 1)
+  assert.equal(result.error, 'SOURCE_MEDIA_PINNED')
+  assert.equal(await fs.readFile(part, 'utf8'), 'partial bytes')
+  const manifest = JSON.parse(await fs.readFile(f.manifest, 'utf8'))
+  assert.equal(manifest.files.find((file: any) => file.path === part).status, 'retained')
+})

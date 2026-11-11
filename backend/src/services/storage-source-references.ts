@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { fork, type ChildProcess } from 'node:child_process'
 
 export interface SourceReferenceInput {
   directory: string
@@ -13,6 +14,8 @@ export interface SourceReferenceOptions {
   database?: Database.Database
   projectRoot?: string
   databasePath?: string
+  isolated?: boolean
+  timeoutMs?: number
 }
 export interface SourceMediaReference {
   path: string
@@ -25,6 +28,50 @@ interface ReferenceScanCache {
   entries: Map<string,{raw:string|Buffer;matches:string[]}>
 }
 const defaultProjectRoot = fileURLToPath(new URL('../../../',import.meta.url)).replace(/\/$/,'')
+const referenceWorkers = new Set<ChildProcess>()
+
+function isolatedReferences(input: SourceReferenceInput, projectRoot: string, databasePath: string, budget?: number): Promise<SourceMediaReference[]> {
+  if (referenceWorkers.size) return Promise.reject(Error('A source reference scan is still finishing; retain source media'))
+  const timeoutMs = Number.isFinite(budget) && budget! > 0 ? Math.min(30_000, Math.max(100, budget!)) : 5000
+  return new Promise((resolve, reject) => {
+    const child = fork(new URL('./storage-source-reference-worker.mjs', import.meta.url), [],
+      { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+    referenceWorkers.add(child)
+    let settled = false, result: any
+    const kill = () => { child.kill('SIGKILL') }
+    const finish = (error?: Error, references?: SourceMediaReference[]) => {
+      if (settled) return
+      settled = true; clearTimeout(timer)
+      if (error) reject(error)
+      else resolve(references!)
+    }
+    const fail = (error: Error) => {
+      kill()
+      // Native disk reads can delay process exit even after SIGKILL. Keep the
+      // slot occupied, but let narration proceed with all source bytes retained.
+      child.unref(); child.channel?.unref()
+      finish(error)
+    }
+    const timer = setTimeout(() => fail(Object.assign(Error(`Source reference scan exceeded its ${timeoutMs} ms read budget`),
+      { code: 'SOURCE_REFERENCE_TIMEOUT' })), timeoutMs)
+    process.once('exit', kill)
+    child.on('message', message => { if (!settled) result = message })
+    child.once('error', fail)
+    child.once('close', (code, signal) => {
+      referenceWorkers.delete(child); process.removeListener('exit', kill)
+      if (settled) return
+      const files = new Set(input.files.map(filename => path.resolve(filename)))
+      const references = result?.references
+      if (code !== 0 || signal || result?.ok !== true || !Array.isArray(references)
+        || references.some(ref => !ref || !files.has(ref.path) || typeof ref.ownerType !== 'string'
+          || typeof ref.ownerId !== 'string' || !['pinned', 'shared-reference'].includes(ref.reason))) {
+        finish(Error(result?.error || 'Source reference worker did not complete a valid scan'))
+      } else finish(undefined, references)
+    })
+    try { child.send({ input, projectRoot, databasePath }, error => { if (error) fail(error) }) }
+    catch (error) { fail(error as Error) }
+  })
+}
 function json(value: unknown) {
   if (value === null || value === undefined || value === '') return null
   if (typeof value !== 'string') throw Error('Stored reference JSON is invalid')
@@ -218,6 +265,7 @@ export async function checkSourceMediaReferences(input: SourceReferenceInput, op
     throw error
   }
   if (!info.isFile() || info.isSymbolicLink() || await fs.realpath(filename) !== filename) throw Error('Reference database must be an existing ordinary file')
+  if (options.isolated) return isolatedReferences(input, root, filename, options.timeoutMs)
   const database = new Database(filename,{readonly:true,fileMustExist:true})
   try { return inspectSourceMediaReferences(database,input,root) } finally { database.close() }
 }

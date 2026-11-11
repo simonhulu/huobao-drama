@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import sharp from 'sharp'
+import Database from 'better-sqlite3'
 import { downloadScienceSource, transcribeScienceSource, prepareScienceUploadAssets, inspectScienceUploadAssets, releaseScienceSourceMedia } from './science-workflow-media.js'
 import { EmptyAsrTranscriptionError, transcribeHistoryAudio } from './history-script-processing.js'
 import type { SourceMedia } from './history-source-pipeline.js'
@@ -46,6 +47,52 @@ test('source reclamation requires a durable matching transcript and retains outp
   assert.equal(manifest.sourceSha256, input.media.videoSha256)
   assert.equal(manifest.transcriptSha256, input.checkpoint.transcriptSha256)
   assert.equal(manifest.status, 'completed')
+})
+
+test('source reclamation cannot block narration behind a SQLite read and retries fresh shared references safely', async t => {
+  const root = await fs.realpath(await directory(t))
+  const ownerId = 'science-bounded-source'
+  const local = path.join(root, 'data/science-pop/jobs', ownerId)
+  await fs.mkdir(local, { recursive: true })
+  const videoPath = path.join(local, 'source.mp4')
+  await fs.writeFile(videoPath, 'source bytes')
+  const db = new Database(path.join(root, 'data/huobao_drama.db'))
+  t.after(() => db.close())
+  db.exec('CREATE TABLE remotion_renders(project_id INTEGER,props_json TEXT);BEGIN EXCLUSIVE')
+  const sourceUrl = 'https://www.youtube.com/watch?v=abcdefghijk'
+  const input = { directory: local, ownerId, sourceUrl, transcript: 'complete narration',
+    media: { videoPath, videoSha256: hash('source bytes') },
+    checkpoint: { version: 1 as const, sourceUrl, sourceVideoSha256: hash('source bytes'), transcriptSha256: hash('complete narration') } }
+  const times: number[] = [], start = performance.now()
+  const timer = setInterval(() => times.push(performance.now()), 10)
+  let cleaned
+  try { cleaned = await releaseScienceSourceMedia(input, { referenceTimeoutMs: 200 }) }
+  finally { clearInterval(timer); db.exec('ROLLBACK') }
+  const elapsed = performance.now() - start
+  assert.ok(elapsed < 1500, `optional source cleanup blocked narration for ${elapsed.toFixed(0)} ms`)
+  assert.ok(times.length >= 3, 'the event loop must remain responsive during the SQLite read')
+  const gaps = times.map((at, index) => at - (times[index - 1] ?? start))
+  assert.ok(Math.max(...gaps) < 200, `event loop stalled for ${Math.max(...gaps).toFixed(0)} ms`)
+  t.diagnostic(JSON.stringify({ cleanupMs: elapsed, maxEventLoopGapMs: Math.max(...gaps), ticks: times.length }))
+  assert.match(cleaned.cleanup?.error || '', /SOURCE_MEDIA_GUARD_FAILED/)
+  const retained = JSON.parse(await fs.readFile(path.join(local, 'storage-release.json'), 'utf8'))
+  assert.equal(retained.status, 'retained')
+  assert.match(retained.retention.message, /budget|timeout/i)
+  assert.equal(await fs.readFile(videoPath, 'utf8'), 'source bytes')
+  assert.equal(input.transcript, 'complete narration')
+
+  db.prepare('INSERT INTO remotion_renders VALUES(9,?)').run(JSON.stringify({ nested: { src: videoPath } }))
+  const shared = await releaseScienceSourceMedia(input)
+  assert.match(shared.cleanup?.error || '', /SOURCE_MEDIA_SHARED/)
+  assert.equal(await fs.readFile(videoPath, 'utf8'), 'source bytes')
+  const audit = JSON.parse(await fs.readFile(path.join(local, 'storage-release.json'), 'utf8'))
+  assert.deepEqual(audit.retention.references, [{ path: videoPath, ownerType: 'remotion', ownerId: '9', reason: 'shared-reference' }])
+
+  db.exec('DELETE FROM remotion_renders')
+  const released = await releaseScienceSourceMedia(input)
+  assert.equal(released.cleanup?.releasedBytes, 12)
+  assert.ok(released.cleanup?.localReleasedAt)
+  await assert.rejects(fs.access(videoPath))
 })
 
 test('source metadata is persisted before download so retry skips collection and completes the original source', async t => {

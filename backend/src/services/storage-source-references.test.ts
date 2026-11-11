@@ -165,3 +165,32 @@ test('production lookup opens only an existing ordinary database belonging to th
   assert.deepEqual(await checkSourceMediaReferences(isolated),[])
   await assert.rejects(checkSourceMediaReferences(isolated,{databasePath}),/project root/)
 })
+
+test('isolated read-only scans preserve complete reference semantics and reject unknown JSON and schemas', async t => {
+  const projectRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'source-refs-isolated-')))
+  t.after(() => fs.rm(projectRoot, { recursive: true, force: true }))
+  await fs.mkdir(path.join(projectRoot, 'data'))
+  const databasePath = path.join(projectRoot, 'data/huobao_drama.db')
+  const db = new Database(databasePath)
+  t.after(() => db.close())
+  const video = path.join(projectRoot, 'data/science-pop/jobs/science-test/source.mp4')
+  const local: SourceReferenceInput = { directory: path.dirname(video), files: [video], ownerType: 'science-job', ownerId: 'science-test' }
+  db.exec(`CREATE TABLE storage_artifacts(id INTEGER,path TEXT,pinned INTEGER);
+    CREATE TABLE storage_artifact_refs(artifact_id INTEGER,owner_type TEXT,owner_id TEXT);
+    CREATE TABLE remotion_renders(project_id INTEGER,props_json TEXT);
+    CREATE TABLE episodes(id INTEGER,source_video_url TEXT);`)
+  db.prepare('INSERT INTO storage_artifacts VALUES(1,?,0)').run(video)
+  db.exec("INSERT INTO storage_artifact_refs VALUES(1,'science','science-test')")
+  const read = () => checkSourceMediaReferences(local, { isolated: true })
+  assert.deepEqual(await read(), [])
+  db.prepare('INSERT INTO remotion_renders VALUES(7,?)').run(JSON.stringify({ frames: [{ src: video }] }))
+  db.prepare('INSERT INTO episodes VALUES(8,?)').run(video)
+  db.exec('UPDATE storage_artifacts SET pinned=1')
+  const before = await fs.readFile(databasePath)
+  assert.deepEqual(await read(), inspectSourceMediaReferences(db, local, projectRoot))
+  assert.deepEqual(await fs.readFile(databasePath), before)
+  db.exec("UPDATE storage_artifacts SET pinned=0;DELETE FROM episodes;UPDATE remotion_renders SET props_json='{' ")
+  await assert.rejects(read(), /JSON|Unexpected|Expected/)
+  db.exec('DROP TABLE remotion_renders;ALTER TABLE storage_artifacts DROP COLUMN pinned')
+  await assert.rejects(read(), /schema is incomplete/)
+})

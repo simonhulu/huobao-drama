@@ -88,7 +88,7 @@ export function hasScienceTranscriptCheckpoint(input: {
 /** The caller saves the text and checkpoint atomically before reclaiming media. */
 export async function releaseScienceSourceMedia(input: {
   directory: string; ownerId: string; sourceUrl: string; media: SourceMedia; transcript: string; checkpoint: ScienceTranscriptCheckpoint
-}): Promise<SourceMedia> {
+}, options: { referenceTimeoutMs?: number } = {}): Promise<SourceMedia> {
   if (!hasScienceTranscriptCheckpoint({ ...input, transcriptCheckpoint: input.checkpoint })) throw new Error('来源媒体尚无完整转录检查点，不能清理')
   const cleanup = { ...input.media.cleanup }
   let freed = 0
@@ -97,6 +97,7 @@ export async function releaseScienceSourceMedia(input: {
     const result = await releaseSourceMediaFiles({ directory, ownerType: 'science-job', ownerId: input.ownerId,
       sourceSha256: input.media.videoSha256!, transcriptSha256: input.checkpoint.transcriptSha256,
       fileHashes: { 'source.mp4': input.media.videoSha256! },
+      referenceOptions: { isolated: true, timeoutMs: options.referenceTimeoutMs },
       matchesFile: name => /^source\.mp4(?:\.part)?$/.test(name) || /^asr-[a-f0-9]{16}-\d+\.wav(?:\.part)?$/.test(name)
         || /^source\.youtube\.[A-Za-z0-9_-]{11}(?:\.f\d+)?\.(?:mp4|m4a|webm|opus)(?:\.part(?:-Frag\d+)?)?$/.test(name),
     })
