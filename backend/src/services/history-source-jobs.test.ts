@@ -6,12 +6,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { eq } from 'drizzle-orm'
+import Database from 'better-sqlite3'
 import type { StoreHistorySourceInput } from './history-script-library.js'
 
 process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'history-source-jobs-')), 'test.db')
 const { db, schema } = await import('../db/index.js')
 const { storeHistorySource, storeHistoryArticleSource, updateHistorySource, getHistorySource, getHistorySourceArtifactState, deleteHistorySource } = await import('./history-script-library.js')
-const { historySourceJobConfigSchema, checkHistorySourceReadiness, checkHistoryTextReadiness, createHistorySourceJobHandler: createHistorySourceJobHandlerBase, HISTORY_SOURCING_TASK_TYPE, getHistorySourceJob, startHistorySourceJob, stopHistorySourceJob, resumeHistorySourceJob, recoverHistorySourceJobs, safeHistoryJobMessage } = await import('./history-source-jobs.js')
+const { historySourceJobConfigSchema, checkHistorySourceReadiness, checkHistoryTextReadiness, createHistorySourceJobHandler: createHistorySourceJobHandlerBase, HISTORY_SOURCING_TASK_TYPE, getHistorySourceJob, listHistorySourceJobs, listHistorySourceJobEvents, startHistorySourceJob, stopHistorySourceJob, resumeHistorySourceJob, recoverHistorySourceJobs, safeHistoryJobMessage } = await import('./history-source-jobs.js')
 const { collectCzgtsArticles } = await import('./history-source-czgts.js')
 const { storeHistoryYoutubeSource } = await import('./history-source-youtube.js')
 const { ensureHistoryVideoDeliveriesSchema, recordHistoryVideoDelivery } = await import('./history-video-deliveries.js')
@@ -63,7 +64,9 @@ function youtubeCandidate(videoId = 'VprFAzjTTuM') {
 
 test('YouTube configuration requires an explicit channel or video and does not alter old task defaults', () => {
   assert.equal(historySourceJobConfigSchema.parse({}).source, 'douyin')
+  assert.equal(historySourceJobConfigSchema.parse({}).existingSources, undefined)
   assert.equal(historySourceJobConfigSchema.parse({ source: 'youtube', youtube: { url: youtubeCandidate().collectionUrl } }).source, 'youtube')
+  assert.equal(historySourceJobConfigSchema.parse({ source: 'youtube', youtube: { url: youtubeCandidate().collectionUrl }, existingSources: 'skip' }).existingSources, 'skip')
   for (const input of [{ source: 'youtube' }, { youtube: { url: youtubeCandidate().sourceUrl } },
     { source: 'youtube', youtube: { url: 'https://example.org/video' } },
     { source: 'youtube', youtube: { url: youtubeCandidate().sourceUrl }, czgts: articleDates }]) {
@@ -227,6 +230,139 @@ test('YouTube recollection continues the original production once and de-duplica
   assert.equal(getHistorySourceJob(job.id)!.counts.selected, 1)
   assert.equal(processed, 1)
   assert.equal(continued, 1)
+})
+
+for (const state of ['draft', 'failed', 'expired-delivery', 'deleted'] as const) test(`YouTube fresh-only collection leaves an existing ${state} source untouched`, async () => {
+  const input = youtubeCandidate(), stored = storeHistoryYoutubeSource(input)
+  completeDraft(stored.id)
+  if (state === 'failed') updateHistorySource(stored.id, { status: 'failed', rewrittenScript: null, lastError: 'Preserve the failed checkpoint' })
+  if (state === 'deleted') deleteHistorySource(stored.id)
+  if (state === 'expired-delivery') {
+    const video = recordHistoryVideoDelivery(db.$client, { scriptId: stored.id, scriptSha256: '1'.repeat(64), producer: 'motion',
+      producerJobId: 'previous-production', videoUrl: '/static/released.mp4', videoName: 'accepted.mp4', duration: 60, sha256: '2'.repeat(64) })
+    db.$client.prepare('UPDATE history_video_deliveries SET created_at=? WHERE id=?')
+      .run(new Date(Date.now() - 16 * 86400000).toISOString(), video.id)
+  }
+  const before = getHistorySource(stored.id, { includeDeleted: true })
+  registerTaskHandler(HISTORY_SOURCING_TASK_TYPE, createHistorySourceJobHandler({
+    checkYoutubeReadiness: async () => {},
+    collectYoutube: async options => {
+      assert.equal(options.isKnownVideo(input.videoId), true)
+      assert.match(options.knownVideoReason!(input.videoId), /只采集新来源/)
+      await options.onCandidate(input)
+      await options.onCandidate(input)
+      options.report({ stage: 'exhausted', message: '频道到底', scanned: 2 })
+    },
+    process: async () => assert.fail('Existing sources must not enter paid processing'),
+    continueProduction: async () => assert.fail('Existing sources must not continue production'),
+  }))
+  const { job } = startHistorySourceJob({ source: 'youtube', youtube: { url: input.collectionUrl }, targetCount: 1, existingSources: 'skip' })
+  assert.equal(getTask(job.id)!.payload.existingSources, 'skip')
+  await worker()
+  const result = getHistorySourceJob(job.id)!
+  assert.equal(result.status, 'completed')
+  assert.equal(result.counts.selected, 0)
+  assert.equal(result.counts.completed, 0)
+  assert.deepEqual(result.sourceIds, [])
+  assert.deepEqual(getHistorySource(stored.id, { includeDeleted: true }), before)
+})
+
+test('YouTube fresh-only collection saves a new identity and durable progress without continuing another platform', async () => {
+  const input = youtubeCandidate('12345678901'), other = storeHistorySource(candidate(input.videoId))
+  let processed = 0
+  registerTaskHandler(HISTORY_SOURCING_TASK_TYPE, createHistorySourceJobHandler({
+    checkYoutubeReadiness: async () => {},
+    collectYoutube: async options => {
+      assert.equal(options.isKnownVideo(input.videoId), false)
+      await options.onCandidate(input)
+      assert.equal(options.isKnownVideo(input.videoId), true)
+      await options.onCandidate(input)
+    },
+    process: async id => { processed++; assert.notEqual(id, other.id); return completeDraft(id) },
+    continueProduction: async () => assert.fail('A new source has no original production to continue'),
+  }))
+  const { job } = startHistorySourceJob({ source: 'youtube', youtube: { url: input.collectionUrl }, targetCount: 1, existingSources: 'skip' })
+  await worker()
+  const result = getHistorySourceJob(job.id)!
+  assert.equal(result.status, 'completed')
+  assert.equal(processed, 1)
+  assert.equal(result.counts.selected, 1)
+  assert.equal(result.counts.completed, 1)
+  assert.equal(result.sourceIds.length, 1)
+  const source = getHistorySource(result.sourceIds[0]!)!
+  assert.equal(source.platform, 'youtube')
+  assert.equal(source.sourceVideoId, input.videoId)
+  assert.equal(getHistorySourceArtifactState(source).rewritten, 'current')
+  assert.ok(result.events.some(event => event.currentSourceId === source.id))
+  assert.equal(db.select().from(schema.historyScriptSources).all().length, 2)
+})
+
+test('YouTube fresh-only collection rechecks concurrent insertion inside its write transaction', async t => {
+  const input = youtubeCandidate(), competing = new Database(process.env.DB_PATH!)
+  t.after(() => competing.close())
+  const transaction = db.$client.transaction.bind(db.$client)
+  let insertBeforeReservation = false, insertedId = 0, before: unknown
+  t.mock.method(db.$client, 'transaction', ((fn: (...args: any[]) => any) => {
+    if (insertBeforeReservation) {
+      insertBeforeReservation = false
+      assert.equal(db.$client.inTransaction, false)
+      const timestamp = new Date().toISOString()
+      insertedId = Number(competing.prepare(`INSERT INTO history_script_sources
+        (platform,source_video_id,source_url,title,category,created_at,updated_at,deleted_at)
+        VALUES('youtube',?,?,?,'unclassified',?,?,?)`).run(input.videoId, input.sourceUrl, 'Concurrent original', timestamp, timestamp, timestamp).lastInsertRowid)
+      before = getHistorySource(insertedId, { includeDeleted: true })
+    }
+    return transaction(fn)
+  }) as typeof db.$client.transaction)
+  registerTaskHandler(HISTORY_SOURCING_TASK_TYPE, createHistorySourceJobHandler({
+    checkYoutubeReadiness: async () => {},
+    collectYoutube: async options => {
+      assert.equal(options.isKnownVideo(input.videoId), false)
+      insertBeforeReservation = true
+      await options.onCandidate(input)
+      assert.ok(insertedId > 0, 'another connection inserted after the optimistic checks')
+      assert.equal(options.isKnownVideo(input.videoId), true)
+      options.report({ stage: 'exhausted', message: '频道到底', scanned: 1 })
+    },
+    process: async () => assert.fail('The concurrent original must not be processed'),
+    continueProduction: async () => assert.fail('The concurrent original must not continue production'),
+  }))
+  const { job } = startHistorySourceJob({ source: 'youtube', youtube: { url: input.collectionUrl }, targetCount: 1, existingSources: 'skip' })
+  await worker()
+  const result = getHistorySourceJob(job.id)!
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(result.sourceIds, [])
+  assert.equal(result.counts.selected, 0)
+  assert.deepEqual(getHistorySource(insertedId, { includeDeleted: true }), before)
+  assert.equal(db.select().from(schema.historyScriptSources).all().length, 1)
+})
+
+test('YouTube fresh-only collection resumes its own admitted source after a definite rate limit', async () => {
+  let blocked = true, collections = 0
+  const processed: number[] = []
+  registerTaskHandler(HISTORY_SOURCING_TASK_TYPE, createHistorySourceJobHandler({
+    checkYoutubeReadiness: async () => {},
+    continueProduction: async () => assert.fail('Fresh-only recovery must leave final script admission to its controller'),
+    collectYoutube: async options => { collections++; await options.onCandidate(youtubeCandidate()) },
+    process: async id => {
+      processed.push(id)
+      const source = completeDraft(id)
+      if (!blocked) return source
+      updateHistorySource(id, { status: 'corrected', rewrittenScript: null })
+      throw Object.assign(new Error('gateway_concurrency_limit'), { status: 429 })
+    },
+  }))
+  const { job } = startHistorySourceJob({ source: 'youtube', youtube: { url: youtubeCandidate().collectionUrl }, targetCount: 1, existingSources: 'skip' })
+  await worker()
+  const paused = getHistorySourceJob(job.id)!
+  assert.equal(paused.errorCode, 'history_source_rate_limited')
+  blocked = false
+  resumeHistorySourceJob(job.id)
+  await worker()
+  assert.equal(getHistorySourceJob(job.id)!.status, 'completed')
+  assert.deepEqual(processed, [paused.sourceIds[0], paused.sourceIds[0]])
+  assert.equal(collections, 1)
+  assert.equal(db.select().from(schema.historyScriptSources).all().length, 1)
 })
 
 test('YouTube login verification stops the shared collector after its first blocked download', async () => {
@@ -1605,6 +1741,46 @@ function progressSnapshot(index = 0) {
     currentSourceId: null, currentTitle: null, sourceIds: [], browserUrl: 'https://www.douyin.com/',
   }
 }
+
+test('monitoring loads redaction keys once per response and observes key rotation on the next request', t => {
+  const firstKey = 'monitoring-private-model-key', nextKey = 'rotated-private-model-key'
+  const timestamp = new Date().toISOString()
+  const config = db.insert(schema.aiServiceConfigs).values({ serviceType: 'text', provider: 'openai',
+    name: 'Monitoring redaction', baseUrl: 'https://example.test', apiKey: firstKey,
+    isActive: true, createdAt: timestamp, updatedAt: timestamp }).returning({ id: schema.aiServiceConfigs.id }).get()
+  t.after(() => db.delete(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, config.id)).run())
+  const jobs = [startHistorySourceJob({}).job, createTask({ type: HISTORY_SOURCING_TASK_TYPE, payload: {} })]
+  const snapshot = (key: string) => ({ ...progressSnapshot(), stage: `browsing ${key}`, message: `Progress ${key}`,
+    currentTitle: `Title ${key}`, candidate: { outcome: 'selected', videoId: '123', title: `Candidate ${key}`,
+      reason: `Reason ${key}`, titleEvidence: `Evidence ${key}`, curiosityAngle: `Angle ${key}`,
+      comments: [{ text: `Comment ${key}`, likes: 1 }] } })
+  for (const job of jobs) {
+    for (let index = 0; index < 3; index++) appendTaskEvent(job.id, 'history.progress', snapshot(firstKey))
+  }
+  db.update(schema.creationTasks).set({ status: 'failed', errorMessage: `Failure ${firstKey}` })
+    .where(eq(schema.creationTasks.id, jobs[1]!.id)).run()
+  const prepare = db.$client.prepare.bind(db.$client)
+  let keyQueries = 0
+  t.mock.method(db.$client, 'prepare', (query: string) => {
+    if (/^select "api_key" from "ai_service_configs"/i.test(query)) keyQueries++
+    return prepare(query)
+  })
+  for (const read of [() => listHistorySourceJobs(), () => getHistorySourceJob(jobs[0]!.id),
+    () => listHistorySourceJobEvents(jobs[0]!.id)]) {
+    keyQueries = 0
+    const response = JSON.stringify(read())
+    assert.equal(response.includes(firstKey), false)
+    assert.ok(response.includes('[redacted]'))
+    assert.equal(keyQueries, 1)
+  }
+  db.update(schema.aiServiceConfigs).set({ apiKey: nextKey }).where(eq(schema.aiServiceConfigs.id, config.id)).run()
+  appendTaskEvent(jobs[0]!.id, 'history.progress', snapshot(nextKey))
+  keyQueries = 0
+  const rotated = getHistorySourceJob(jobs[0]!.id)!
+  assert.equal(JSON.stringify(rotated).includes(nextKey), false)
+  assert.equal(rotated.events.at(-1)!.candidate!.comments![0]!.text, 'Comment [redacted]')
+  assert.equal(keyQueries, 1)
+})
 
 test('job history paginates past five jobs without changing the active control job', async () => {
   const route = createHistorySourceJobsRoute()

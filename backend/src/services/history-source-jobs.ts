@@ -64,6 +64,7 @@ export const historySourceJobConfigSchema = z.object({
     .refine(value => value.startTime < value.endTime, 'End time must follow start time').optional(),
   keywords: historySourceKeywordsSchema.default(['历史']),
   targetCount: z.number().int().min(1).max(9999).nullable().default(1),
+  existingSources: z.literal('skip').optional(),
   categories: z.array(z.enum(HISTORY_SOURCE_CATEGORIES)).min(1).max(5)
     .refine(values => new Set(values).size === values.length, 'Categories must be unique')
     .default([...HISTORY_SOURCE_CATEGORIES]),
@@ -124,10 +125,16 @@ export interface HistoryJob extends Omit<Snapshot, 'message' | 'level'> {
   events: HistoryJobEvent[]
 }
 
-export function safeHistoryJobMessage(value: unknown) {
+type HistoryJobRedactor = (value: unknown) => string
+
+function createHistoryJobRedactor(): HistoryJobRedactor {
   const keys=db.select({apiKey:schema.aiServiceConfigs.apiKey}).from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.isActive,true)).all().map(config=>config.apiKey)
-  return redactHistoryJobMessage(value,keys)
+  return value => redactHistoryJobMessage(value,keys)
+}
+
+export function safeHistoryJobMessage(value: unknown) {
+  return createHistoryJobRedactor()(value)
 }
 
 function initialSnapshot(): Snapshot {
@@ -145,16 +152,16 @@ function safeBrowserUrl(value: string | null) {
   } catch { return null }
 }
 
-function safeCandidate(candidate: HistoryJobCandidate | undefined): HistoryJobCandidate | undefined {
+function safeCandidate(candidate: HistoryJobCandidate | undefined, redact: HistoryJobRedactor = safeHistoryJobMessage): HistoryJobCandidate | undefined {
   if (!candidate) return undefined
-  const safeText = (value: string | undefined) => value === undefined ? undefined : safeHistoryJobMessage(value)
+  const safeText = (value: string | undefined) => value === undefined ? undefined : redact(value)
   return {
     outcome: candidate.outcome, videoId: candidate.videoId,
     screeningStage: candidate.screeningStage,
     title: safeText(candidate.title), reason: safeText(candidate.reason),
     durationSeconds: candidate.durationSeconds, likeCount: candidate.likeCount, commentCount: candidate.commentCount,
     titleEvidence: safeText(candidate.titleEvidence), curiosityAngle: safeText(candidate.curiosityAngle),
-    comments: candidate.comments?.slice(0, 20).map(comment => ({ text: safeHistoryJobMessage(comment.text), likes: comment.likes })),
+    comments: candidate.comments?.slice(0, 20).map(comment => ({ text: redact(comment.text), likes: comment.likes })),
   }
 }
 
@@ -167,16 +174,16 @@ function parseProgressRows(rows: Array<typeof schema.creationTaskEvents.$inferSe
   })
 }
 
-function describeEvent({ row, value }: ReturnType<typeof parseProgressRows>[number]): HistoryJobEvent {
+function describeEvent({ row, value }: ReturnType<typeof parseProgressRows>[number], redact: HistoryJobRedactor): HistoryJobEvent {
   return {
-    id: row.id, createdAt: row.createdAt, stage: safeHistoryJobMessage(value.stage), message: safeHistoryJobMessage(value.message), level: value.level,
+    id: row.id, createdAt: row.createdAt, stage: redact(value.stage), message: redact(value.message), level: value.level,
     counts: value.counts, browserUrl: safeBrowserUrl(value.browserUrl), currentSourceId: value.currentSourceId,
-    currentTitle: value.currentTitle === null ? null : safeHistoryJobMessage(value.currentTitle),
-    ...(value.candidate ? { candidate: safeCandidate(value.candidate) } : {}),
+    currentTitle: value.currentTitle === null ? null : redact(value.currentTitle),
+    ...(value.candidate ? { candidate: safeCandidate(value.candidate,redact) } : {}),
   }
 }
 
-export function describeHistorySourceJob(task: CreationTask, eventLimit = 100): HistoryJob {
+export function describeHistorySourceJob(task: CreationTask, eventLimit = 100, redact: HistoryJobRedactor = createHistoryJobRedactor()): HistoryJob {
   if (task.type !== HISTORY_SOURCING_TASK_TYPE) throw new Error('Not a history sourcing task')
   const config = historySourceJobConfigSchema.parse(task.payload)
   const rows = db.select().from(schema.creationTaskEvents).where(and(
@@ -204,20 +211,20 @@ export function describeHistorySourceJob(task: CreationTask, eventLimit = 100): 
   return {
     id: task.id, status, stage: status === 'failed' && task.errorCode === 'history_source_rate_limited' ? 'waiting_rate_limit'
       : status === 'failed' && (task.errorCode === 'youtube_login_required' || isHistoryYoutubeLoginError(task.errorMessage))
-        ? 'waiting_login' : terminal ? status : safeHistoryJobMessage(state.stage),
+        ? 'waiting_login' : terminal ? status : redact(state.stage),
     progressMessage: terminal && !['stopped', 'completed', 'failed', 'interrupted'].includes(state.stage)
-      ? (status === 'stopped' ? '任务已停止，已保存内容保留' : status === 'interrupted' ? '服务中断，已完成阶段保留；未自动重试' : safeHistoryJobMessage(task.errorMessage ?? task.progressMessage ?? state.message))
-      : safeHistoryJobMessage(state.message),
-    counts: state.counts, currentSourceId: state.currentSourceId, currentTitle: state.currentTitle === null ? null : safeHistoryJobMessage(state.currentTitle),
+      ? (status === 'stopped' ? '任务已停止，已保存内容保留' : status === 'interrupted' ? '服务中断，已完成阶段保留；未自动重试' : redact(task.errorMessage ?? task.progressMessage ?? state.message))
+      : redact(state.message),
+    counts: state.counts, currentSourceId: state.currentSourceId, currentTitle: state.currentTitle === null ? null : redact(state.currentTitle),
     sourceIds: state.sourceIds, browserUrl: safeBrowserUrl(state.browserUrl),
-    ...(state.candidate ? { candidate: safeCandidate(state.candidate) } : {}),
+    ...(state.candidate ? { candidate: safeCandidate(state.candidate,redact) } : {}),
     targetCount: config.targetCount, config,
     startedAt: task.startedAt, completedAt: task.completedAt, updatedAt: task.updatedAt,
     workerHealth: task.status === 'running' ? leaseValid && workerIsRecent ? 'alive' : 'stale' : 'inactive',
     heartbeatAt, leaseExpiresAt: task.leaseExpiresAt, progressAt: snapshots.at(-1)?.row.createdAt ?? null,
-    errorMessage: task.errorMessage ? safeHistoryJobMessage(task.errorMessage) : null,
+    errorMessage: task.errorMessage ? redact(task.errorMessage) : null,
     errorCode: task.errorCode,
-    events: snapshots.map(describeEvent),
+    events: snapshots.map(event => describeEvent(event,redact)),
   }
 }
 
@@ -240,9 +247,10 @@ export function listHistorySourceJobs(options: HistoryPageOptions = {}) {
     ?? db.select().from(schema.creationTasks).where(belongsToHistory).orderBy(desc(schema.creationTasks.id)).limit(1).get()
   const hasMore = rows.length > limit
   const page = rows.slice(0, limit)
+  const redact = createHistoryJobRedactor()
   return {
-    job: current ? describeHistorySourceJob(normalizeTask(current)) : null,
-    recent: page.map(row => describeHistorySourceJob(normalizeTask(row), 1)),
+    job: current ? describeHistorySourceJob(normalizeTask(current),100,redact) : null,
+    recent: page.map(row => describeHistorySourceJob(normalizeTask(row),1,redact)),
     total: db.select({ value: count() }).from(schema.creationTasks).where(belongsToHistory).get()!.value,
     hasMore, nextCursor: hasMore ? page.at(-1)!.id : null,
   }
@@ -257,8 +265,9 @@ export function listHistorySourceJobEvents(id: number, options: HistoryPageOptio
   )).orderBy(desc(schema.creationTaskEvents.id)).limit(limit + 1).all()
   const hasMore = rows.length > limit
   const page = rows.slice(0, limit)
+  const redact = createHistoryJobRedactor()
   return {
-    items: parseProgressRows([...page].reverse()).map(describeEvent),
+    items: parseProgressRows([...page].reverse()).map(event => describeEvent(event,redact)),
     total: db.select({ value: count() }).from(schema.creationTaskEvents).where(belongsToJob).get()!.value,
     hasMore, nextCursor: hasMore ? page.at(-1)!.id : null,
   }
@@ -522,8 +531,11 @@ export function createHistorySourceJobHandler(overrides: Partial<JobDependencies
         const excluded = isYoutube ? [] : db.select({ id: schema.historyScriptSources.sourceVideoId }).from(schema.historyScriptSources)
           .where(eq(schema.historyScriptSources.platform, config.source)).all().map(row => row.id)
         const encounteredVideos = new Set<string>()
+        const existingYoutubeSource = (id: string) => db.select({ id: schema.historyScriptSources.id }).from(schema.historyScriptSources)
+          .where(and(eq(schema.historyScriptSources.platform, 'youtube'), eq(schema.historyScriptSources.sourceVideoId, id))).get()
         const isKnownVideo = (id: string) => isYoutube
-          ? encounteredVideos.has(id) || hasRecentHistoryYoutubeProduction(db.$client, id)
+          ? encounteredVideos.has(id) || (config.existingSources === 'skip'
+            ? Boolean(existingYoutubeSource(id)) : hasRecentHistoryYoutubeProduction(db.$client, id))
           : Boolean(db.select({ id: schema.historyScriptSources.id }).from(schema.historyScriptSources)
             .where(and(eq(schema.historyScriptSources.platform, config.source), eq(schema.historyScriptSources.sourceVideoId, id))).get())
         const failedSourceIds = new Set<number>()
@@ -552,7 +564,7 @@ export function createHistorySourceJobHandler(overrides: Partial<JobDependencies
             failedSourceIds.delete(source.id)
             state.counts.failed = failedSourceIds.size
             report('storing', `已保存待审稿 ${countLabel()}`)
-            if (isYoutube && continueExisting && deps.continueProduction) {
+            if (isYoutube && config.existingSources !== 'skip' && continueExisting && deps.continueProduction) {
               try { await deps.continueProduction(source.id) }
               catch (error) { report('production_pending', `稿件已保存，原生产任务待继续：${safeHistoryJobMessage(error)}`, 'warning') }
             }
@@ -574,9 +586,12 @@ export function createHistorySourceJobHandler(overrides: Partial<JobDependencies
         const consumeCandidate = async (candidate: StoreHistorySourceInput | HistoryYoutubeCandidate) => {
           check()
           if (isTargetReached() || isKnownVideo('videoId' in candidate ? candidate.videoId : candidate.sourceVideoId)) return
-          const existingYoutube = 'videoId' in candidate && db.select({id: schema.historyScriptSources.id}).from(schema.historyScriptSources)
-            .where(and(eq(schema.historyScriptSources.platform, 'youtube'), eq(schema.historyScriptSources.sourceVideoId, candidate.videoId))).get()
-          let source = 'videoId' in candidate ? storeHistoryYoutubeSource(candidate) : storeHistorySource(candidate)
+          const existingYoutube = 'videoId' in candidate && existingYoutubeSource(candidate.videoId)
+          let source = 'videoId' in candidate ? config.existingSources === 'skip'
+            // A concurrent collector can insert after the optimistic exclusion check.
+            ? runImmediateTransaction(() => existingYoutubeSource(candidate.videoId) ? null : storeHistoryYoutubeSource(candidate))
+            : storeHistoryYoutubeSource(candidate) : storeHistorySource(candidate)
+          if (!source) return
           let recollection: ReturnType<typeof prepareHistoryYoutubeRecollection> | undefined
           if (isYoutube) {
             try { await unlockHistorySource(source.id, deps.storageRoot) }
@@ -630,7 +645,8 @@ export function createHistorySourceJobHandler(overrides: Partial<JobDependencies
             await deps.collectYoutube({ url, signal, targetCount: config.targetCount,
               isKnownVideo, isTargetReached, onCandidate: consumeCandidate,
               knownVideoReason: id => encounteredVideos.has(id) ? '本轮已处理，沿用本轮任务，避免重复执行'
-                : '最近 15 天已有成功交付的成片，跳过重复生产',
+                : config.existingSources === 'skip' ? '该 YouTube 来源已入库，当前任务只采集新来源'
+                  : '最近 15 天已有成功交付的成片，跳过重复生产',
               report(event) {
                 check()
                 if (event.stage === 'exhausted') sourceExhausted = true
