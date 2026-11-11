@@ -16,7 +16,7 @@ import { HuashengBrowserError, type HuashengBrowserInput } from './history-huash
 import type { SocialUploadPayload, SocialUploadResult } from './social-auto-upload.js'
 import { createScienceWorkflowRoute } from '../routes/science-workflow.js'
 import { createScienceAccountsRoute } from '../routes/science-accounts.js'
-import { ScienceCollectionService } from './science-collection.js'
+import { ScienceCollectionService, type ScienceCollectionOptions } from './science-collection.js'
 import { SCIENCE_WRITING_VERSION, type ScienceWritingCheckpoint } from './science-script.js'
 
 const sourceVideoHash = createHash('sha256').update('source-video').digest('hex')
@@ -3508,6 +3508,69 @@ function pendingWritingCheckpoint(transcript: string): ScienceWritingCheckpoint 
     draft: { title: '尚待修订的稿件', script: '冰会沉下去，这是尚未通过核验的正文。' },
     issues: [{ quote: '冰会沉下去', instruction: '原文说明密度降低，需修正为浮起来。' }],
     feedback: '原文说明密度降低，需修正为浮起来。', round: 8, reviewed: true }
+}
+
+for (const stop of ['collection-only', 'workflow-first', 'collection-first', 'user-stop', 'shutdown-then-user-stop'] as const) {
+  test(`real workflow and collection ${stop} preserves writing recovery unless explicitly stopped`, { timeout: 5000 }, async t => {
+    const h = fixture(t), rewrite = h.options.rewrite!
+    const userStop = stop === 'user-stop' || stop === 'shutdown-then-user-stop'
+    let entered!: () => void
+    const writing = new Promise<void>(resolve => { entered = resolve })
+    h.options.rewrite = async (input, options) => {
+      options.onCheckpoint?.(pendingWritingCheckpoint(input.transcript))
+      entered()
+      await new Promise<void>((_, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+      throw new Error('unreachable')
+    }
+    const stateRoot = path.join(h.root, 'shutdown-collection')
+    const options: ScienceCollectionOptions = { stateRoot, workflow: h.service,
+      collect: async options => {
+        await options.onCandidate({ videoId: 'abcdefghijk', sourceUrl, title: '原始科普任务', authorName: 'source',
+          observedAt: new Date().toISOString(), collectionUrl: options.url })
+        options.report({ stage: 'exhausted', message: '来源已入库' })
+      },
+    }
+    const collection = new ScienceCollectionService(options)
+    t.after(() => collection.stop())
+    collection.saveSettings({ youtubeChannels: ['https://www.youtube.com/@ScienceOne/videos'], targetCount: 1, mode: 'upload' })
+    const run = collection.start({ requestId: `shutdown-${stop}`, huashengAccountName: h.h.accountName, baijiahaoAccountName: h.b.accountName })
+    await writing
+    const id = h.service.jobsForCollection(run.id)[0]!.id, file = path.join(h.root, 'jobs', id, 'job.json')
+    const before = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(before.stage, 'rewrite'); assert.equal(before.automaticDelivery, true)
+    if (stop === 'workflow-first') await Promise.all([h.service.stop(), collection.stop()])
+    else if (stop === 'collection-first') await Promise.all([collection.stop(), h.service.stop()])
+    else if (stop === 'collection-only') await collection.stop()
+    else if (stop === 'shutdown-then-user-stop') {
+      const stopping = collection.stop()
+      collection.stopProcessing(run.id)
+      await stopping; await h.service.waitForIdle()
+    }
+    else { collection.stopProcessing(run.id); await collection.waitForIdle(); await h.service.waitForIdle() }
+    const after = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(after.status, 'paused'); assert.equal(after.ownerPid, undefined)
+    assert.equal(after.automaticDelivery, !userStop)
+    assert.equal(after.automaticProduction, before.automaticProduction)
+    assert.equal(after.autoUpload, true)
+    for (const key of ['transcript', 'transcriptCheckpoint', 'writingCheckpoint', 'huashengAccountName', 'baijiahaoAccountName', 'collectionId'])
+      assert.deepEqual(after[key], before[key], key)
+    const savedBatch = JSON.parse(fs.readFileSync(path.join(stateRoot, 'runs', run.id + '.json'), 'utf8'))
+    assert.deepEqual(savedBatch.items.map((item: { jobId: string }) => item.jobId), [id])
+    assert.equal(savedBatch.stopRequested, userStop)
+    assert.equal(savedBatch.status, userStop ? 'stopped' : 'interrupted')
+    const locks = new Database(path.join(h.root, 'jobs', '.locks', 'execution.sqlite'), { readonly: true })
+    try { assert.deepEqual(locks.prepare('SELECT COUNT(*) AS n FROM execution_locks WHERE job_id=?').get(id), { n: 0 }) }
+    finally { locks.close() }
+    h.options.rewrite = async (input, options) => { assert.deepEqual(options.checkpoint, before.writingCheckpoint); return rewrite(input, options) }
+    const restarted = new ScienceWorkflowService(h.options)
+    const resumed = new ScienceCollectionService({ ...options, workflow: restarted })
+    t.after(async () => { await resumed.stop(); await restarted.stop() })
+    assert.deepEqual(resumed.runAutomaticRecovery(), userStop ? [] : [run.id])
+    await resumed.waitForIdle(); await restarted.waitForIdle()
+    assert.equal(restarted.detail(id).status, userStop ? 'paused' : 'completed')
+    assert.equal(h.calls.download, 1); assert.equal(h.calls.transcribe, 1)
+    assert.equal(h.calls.upload, userStop ? 0 : 1)
+  })
 }
 
 test('a failed source review retains its draft and exact corrections without exposing it as accepted narration', async t => {

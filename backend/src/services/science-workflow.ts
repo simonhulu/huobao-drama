@@ -131,6 +131,7 @@ export interface ScienceWorkflowOptions {
 export class ScienceWorkflowError extends Error {
   constructor(message: string, readonly status = 409, readonly retryable = false) { super(message) }
 }
+export const SCIENCE_SERVICE_SHUTDOWN = new DOMException('Science service shutdown', 'AbortError')
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 function unsubmittedProduction(job: StoredJob) {
   return !job.projectUrl && !job.productionCompleted && !job.exportDispatched && !job.exportTask && !job.videoPath
@@ -1504,8 +1505,12 @@ export class ScienceWorkflowService {
       start()
       const handle = this.running.get(id)
       if (!handle) throw new ScienceWorkflowError('任务未能启动，请检查现有任务状态')
-      // A batch stop only cancels work it started. It must not stop a manual or other batch operation.
-      const cancel = () => { if (this.running.get(id) === handle) this.cancel(id) }
+      // Stop only this batch's handle. Service shutdown keeps its automatic recovery authorized.
+      const cancel = () => {
+        if (this.running.get(id) !== handle) return
+        if (signal.reason === SCIENCE_SERVICE_SHUTDOWN) handle.controller.abort(SCIENCE_SERVICE_SHUTDOWN)
+        else this.cancel(id)
+      }
       signal.addEventListener('abort', cancel, { once: true })
       try { if (signal.aborted) cancel(); await handle.done; signal.throwIfAborted() }
       finally { signal.removeEventListener('abort', cancel) }
@@ -1536,7 +1541,7 @@ export class ScienceWorkflowService {
   async stop() {
     if (this.automaticTimer) clearInterval(this.automaticTimer)
     this.automaticTimer = undefined
-    for (const active of this.running.values()) active.controller.abort()
+    for (const active of this.running.values()) active.controller.abort(SCIENCE_SERVICE_SHUTDOWN)
     await this.waitForIdle()
     this.executionDb?.close()
     this.executionDb = undefined

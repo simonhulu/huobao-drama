@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { parseHistoryYoutubeUrl } from './history-source-youtube-url.js'
 import type { collectHistoryYoutubeVideos, HistoryYoutubeCandidate } from './history-source-youtube.js'
-import { getScienceWorkflowService, ScienceWorkflowError, type ScienceJob, type ScienceWorkflowService } from './science-workflow.js'
+import { getScienceWorkflowService, SCIENCE_SERVICE_SHUTDOWN, ScienceWorkflowError, type ScienceJob, type ScienceWorkflowService } from './science-workflow.js'
 import {acquireNbaJobLock, NbaJobLockBusyError} from './nba-job-lock.js'
 
 const defaultRoot = fileURLToPath(new URL('../../../data/science-pop/collection/', import.meta.url))
@@ -520,7 +520,8 @@ export class ScienceCollectionService {
       // User stops revoke this batch's retry chain; service shutdown remains recoverable.
       if (signal.aborted && startedHere && this.read(id).stopRequested === true) {
         const job = this.workflow.jobForCollection(id, jobId)
-        if (job && awaitingWorkflow(job)) this.workflow.cancel(jobId)
+        if (job && (awaitingWorkflow(job)
+          || signal.reason === SCIENCE_SERVICE_SHUTDOWN && job.status === 'paused' && job.executionActive !== true)) this.workflow.cancel(jobId)
       }
       if (!signal.aborted) this.update(id, current => {
         if (current.pendingRetryJobIds) current.pendingRetryJobIds = current.pendingRetryJobIds.filter(value => value !== jobId)
@@ -981,8 +982,8 @@ export class ScienceCollectionService {
     this.stopping = true
     if (this.automaticTimer) clearInterval(this.automaticTimer)
     this.automaticTimer = undefined
-    live.get(this.stateRoot)?.controller.abort()
-    collecting.get(this.stateRoot)?.controller.abort()
+    live.get(this.stateRoot)?.controller.abort(SCIENCE_SERVICE_SHUTDOWN)
+    collecting.get(this.stateRoot)?.controller.abort(SCIENCE_SERVICE_SHUTDOWN)
     await this.waitForIdle()
   }
 }
