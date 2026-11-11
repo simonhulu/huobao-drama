@@ -906,10 +906,11 @@ export class ScienceWorkflowService {
         } catch (error) {
           signal.throwIfAborted()
           const message = safeMessage(error)
-          const failure = error as { status?: number; code?: string; cause?: { code?: string } }
+          const failure = error as { status?: number; code?: string; retryable?: boolean; cause?: { code?: string } }
           const connection = `${message} ${failure?.cause?.code || failure?.code || ''}`
           const retryable = !/不一致|不匹配|校验失败|缺失|改变|发生变化|不符合要求|mismatch/i.test(message)
             && (uploadConnectionFailure(connection) || /fetch failed|terminated|ENOTFOUND|UND_ERR_|处理时限|尚未就绪/i.test(connection)
+              || failure?.code === 'MUSETALK_REMOTE_PENDING' && failure.retryable === true
               || failure?.status === 408 || failure?.status === 429 || failure?.status && failure.status >= 500 && failure.status <= 599)
           throw new ScienceWorkflowError(`MuseTalk 主播尚未完成，已保留原正片和任务检查点，暂停合成及上传：${message}`, retryable ? 503 : 409, Boolean(retryable))
         }

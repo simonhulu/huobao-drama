@@ -703,7 +703,8 @@ test('a MuseTalk timeout preserves its original checkpoints and automatically re
     if (++presenterCalls === 1) {
       presenterDirectory = input.directory; mainPath = input.videoPath
       fs.mkdirSync(input.directory, { recursive: true }); fs.writeFileSync(checkpointPath, checkpoint)
-      throw new Error('MuseTalk 已达到处理时限')
+      throw Object.assign(new Error('MuseTalk 原任务尚未返回完成结果，已保留任务检查点'),
+        { code: 'MUSETALK_REMOTE_PENDING', retryable: true, jobId: 'original-gpu-job', requestId: 'original-gpu-job' })
     }
     assert.equal(input.directory, presenterDirectory); assert.equal(input.videoPath, mainPath)
     assert.equal(fs.readFileSync(checkpointPath, 'utf8'), checkpoint)

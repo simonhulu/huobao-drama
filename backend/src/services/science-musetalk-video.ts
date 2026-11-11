@@ -256,6 +256,8 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
   }
   let api: Api | undefined
   let remoteJobId: string | undefined
+  let boundRemoteJobId: string | undefined
+  let remoteDeadline: AbortSignal | undefined
   let succeeded = false
   try {
     await lock.writeFile(String(process.pid))
@@ -263,7 +265,8 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
     if (!main.audio) throw new Error('MuseTalk 正片缺少正文音轨')
     // Half-body blending needs a full-narration budget, bounded to 10-60 minutes.
     const remoteTimeoutMs = positive('MUSETALK_TIMEOUT_MS', Math.min(60 * 60_000, Math.max(10 * 60_000, Math.ceil(main.duration * 1000))))
-    signal = AbortSignal.any([options.signal, AbortSignal.timeout(remoteTimeoutMs)])
+    remoteDeadline = AbortSignal.timeout(remoteTimeoutMs)
+    signal = AbortSignal.any([options.signal, remoteDeadline])
     const sourceSha256 = await fileHash(source, signal)
     api = await openApi(signal)
     const request = async (url: string, init: RequestInit = {}, timeout = 60_000) => {
@@ -347,6 +350,7 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       checkpoint.jobId = job.job_id ?? job.id
       await save(checkpointPath, checkpoint)
     }
+    boundRemoteJobId = checkpoint.jobId
     const jobUrl = `/v1/jobs/${checkpoint.jobId}`
     let completed: RemoteJob
     let retried = false, lastReport = 0
@@ -366,6 +370,7 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       }
       await delay(positive('MUSETALK_POLL_INTERVAL_MS', 3000), undefined, { signal })
     }
+    remoteDeadline = undefined
     // Completed GPU work must not lose its local download/normalization budget.
     // Download, full decoding and CPU normalization share this budget on older Intel hosts.
     const postprocessTimeoutMs = Math.min(60 * 60_000, Math.max(15 * 60_000, Math.ceil(main.duration * 3000)))
@@ -411,6 +416,14 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       }
       throw error
     } finally { await fs.rm(temporary, { force: true }) }
+  } catch (error) {
+    options.signal.throwIfAborted()
+    if (remoteDeadline?.aborted && boundRemoteJobId
+      && (error === remoteDeadline.reason || (error as { cause?: unknown })?.cause === remoteDeadline.reason)) {
+      throw Object.assign(new Error('MuseTalk 原任务尚未返回完成结果，已保留任务检查点，稍后继续获取原任务结果', { cause: error }),
+        { code: 'MUSETALK_REMOTE_PENDING', retryable: true, jobId: boundRemoteJobId, requestId: boundRemoteJobId })
+    }
+    throw error
   } finally {
     if (!succeeded && options.signal.aborted && api && remoteJobId) {
       try { await fetch(`${api.apiUrl}/v1/jobs/${remoteJobId}`, { method: 'DELETE', signal: AbortSignal.timeout(5000) }) } catch {}
