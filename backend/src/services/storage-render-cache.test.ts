@@ -4,6 +4,8 @@ import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import childProcess from 'node:child_process'
+import {syncBuiltinESMExports} from 'node:module'
 import {createHistoryMotionRenderCacheGuard} from './storage-render-cache.js'
 
 function fixture(t: TestContext) {
@@ -31,134 +33,142 @@ function fixture(t: TestContext) {
   return {root,id,output,filename,database,guard}
 }
 
-test('own intermediate bookkeeping and delivery reports do not block cleanup; input dependencies do',t=>{
+test('own intermediate bookkeeping and delivery reports do not block cleanup; input dependencies do',async t=>{
   const f=fixture(t)
-  assert.doesNotThrow(()=>f.guard.assertUnreferenced())
+  await assert.doesNotReject(()=>f.guard.assertUnreferenced())
   f.database.exec("UPDATE storage_artifact_refs SET purpose='source' WHERE owner_type='history-motion'")
-  assert.throws(()=>f.guard.assertUnreferenced(),/shared input reference/)
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/shared input reference/)
   f.database.exec("UPDATE storage_artifact_refs SET purpose='intermediate'")
   f.database.prepare('UPDATE history_motion_productions SET snapshot=?').run(JSON.stringify({plan:{shots:[{sourcePath:f.filename}]}}))
-  assert.throws(()=>f.guard.assertUnreferenced(),/shared input reference/)
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/shared input reference/)
 })
 
-test('changes after the first group check are re-read before deletion',t=>{
+test('changes after the first group check are re-read before deletion',async t=>{
   const f=fixture(t)
-  assert.doesNotThrow(()=>f.guard.assertUnreferenced())
-  assert.doesNotThrow(()=>f.guard.assertUnreferenced())
+  await assert.doesNotReject(()=>f.guard.assertUnreferenced())
+  await assert.doesNotReject(()=>f.guard.assertUnreferenced())
   f.database.exec('UPDATE storage_artifacts SET pinned=1')
-  assert.throws(()=>f.guard.assertUnreferenced(),/pinned/)
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/pinned/)
   f.database.exec('UPDATE storage_artifacts SET pinned=0')
   f.database.prepare('INSERT INTO remotion_assets VALUES(29,?)').run(f.filename)
-  assert.throws(()=>f.guard.assertUnreferenced(),/shared input reference/)
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/shared input reference/)
 })
 
-test('a cache from another producer task remains protected even if it shares the same source',t=>{
+test('a cache from another producer task remains protected even if it shares the same source',async t=>{
   const f=fixture(t)
   f.database.prepare('INSERT INTO history_motion_productions VALUES(?,17,?)').run('another-motion',JSON.stringify({plan:{shots:[{sourcePath:f.filename}]}}))
-  assert.throws(()=>f.guard.assertUnreferenced(),/shared input reference/)
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/shared input reference/)
 })
 
-test('malformed fresh workflow references and incomplete purpose records fail closed',t=>{
+test('malformed fresh workflow references and incomplete purpose records fail closed',async t=>{
   const f=fixture(t)
   f.database.prepare('UPDATE history_motion_productions SET snapshot=?').run('{')
-  assert.throws(()=>f.guard.assertUnreferenced(),SyntaxError)
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/JSON|Expected|Unexpected/)
   f.database.prepare('UPDATE history_motion_productions SET snapshot=?').run('{}')
   f.database.exec('ALTER TABLE storage_artifact_refs DROP COLUMN purpose')
-  assert.throws(()=>f.guard.assertUnreferenced(),/schema is incomplete/)
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/schema is incomplete/)
 })
 
-function afterMotionRead(t: TestContext, write: () => void) {
-  const prepare=Database.prototype.prepare
-  t.mock.method(Database.prototype,'prepare',function(this: Database.Database, sql: string) {
-    const statement=prepare.call(this,sql)
-    if (/snapshot.*FROM history_motion_productions/.test(sql)) {
-      const all=statement.all
-      t.mock.method(statement,'all',function(this: typeof statement,...parameters: unknown[]) {
-        const result=Reflect.apply(all,this,parameters)
-        write()
-        return result
-      })
-    }
-    return statement
+function afterReferenceScan(t: TestContext, write: () => void) {
+  const originalFork=childProcess.fork
+  const fork=t.mock.method(childProcess,'fork',function(this: typeof childProcess,...args: Parameters<typeof originalFork>) {
+    const child=Reflect.apply(originalFork,this,args)
+    child.once('message',write)
+    return child
   })
+  syncBuiltinESMExports()
+  t.after(()=>{fork.mock.restore();syncBuiltinESMExports()})
 }
 
-test('an unrelated commit during the initial scan is rechecked without permanently blocking cleanup',t=>{
+test('an unrelated commit during the isolated scan retains the cache without rescanning',async t=>{
   const f=fixture(t)
   f.database.exec('CREATE TABLE unrelated_progress(value INTEGER);INSERT INTO unrelated_progress VALUES(0)')
   let reads=0
-  afterMotionRead(t,()=>{if(++reads===1)f.database.exec('UPDATE unrelated_progress SET value=value+1')})
-  assert.doesNotThrow(()=>f.guard.assertUnreferenced())
-  assert.equal(reads,2,'the changed database must be rechecked before authorizing cleanup')
+  afterReferenceScan(t,()=>{reads++;f.database.exec('UPDATE unrelated_progress SET value=value+1')})
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/ownership changed/)
+  assert.equal(reads,1,'a concurrent commit retains cache within the single scan budget')
 })
 
-test('a new real reference arriving during the initial scan blocks the bounded recheck',t=>{
+test('a new real reference arriving during the isolated scan prevents authorization',async t=>{
   const f=fixture(t)
   let reads=0
-  afterMotionRead(t,()=>{if(++reads===1)f.database.prepare('INSERT INTO remotion_assets VALUES(42,?)').run(f.filename)})
-  assert.throws(()=>f.guard.assertUnreferenced(),/shared input reference/)
-  assert.equal(reads,2)
+  afterReferenceScan(t,()=>{reads++;f.database.prepare('INSERT INTO remotion_assets VALUES(42,?)').run(f.filename)})
+  await assert.rejects(()=>f.guard.assertUnreferenced(),/ownership changed/)
+  assert.equal(reads,1)
 })
 
-test('continually changing ownership checks stop after a bounded number of scans',t=>{
+test('reference table reads never execute on the renderer thread',async t=>{
   const f=fixture(t)
-  f.database.exec('CREATE TABLE unrelated_progress(value INTEGER);INSERT INTO unrelated_progress VALUES(0)')
-  let reads=0
-  afterMotionRead(t,()=>{reads++;f.database.exec('UPDATE unrelated_progress SET value=value+1')})
-  assert.throws(()=>f.guard.assertUnreferenced(),/ownership changed/)
-  assert.equal(reads,3)
+  const prepare=Database.prototype.prepare
+  t.mock.method(Database.prototype,'prepare',function(this: Database.Database,sql: string) {
+    assert.doesNotMatch(sql,/SELECT.*FROM/i,'full reference queries must run in the isolated worker')
+    return prepare.call(this,sql)
+  })
+  await assert.doesNotReject(()=>f.guard.assertUnreferenced())
 })
 
-test('cleanup rechecks an unrelated warmup commit under a write reservation',t=>{
+test('cleanup retains cache after an unrelated warmup commit',async t=>{
   const f=fixture(t)
   f.database.exec('CREATE TABLE unrelated_progress(value INTEGER);INSERT INTO unrelated_progress VALUES(0)')
   let reads=0,cleaned=false
-  afterMotionRead(t,()=>{if(++reads===1)f.database.exec('UPDATE unrelated_progress SET value=value+1')})
-  f.guard.withCleanupLock(()=>{cleaned=true})
-  assert.equal(cleaned,true)
-  assert.equal(reads,2,'the unlocked warmup cannot authorize deletion after a concurrent commit')
+  afterReferenceScan(t,()=>{reads++;f.database.exec('UPDATE unrelated_progress SET value=value+1')})
+  await assert.rejects(()=>f.guard.withCleanupLock(()=>{cleaned=true}),/ownership changed/)
+  assert.equal(cleaned,false)
+  assert.equal(reads,1)
 })
 
-for (const protection of ['pin','reference'] as const) test(`a ${protection} added during warmup prevents cleanup`,t=>{
+for (const protection of ['pin','reference'] as const) test(`a ${protection} added during warmup prevents cleanup`,async t=>{
   const f=fixture(t)
   let reads=0,cleaned=false
-  afterMotionRead(t,()=>{
+  afterReferenceScan(t,()=>{
     if(++reads!==1)return
     if(protection==='pin')f.database.exec('UPDATE storage_artifacts SET pinned=1')
     else f.database.prepare('INSERT INTO remotion_assets VALUES(42,?)').run(f.filename)
   })
-  assert.throws(()=>f.guard.withCleanupLock(()=>{cleaned=true}),protection==='pin' ? /pinned/ : /shared input reference/)
+  await assert.rejects(()=>f.guard.withCleanupLock(()=>{cleaned=true}),/ownership changed/)
   assert.equal(cleaned,false)
-  assert.equal(reads,2)
+  assert.equal(reads,1)
   assert.doesNotThrow(()=>f.database.exec('UPDATE storage_artifacts SET pinned=0'),'a failed validation releases its reservation')
 })
 
-test('other connections cannot add a pin or reference during cleanup but can write after it',t=>{
+test('a pin arriving between the scan and write reservation prevents cleanup',async t=>{
+  const f=fixture(t),exec=Database.prototype.exec
+  let cleaned=false
+  t.mock.method(Database.prototype,'exec',function(this: Database.Database,sql: string) {
+    if(sql==='BEGIN IMMEDIATE')f.database.exec('UPDATE storage_artifacts SET pinned=1')
+    return exec.call(this,sql)
+  })
+  await assert.rejects(()=>f.guard.withCleanupLock(()=>{cleaned=true}),/ownership changed before cleanup/)
+  assert.equal(cleaned,false)
+  assert.doesNotThrow(()=>f.database.exec('UPDATE storage_artifacts SET pinned=0'))
+})
+
+test('other connections cannot add a pin or reference during cleanup but can write after it',async t=>{
   const f=fixture(t)
   f.database.pragma('busy_timeout=0')
   let cleaned=false
-  f.guard.withCleanupLock(()=>{
+  await f.guard.withCleanupLock(()=>{
     assert.throws(()=>f.database.exec('UPDATE storage_artifacts SET pinned=1'),{code:'SQLITE_BUSY'})
     assert.throws(()=>f.database.prepare('INSERT INTO remotion_assets VALUES(42,?)').run(f.filename),{code:'SQLITE_BUSY'})
     cleaned=true
   })
   assert.equal(cleaned,true)
   assert.doesNotThrow(()=>f.database.exec('UPDATE storage_artifacts SET pinned=1'))
-  assert.throws(()=>f.guard.withCleanupLock(()=>assert.fail('pinned media must be retained')),/pinned/)
+  await assert.rejects(()=>f.guard.withCleanupLock(()=>assert.fail('pinned media must be retained')),/pinned/)
 })
 
-test('a failed cleanup releases the write reservation without hiding the error',t=>{
+test('a failed cleanup releases the write reservation without hiding the error',async t=>{
   const f=fixture(t),failure=new Error('filesystem removal failed')
   f.database.pragma('busy_timeout=0')
-  assert.throws(()=>f.guard.withCleanupLock(()=>{throw failure}),error=>error===failure)
+  await assert.rejects(()=>f.guard.withCleanupLock(()=>{throw failure}),error=>error===failure)
   assert.doesNotThrow(()=>f.database.exec('UPDATE storage_artifacts SET pinned=1'))
 })
 
-test('an existing writer causes bounded lock acquisition to retain the cache',t=>{
+test('an existing writer causes bounded lock acquisition to retain the cache',async t=>{
   const f=fixture(t)
   f.database.exec('BEGIN IMMEDIATE')
   try {
-    assert.throws(()=>f.guard.withCleanupLock(()=>assert.fail('cleanup cannot run without its reservation')),{code:'SQLITE_BUSY'})
+    await assert.rejects(()=>f.guard.withCleanupLock(()=>assert.fail('cleanup cannot run without its reservation')),{code:'SQLITE_BUSY'})
   } finally {f.database.exec('ROLLBACK')}
-  assert.doesNotThrow(()=>f.guard.withCleanupLock(()=>{}))
+  await assert.doesNotReject(()=>f.guard.withCleanupLock(()=>{}))
 })

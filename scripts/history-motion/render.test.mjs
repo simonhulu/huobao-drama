@@ -3,8 +3,8 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {execFileSync} from 'node:child_process';
-import {createRequire} from 'node:module';
+import childProcess,{execFileSync} from 'node:child_process';
+import {createRequire,syncBuiltinESMExports} from 'node:module';
 import {buildCaptions,cleanupHistoryMotionRenderCache,fileSha256,freezePlan,renderHistoryMotion,validateGraphic,validateMap,validateOutput,validatePlan,visualTypeForShot} from './render.mjs';
 import {mapSceneAssetKey} from './scene-assets.mjs';
 import {applyShotcraftDesign} from './shotcraft.mjs';
@@ -312,6 +312,49 @@ test('direct renderer cleanup still releases an unreferenced cache with a readab
   const f=await completedCache(t);cacheReferenceDatabase(t,f);
   const result=await cleanupHistoryMotionRenderCache(f.output,{referenceOptions:{projectRoot:f.directory}});
   assert.equal(result.status,'completed');assert.ok(result.logicalBytesRemoved>0);
+});
+
+test('a blocked SQLite reference worker times out and retains the completed movie and entire cache',{timeout:15000},async t=>{
+  const f=await completedCache(t),database=cacheReferenceDatabase(t,f);
+  execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','color=c=0x355b52:s=192x108:r=30',
+    '-f','lavfi','-i','sine=frequency=500:sample_rate=48000','-t','0.2','-c:v','libx264',
+    '-pix_fmt','yuv420p','-c:a','aac','-y',f.output]);
+  const movieSha=await fileSha256(f.output);
+  f.report.sha256=movieSha;f.saveReport();
+  const originalFork=childProcess.fork;
+  let child,childExit,ticks=0;
+  const fork=t.mock.method(childProcess,'fork',function(...args){
+    child=Reflect.apply(originalFork,this,args);
+    childExit=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));
+    database.exec('BEGIN EXCLUSIVE');
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(()=>{fork.mock.restore();syncBuiltinESMExports();});
+  const timer=setInterval(()=>ticks++,10),started=Date.now();
+  let result;
+  try {
+    result=await cleanupHistoryMotionRenderCache(f.output,{referenceOptions:{projectRoot:f.directory}});
+  } finally {
+    clearInterval(timer);
+    if(database.inTransaction)database.exec('ROLLBACK');
+  }
+  assert.equal(result.status,'retained');
+  assert.match(result.reason,/5000 ms read budget/);
+  assert.ok(Date.now()-started<7500,'finished media must not wait for SQLite busy_timeout');
+  assert.ok(ticks>10,'the parent event loop must remain responsive during the native SQLite wait');
+  assert.equal(fork.mock.callCount(),1);
+  assert.equal((await childExit).signal,'SIGKILL');
+  assert.deepEqual(result.removedDirectories,[]);
+  assert.equal(result.logicalBytesRemoved,0);
+  assert.ok(fs.existsSync(f.bundle));
+  assert.ok(fs.existsSync(path.join(f.publicDir,'assets')));
+  assert.equal(await fileSha256(f.output),movieSha);
+  assert.doesNotThrow(()=>execFileSync('ffmpeg',['-v','error','-i',f.output,'-f','null','-']));
+  const report=JSON.parse(fs.readFileSync(f.output+'.json','utf8'));
+  assert.equal(report.status,'completed');
+  assert.equal(report.qa.technical,'passed');
+  assert.equal(report.cacheCleanup.status,'retained');
 });
 
 test('successful render cache cleanup preserves delivery, originals, fonts and evidence',async t=>{

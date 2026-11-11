@@ -470,14 +470,13 @@ export async function cleanupHistoryMotionRenderCache(output, {retainCache=false
           : /^(?:(?:\d+\.)?bundle\.js(?:\.map)?|index\.html|favicon\.ico)$/.test(relative), 'Bundle contains an unrecorded file');
       }
       referenceGuard=createHistoryMotionRenderCacheGuard(outputPath,[...bundleFiles,...publicFiles],referenceOptions);
-      referenceGuard.withCleanupLock(()=>{
+      await referenceGuard.withCleanupLock(()=>{
         if(fs.existsSync(outputPath+'.lock') || fs.existsSync(outputPath+'.partial.mp4')){recordable=false;throw Error('Render became active before cache cleanup');}
         deleting=true;
         // Both trees are disposable only after every frozen input has an intact
         // original outside them. Keep public/fonts and all manifests/evidence.
         for(const [directory,files] of [[bundleDir,bundleFiles],[publicAssets,publicFiles]]) {
           if(!fs.existsSync(directory))continue;
-          referenceGuard.assertUnreferenced();
           if(fs.existsSync(outputPath+'.lock') || fs.existsSync(outputPath+'.partial.mp4')){recordable=false;throw Error('Render became active before cache cleanup');}
           const bytes=files.reduce((total,filename)=>total+fs.statSync(filename).size,0);
           fs.rmSync(directory,{recursive:true});

@@ -4,16 +4,16 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 // The renderer runs this source directly under Node's TypeScript support;
 // compiled backend consumers resolve the emitted JavaScript instead.
-const { createSourceMediaReferenceInspector } = await import(new URL(import.meta.url.endsWith('.ts')
+const { checkSourceMediaReferences } = await import(new URL(import.meta.url.endsWith('.ts')
   ? './storage-source-references.ts' : './storage-source-references.js',import.meta.url).href) as typeof import('./storage-source-references.js')
 
 const defaultProjectRoot = fileURLToPath(new URL('../../../',import.meta.url)).replace(/\/$/,'')
 const within = (directory: string, filename: string) => filename === directory || filename.startsWith(directory+path.sep)
 export interface RenderCacheReferenceOptions { projectRoot?: string; databasePath?: string }
 
-/** One whole-group check, reused only while the database stays unchanged. No migrations. */
+/** Isolated whole-group check, validated under the cleanup reservation. No migrations. */
 export function createHistoryMotionRenderCacheGuard(output: string, files: string[], options: RenderCacheReferenceOptions = {}): {
-  assertUnreferenced: () => void; withCleanupLock: (cleanup: () => void) => void; close: () => void
+  assertUnreferenced: () => Promise<void>; withCleanupLock: (cleanup: () => void) => Promise<void>; close: () => void
 } {
   const outputPath = path.resolve(output)
   const root = options.projectRoot ? path.resolve(options.projectRoot)
@@ -26,7 +26,8 @@ export function createHistoryMotionRenderCacheGuard(output: string, files: strin
     .map(directory => path.join(directory,'storage-preserve.json'))
   let database: Database.Database | undefined, checkedVersion: number | undefined
   let databaseFilename: string | undefined, databaseIdentity: fs.Stats | undefined
-  let inspect: ReturnType<typeof createSourceMediaReferenceInspector> | undefined
+  const input = {directory:jobDirectory,files,ownerType:'history-motion' as const,
+    ownerId:motionId || `standalone:${outputPath}`}
   const prepare = () => {
     for (const marker of preserveMarkers) {
       try { fs.lstatSync(marker); throw Error('Render cache has an explicit preservation marker') }
@@ -40,39 +41,26 @@ export function createHistoryMotionRenderCacheGuard(output: string, files: strin
       if (!info.isFile() || info.isSymbolicLink() || fs.realpathSync(filename) !== filename) throw Error('Render reference database is not an ordinary local file')
       database = new Database(filename,{readonly:true,fileMustExist:true})
       databaseFilename = filename; databaseIdentity = info
-      inspect = createSourceMediaReferenceInspector(database,{directory:jobDirectory,files,ownerType:'history-motion',
-        ownerId:motionId || `standalone:${outputPath}`},root)
     }
   }
-  const rejectReferences = (references: ReturnType<ReturnType<typeof createSourceMediaReferenceInspector>>) => {
+  const rejectReferences = (references: Awaited<ReturnType<typeof checkSourceMediaReferences>>) => {
     if (references.length) throw Error(`Render cache retained: ${references.some(ref => ref.reason === 'pinned') ? 'pinned' : 'shared input reference'}`)
   }
-  const assertUnreferenced = () => {
+  const assertUnreferenced = async () => {
     prepare()
     if (!database) return
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const before = database.pragma('data_version',{simple:true}) as number
-      if (before === checkedVersion) return
-      const references = inspect!()
-      const after = database.pragma('data_version',{simple:true}) as number
-      rejectReferences(references)
-      if (before === after) { checkedVersion = after; return }
-      // Other production can update progress during the first expensive scan.
-      // Re-read current data; unchanged JSON reuses only its parsed reference result.
-    }
-    throw Error('Render cache ownership changed while checking; cache retained')
-  }
-  const withCleanupLock = (cleanup: () => void) => {
-    prepare()
-    if (!database) { cleanup(); return }
-    // Expensive initial parsing never holds a write reservation. It is only a
-    // warmup; the latest state is rechecked below while other writers are blocked.
+    checkedVersion = undefined
     const before = database.pragma('data_version',{simple:true}) as number
-    if (before !== checkedVersion) {
-      rejectReferences(inspect!())
-      const after = database.pragma('data_version',{simple:true}) as number
-      checkedVersion = before === after ? after : undefined
-    }
+    const references = await checkSourceMediaReferences(input,{projectRoot:root!,databasePath:databaseFilename!,
+      isolated:true,timeoutMs:5000})
+    const after = database.pragma('data_version',{simple:true}) as number
+    rejectReferences(references)
+    if (before !== after) throw Error('Render cache ownership changed while checking; cache retained')
+    checkedVersion = after
+  }
+  const withCleanupLock = async (cleanup: () => void) => {
+    await assertUnreferenced()
+    if (!database) { cleanup(); return }
     const info = fs.lstatSync(databaseFilename!)
     if (!info.isFile() || info.isSymbolicLink() || info.dev !== databaseIdentity!.dev || info.ino !== databaseIdentity!.ino) {
       throw Error('Render reference database changed; cache retained')
@@ -80,7 +68,10 @@ export function createHistoryMotionRenderCacheGuard(output: string, files: strin
     const reservation = new Database(databaseFilename!,{fileMustExist:true,timeout:1000})
     try {
       reservation.exec('BEGIN IMMEDIATE')
-      assertUnreferenced()
+      prepare()
+      if (database.pragma('data_version',{simple:true}) !== checkedVersion) {
+        throw Error('Render cache ownership changed before cleanup; cache retained')
+      }
       // The renderer supplies synchronous filesystem removal only. No browser,
       // network work or await may escape this short critical section.
       cleanup()
