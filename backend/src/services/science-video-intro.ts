@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -225,9 +226,20 @@ function renderProgress(options: ScienceVideoIntroPreviewOptions, totalSeconds: 
   }
 }
 
+function renderThreadCount(kind: 'DECODE' | 'ENCODE' | 'FILTER', fallback: number) {
+  const requested = Number(process.env[`SCIENCE_COMPOSITION_${kind}_THREADS`])
+  return String(Math.min(4, os.availableParallelism(), Number.isSafeInteger(requested) && requested > 0 ? requested : fallback))
+}
+
 async function runRender(args: string[], signal: AbortSignal, report: RenderProgress) {
   signal.throwIfAborted()
-  const rendering = exec('ffmpeg', ['-progress', 'pipe:1', '-stats_period', '1', ...args],
+  const decodeThreads = renderThreadCount('DECODE', 1), encodeThreads = renderThreadCount('ENCODE', 2)
+  const filterThreads = renderThreadCount('FILTER', 1)
+  // Codec thread options belong to each input or output, rather than the entire command.
+  const boundedArgs = args.slice(0, -1).flatMap(value => value === '-i' ? ['-threads:v', decodeThreads, value] : [value])
+  const rendering = exec('ffmpeg', ['-progress', 'pipe:1', '-stats_period', '1',
+    '-filter_threads', filterThreads, '-filter_complex_threads', filterThreads,
+    ...boundedArgs, '-threads:v', encodeThreads, args.at(-1)!],
     { signal, killSignal: 'SIGKILL', timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
   const closed = new Promise<void>(resolve => rendering.child.once('close', () => resolve()))
   const abort = () => { rendering.child.kill('SIGKILL') }

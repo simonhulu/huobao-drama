@@ -8,6 +8,7 @@ import { getHistorySource, requireCurrentHistoryScript } from './history-script-
 import { ensureHistoryDualProductionSchema, recordHistoryRefinedBackfill, type HistoryProductionMode } from './history-video-deliveries.js'
 import { getHistoryProductionStates } from './history-production-state.js'
 import { needsHistoryScriptCondensation } from './history-script-preparation.js'
+import { historyAutomationSourceIds } from './history-video-publication-scope.js'
 
 interface ProductionRow {
   source_id:number; script_sha256:string; huasheng_job_id:number; motion_job_id:string|null; episode_id:number|null;
@@ -86,6 +87,7 @@ let running:Promise<void>|undefined
 type ProductionFactory=Pick<ReturnType<typeof getHistoryFactory>,'production'|'startFromSource'|'startEpisode'>
 interface ProductionDependencies {
   sourceIds?:number[];
+  motionOnly?:boolean;
   queue?:Pick<HistoryHuashengService,'produce'|'getJob'|'checkProduction'>;
   factory?:ProductionFactory; exporter?:Pick<HistoryHuashengExportService,'enqueue'>;
   deliverCompletedMotion?:(job:MotionJob,factory:ProductionFactory,assertCurrent:()=>void)=>Promise<void>;
@@ -110,7 +112,8 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
     return Promise.reject(new HuashengQueueError('制作需要明确选择至多 100 个有效文稿编号 sourceIds',400))
   }
   const sourceIds=requested===undefined ? undefined : [...new Set(requested)]
-  if(sourceIds?.length===0 || sourceIds===undefined && process.env.HISTORY_HUASHENG_WORKER_DISABLED==='1')return Promise.resolve()
+  const motionOnly=dependencies.motionOnly===true
+  if(sourceIds?.length===0 || !motionOnly && sourceIds===undefined && process.env.HISTORY_HUASHENG_WORKER_DISABLED==='1')return Promise.resolve()
   if(running && sourceIds===undefined)return running
   const previous=running
   const scope=sourceIds ? `AND source_id IN (${sourceIds.map(()=>'?').join(',')})` : ''
@@ -120,18 +123,19 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
     if(previous)await previous.catch(()=>{})
     ensureHistoryDualProductionSchema(sql)
     const hasExportJobs=!!sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_huasheng_export_jobs'").get()
-    const rows=sql.prepare(`SELECT * FROM history_dual_production WHERE (huasheng_state IN ('pending','started') OR motion_state IN ('pending','started')) ${scope} ORDER BY updated_at,created_at ${limit}`).all(...(sourceIds || [])) as ProductionRow[]
+    const active=motionOnly ? "motion_state IN ('pending','started')" : "(huasheng_state IN ('pending','started') OR motion_state IN ('pending','started'))"
+    const rows=sql.prepare(`SELECT * FROM history_dual_production WHERE ${active} ${scope} ORDER BY updated_at,created_at ${limit}`).all(...(sourceIds || [])) as ProductionRow[]
     // Reconcile failed projections separately so old failures cannot consume
     // the admission slots for accepted work. This only follows the original job.
     rows.push(...sql.prepare(`SELECT * FROM history_dual_production
       WHERE motion_state='failed' AND motion_job_id IS NOT NULL
-        AND huasheng_state NOT IN ('pending','started') AND next_check_at<=?
+        ${motionOnly ? '' : "AND huasheng_state NOT IN ('pending','started')"} AND next_check_at<=?
         ${scope}
       ORDER BY next_check_at,created_at ${limit}`).all(Date.now(),...(sourceIds || [])) as ProductionRow[])
     // Older projections completed at export admission. Reconcile only their
     // original tasks so a missing delivery remains visible and recoverable.
     rows.push(...sql.prepare(`SELECT * FROM history_dual_production
-      WHERE production_mode='dual' AND huasheng_state IN ('completed','failed')
+      WHERE production_mode='dual' ${motionOnly ? "AND motion_state='completed' AND motion_job_id IS NOT NULL" : "AND huasheng_state IN ('completed','failed')"}
         AND motion_state NOT IN ('pending','started') AND next_check_at<=?
         AND NOT (motion_state='failed' AND motion_job_id IS NOT NULL)
         ${scope}
@@ -141,14 +145,14 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
     const currentStates=new Map(getHistoryProductionStates(sql,[...sources.values()].filter(source=>!!source)
       .map(source=>({id:source!.id,title:source!.title,rewrittenScript:source!.rewrittenScript,provenance:source!})))
       .map(state=>[state.scriptId,state]))
-    const queue=rows.some(row=>row.production_mode!=='motion_backfill')
+    const queue=!motionOnly && rows.some(row=>row.production_mode!=='motion_backfill')
       ? dependencies.queue || (await import('./history-huasheng.js')).getHistoryHuashengService() : undefined
     const factory=dependencies.factory || (await import('./history-factory.js')).getHistoryFactory()
     let motionJobs:MotionJob[]|undefined
     for(const row of rows) {
       const key=[row.source_id,row.script_sha256] as const
       const set=(branch:'huasheng'|'motion',state:string,error:string|null=null)=>sql.prepare(`UPDATE history_dual_production SET ${branch}_state=?,${branch}_error=?,updated_at=? WHERE source_id=? AND script_sha256=?`).run(state,error,new Date().toISOString(),...key)
-      if(!['pending','started'].includes(row.motion_state) && !['pending','started'].includes(row.huasheng_state)) {
+      if(!['pending','started'].includes(row.motion_state) && (motionOnly || !['pending','started'].includes(row.huasheng_state))) {
         sql.prepare('UPDATE history_dual_production SET next_check_at=? WHERE source_id=? AND script_sha256=?').run(Date.now()+60000,...key)
       }
       try {
@@ -158,7 +162,7 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
         if(!current || digest(requireCurrentHistoryScript(current))!==row.script_sha256)throw Error('正文已更新，原制作记录保留，请为新稿开始制作')
       }
       try {if(!source || digest(requireCurrentHistoryScript(source))!==row.script_sha256)throw Error('正文已更新，原制作记录保留，请为新稿开始制作')}
-      catch(error){if(['pending','started'].includes(row.huasheng_state))set('huasheng','failed',errorText(error));if(['pending','started'].includes(row.motion_state))set('motion','failed',errorText(error));continue}
+      catch(error){if(!motionOnly && ['pending','started'].includes(row.huasheng_state))set('huasheng','failed',errorText(error));if(['pending','started'].includes(row.motion_state))set('motion','failed',errorText(error));continue}
       const editionState=currentStates.get(row.source_id)
       const huashengEdition=editionState?.versions.find(version=>version.producer==='huasheng')
       const motionEdition=editionState?.versions.find(version=>version.producer==='motion')
@@ -170,7 +174,7 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
         && !!motionEdition.producerJobId && (!row.motion_job_id || motionEdition.producerJobId===row.motion_job_id)
       const huashengProduced=huashengEdition?.videoAvailable || huashengSubmitted
       const motionProduced=motionEdition?.videoAvailable || motionSubmitted
-      if(huashengProduced && row.production_mode!=='motion_backfill') {
+      if(!motionOnly && huashengProduced && row.production_mode!=='motion_backfill') {
         set('huasheng','completed');row.huasheng_state='completed'
       }
       if(motionSubmitted || motionEdition?.videoAvailable && row.motion_state==='pending') {
@@ -179,7 +183,7 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
       if(row.production_mode==='dual' && row.motion_state==='completed' && row.motion_job_id && !motionProduced) {
         set('motion','started');row.motion_state='started'
       }
-      if(row.production_mode!=='motion_backfill' && row.huasheng_state==='pending') {
+      if(!motionOnly && row.production_mode!=='motion_backfill' && row.huasheng_state==='pending') {
         try {
           const result=await queue!.produce([row.huasheng_job_id])
           const state=result.results[0]
@@ -231,7 +235,7 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
           set('motion','started')
         } catch(error){motionState='failed';set('motion','failed',errorText(error))}
       }
-      if(row.production_mode!=='motion_backfill' && !huashengProduced) {
+      if(!motionOnly && row.production_mode!=='motion_backfill' && !huashengProduced) {
       let huasheng:ReturnType<HistoryHuashengService['getJob']>|undefined
       try { huasheng=queue!.getJob(row.huasheng_job_id) }
       catch(error) { set('huasheng','failed',errorText(error)) }
@@ -299,8 +303,11 @@ export function runHistoryDualProductionPass(dependencies:ProductionDependencies
   return running
 }
 export function startHistoryDualProductionWorker() {
-  if(process.env.TASK_WORKER_DISABLED==='1')return {stop:async()=>{}}
-  const tick=()=>void runHistoryDualProductionPass().catch(error=>console.error('[history-dual-production]',errorText(error)))
+  const independent=process.env.HISTORY_MOTION_AUTOMATION_ENABLED==='1'
+  if(process.env.TASK_WORKER_DISABLED==='1' && !independent)return {stop:async()=>{}}
+  const sourceIds=independent ? historyAutomationSourceIds() : undefined
+  const motionOnly=process.env.HISTORY_HUASHENG_WORKER_DISABLED==='1'
+  const tick=()=>{if(!running)void runHistoryDualProductionPass({sourceIds,motionOnly}).catch(error=>console.error('[history-dual-production]',errorText(error)))}
   const timer=setInterval(tick,5000);timer.unref();tick()
   return {stop:async()=>{clearInterval(timer);await running}}
 }

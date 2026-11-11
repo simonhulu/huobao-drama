@@ -251,6 +251,58 @@ else{const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},args,{stdio:'inherit'});
   assert.deepEqual(await fs.readdir(f.directory), [])
 })
 
+test('render thread pools stay bounded for every input, filter and hardware-to-software attempt', async t => {
+  const f = await fixture(t), realFfmpeg = (await exec('which', ['ffmpeg'])).stdout.trim()
+  const bin = path.join(f.root, 'bounded-bin'), attempts = path.join(f.root, 'render-arguments.jsonl')
+  await fs.mkdir(bin)
+  const wrapper = `#!${process.execPath}\nconst fs=require('node:fs');const cp=require('node:child_process');const args=process.argv.slice(2);
+if(args.includes('-progress'))fs.appendFileSync(${JSON.stringify(attempts)},JSON.stringify(args)+'\\n');
+if(args[args.indexOf('-c:v')+1]==='h264_videotoolbox')process.exit(1);
+const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},args,{stdio:'inherit'});process.exit(r.status??1);\n`
+  await fs.writeFile(path.join(bin, 'ffmpeg'), wrapper, { mode: 0o700 })
+  const names = ['SCIENCE_COMPOSITION_DECODE_THREADS', 'SCIENCE_COMPOSITION_ENCODE_THREADS', 'SCIENCE_COMPOSITION_FILTER_THREADS']
+  const previous = names.map(name => process.env[name]), previousPath = process.env.PATH
+  process.env.PATH = `${bin}${path.delimiter}${previousPath || ''}`
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath
+    names.forEach((name, index) => { if (previous[index] === undefined) delete process.env[name]; else process.env[name] = previous[index] })
+  })
+  t.mock.method(os, 'platform', () => 'darwin')
+  t.mock.method(os, 'arch', () => 'x64')
+  let cores = 4
+  t.mock.method(os, 'availableParallelism', () => cores)
+  const cases = [
+    { name: 'defaults', cores: 4, values: [undefined, undefined, undefined], expected: ['1', '2', '1'] },
+    { name: 'configured', cores: 4, values: ['3', '4', '2'], expected: ['3', '4', '2'] },
+    { name: 'cpu-cap', cores: 1, values: ['3', '4', '2'], expected: ['1', '1', '1'] },
+    { name: 'hard-cap', cores: 64, values: ['100', '100', '100'], expected: ['4', '4', '4'] },
+    { name: 'invalid', cores: 4, values: ['0', '-2', 'Infinity'], expected: ['1', '2', '1'] },
+  ]
+  for (const item of cases) {
+    cores = item.cores
+    names.forEach((name, index) => { if (item.values[index] === undefined) delete process.env[name]; else process.env[name] = item.values[index] })
+    await fs.writeFile(attempts, '')
+    const result = await prepareScienceVideoWithIntro({ ...f, directory: path.join(f.root, item.name) },
+      { signal: signal(), introPath: f.introPath, presenterPath: f.presenterPath, presenterFraming: 'half-body' })
+    const records = (await fs.readFile(attempts, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+    assert.deepEqual(records.map(args => args[args.indexOf('-c:v') + 1]), ['h264_videotoolbox', 'libx264'])
+    for (const args of records) {
+      for (const option of ['-filter_threads', '-filter_complex_threads']) {
+        assert.ok(args.includes(option), `${item.name}: ${option} must be explicit`)
+        assert.equal(args[args.indexOf(option) + 1], item.expected[2])
+      }
+      const inputs = args.flatMap((value, index) => value === '-i' ? [index] : [])
+      assert.equal(inputs.length, 3)
+      for (const index of inputs) assert.deepEqual(args.slice(index - 2, index), ['-threads:v', item.expected[0]])
+      assert.deepEqual(args.slice(-3, -1), ['-threads:v', item.expected[1]], `${item.name}: the encoder has its own output scope`)
+    }
+    const metadata = await probe(result.videoPath), video = metadata.streams.find((stream: any) => stream.codec_type === 'video')
+    assert.deepEqual([video.width, video.height, video.avg_frame_rate], [320, 180, '15/1'])
+    assert.ok(metadata.streams.some((stream: any) => stream.codec_type === 'audio'))
+    assert.ok(Math.abs(Number(metadata.format.duration) - 1.8) < .2)
+  }
+})
+
 test('cancellation keeps original media and leaves no successful manifest or partial output', async t => {
   const f = await fixture(t), controller = new AbortController(), mainHash = await digest(f.videoPath)
   const reason = new Error('cancel intro preparation')

@@ -133,6 +133,69 @@ function connectionFailure(error: unknown, signal?: AbortSignal): HuashengBrowse
   return failure
 }
 
+const HOMEPAGE_MEDIA_GUARD = `(() => {
+  const homepage = () => location.href === 'https://www.huasheng.cn/';
+  if (!homepage()) return;
+  const quiet = () => {
+    if (!homepage() || document.querySelector('[aria-busy="true"],[role="progressbar"],[data-state="loading"]')) return;
+    const inputs = [...document.querySelectorAll('input,textarea,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')];
+    if (inputs.some(input => {
+      if (input instanceof HTMLInputElement) {
+        if (['hidden', 'checkbox', 'radio', 'range', 'number', 'color', 'button', 'submit', 'reset'].includes(input.type)) return false;
+        if (input.type === 'file') return !!input.files?.length;
+      }
+      return String('value' in input ? input.value : input.textContent || '').trim();
+    })) return;
+    if (/(?:正在)(?:生成|制作|导出|上传)|(?:生成|制作|导出|上传|处理)中|取消导出|取消上传/.test(document.body?.innerText || '')) return;
+    for (const video of document.querySelectorAll('video')) {
+      video.autoplay = false;
+      video.removeAttribute('autoplay');
+      video.pause();
+    }
+  };
+  if (!window.__huobaoHomepageMediaGuard) {
+    window.__huobaoHomepageMediaGuard = true;
+    document.addEventListener('play', event => { if (event.target instanceof HTMLVideoElement) quiet(); }, true);
+    document.addEventListener('DOMContentLoaded', quiet, {once: true});
+  }
+  quiet();
+})()`
+
+/** Best-effort homepage media handling must not initialize retained project tabs. */
+export async function quietHuashengHomepageMedia(browser: Browser, signal?: AbortSignal): Promise<void> {
+  const deadline = Date.now() + 2000
+  try {
+    for (const target of browser.targets()) {
+      signal?.throwIfAborted()
+      if (Date.now() >= deadline) break
+      if (target.type() !== 'page' || target.url() !== HOME_URL) continue
+      const targetDeadline = Math.min(deadline, Date.now() + 500)
+      const remaining = () => Math.max(1, targetDeadline - Date.now())
+      let session: CDPSession | undefined
+      try {
+        session = await preparationStep(target.createCDPSession(), signal, remaining(), value => value.detach())
+        signal?.throwIfAborted()
+        if (Date.now() >= targetDeadline) continue
+        await preparationStep(session.send('Runtime.evaluate', { expression: HOMEPAGE_MEDIA_GUARD, returnByValue: true },
+          { timeout: remaining() }), signal, remaining())
+      } catch { signal?.throwIfAborted() }
+      finally {
+        if (session) {
+          const detached = session.detach().catch(() => {})
+          if (Date.now() < targetDeadline) await preparationStep(detached, undefined, remaining()).catch(() => {})
+        }
+      }
+    }
+  } catch { signal?.throwIfAborted() }
+}
+
+async function guardNewHomepageMedia(page: Page, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted()
+  try { await preparationStep(page.evaluateOnNewDocument(HOMEPAGE_MEDIA_GUARD), signal, 500) }
+  catch { signal?.throwIfAborted() }
+  signal?.throwIfAborted()
+}
+
 async function connectBrowser(account?: HuashengBrowserConfig, signal?: AbortSignal, attempts = 2): Promise<Browser> {
   const settings = resolveHuashengBrowserConfig(account)
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -165,6 +228,7 @@ async function connectBrowser(account?: HuashengBrowserConfig, signal?: AbortSig
           throw error
         }
       }
+      await quietHuashengHomepageMedia(browser, signal)
       signal?.throwIfAborted()
       return browser
     } catch (error) {
@@ -265,6 +329,7 @@ export async function createHuashengTemporaryPage(browser: Browser, signal?: Abo
     if (!page) throw new Error('Huasheng page target closed during initialization')
     signal?.throwIfAborted()
     temporaryTargets.set(page, owned)
+    await guardNewHomepageMedia(page, signal)
     return page
   } catch (error) {
     // Cancellation can arrive after Chrome creates the tab but before its ID
@@ -341,6 +406,7 @@ export async function openHuashengBrowser(account?: HuashengBrowserConfig, signa
       const target = targets.find(isHomepage) ?? targets.find(candidate => candidate.type() === 'page' && candidate.url() === 'about:blank')
       const page = target ? await preparationStep(target.page(), signal) : await newPage()
       if (!page) throw new Error('Huasheng page target closed')
+      await guardNewHomepageMedia(page, signal)
       if (!isHomepage(page.target())) await preparationStep(page.goto(HOME_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }), signal, 46_000)
       await preparationStep(page.bringToFront(), signal)
       return await readBrowserStatus(page, signal)

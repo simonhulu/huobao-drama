@@ -121,6 +121,54 @@ test('one accepted manuscript starts both producers once and retries reuse the d
   assert.equal(state.episode_id,500+value.id)
 })
 
+for(const huashengState of ['pending','started','failed','completed']) {
+  test(`motion-only recovery proceeds with Huasheng ${huashengState}, preserving its branch and excluded sources`,async()=>{
+    const old=process.env.HISTORY_HUASHENG_WORKER_DISABLED
+    process.env.HISTORY_HUASHENG_WORKER_DISABLED='1'
+    try {
+      const value=source(),outside=source(),f=fixture(value.id)
+      recordHistoryDualProduction(db.$client,value.id,hash(script),1)
+      recordHistoryDualProduction(db.$client,outside.id,hash(script),2)
+      db.$client.prepare("UPDATE history_dual_production SET huasheng_state=?,huasheng_error='原花生额度或登录错误' WHERE source_id=?").run(huashengState,value.id)
+      const excluded=historyDualProduction(outside.id)[0]
+      const dependencies={...f.deps,sourceIds:[value.id],motionOnly:true}
+      Object.defineProperty(dependencies,'queue',{get:()=>assert.fail('motion-only must not load the Huasheng service')})
+      Object.defineProperty(dependencies,'exporter',{get:()=>assert.fail('motion-only must not load the export service')})
+      await runHistoryDualProductionPass(dependencies)
+      await runHistoryDualProductionPass(dependencies)
+      const row=historyDualProduction(value.id)[0]!
+      assert.equal(row.motion_state,'started')
+      assert.equal(row.production_mode,'dual')
+      assert.equal(row.huasheng_state,huashengState)
+      assert.equal(row.huasheng_error,'原花生额度或登录错误')
+      assert.equal(row.export_requested,0)
+      assert.deepEqual(historyDualProduction(outside.id)[0],excluded)
+      assert.deepEqual(f.counts(),{huashengCalls:0,motionCalls:1})
+    } finally {
+      if(old===undefined)delete process.env.HISTORY_HUASHENG_WORKER_DISABLED
+      else process.env.HISTORY_HUASHENG_WORKER_DISABLED=old
+    }
+  })
+}
+
+test('motion-only reconciliation follows its original completed job even while the Huasheng branch is pending',async()=>{
+  const value=source(),f=fixture(value.id),job={id:`motion-${value.id}`,status:'completed',scriptId:value.id,
+    script,profile:'16:9',factory:{episodeId:500+value.id}}
+  recordHistoryDualProduction(db.$client,value.id,hash(script),1)
+  db.$client.prepare("UPDATE history_dual_production SET motion_state='failed',motion_job_id=?,episode_id=? WHERE source_id=?")
+    .run(job.id,job.factory.episodeId,value.id)
+  f.deps.factory.production.find=(id:string)=>{assert.equal(id,job.id);return job}
+  let delivered=0
+  f.deps.deliverCompletedMotion=async(existing:unknown)=>{assert.equal(existing,job);delivered++}
+  const dependencies={...f.deps,motionOnly:true}
+  Object.defineProperty(dependencies,'queue',{get:()=>assert.fail('no Huasheng access')})
+  await runHistoryDualProductionPass(dependencies)
+  assert.equal(historyDualProduction(value.id)[0]!.motion_state,'completed')
+  assert.equal(historyDualProduction(value.id)[0]!.huasheng_state,'pending')
+  assert.equal(delivered,1)
+  assert.deepEqual(f.counts(),{huashengCalls:0,motionCalls:0})
+})
+
 for (const status of ['needs_attention', 'waiting_login', 'failed', 'canceled']) {
   test(`dual reconciliation does not poll a ${status} cloud project`, async()=>{
     const value=source(),f=fixture(value.id),jobId=completedHuasheng(value.id,{status,productionStatus:'creating'})

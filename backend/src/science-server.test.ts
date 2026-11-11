@@ -40,7 +40,7 @@ function startup(env: NodeJS.ProcessEnv = {}, entry = 'science-server.ts') {
       startHistoryVideoPublicationWorker() {}, startHistoryDualProductionWorker() {}, startHistoryFactoryWorker() {},
       listRegisteredTaskTypes: () => [],
       startTaskWorkerLoop: () => {
-        assert.notEqual(env.TASK_WORKER_DISABLED, '1', 'Delivery opt-in must not start general task workers')
+        assert.notEqual(env.TASK_WORKER_DISABLED, '1', 'Science opt-ins must not start general task workers')
         return {}
       },
     })
@@ -62,8 +62,29 @@ for (const entry of ['science-server.ts', 'index.ts']) {
     assert.deepEqual(startup({ TASK_WORKER_DISABLED: '1', SCIENCE_DELIVERY_AUTOMATION_ENABLED: '1' }, entry), ['workflow'])
   })
 
+  test(`${entry} collection opt-in recovers batches without enabling delivery or general workers`, () => {
+    assert.deepEqual(startup({ TASK_WORKER_DISABLED: '1', SCIENCE_COLLECTION_AUTOMATION_ENABLED: '1' }, entry), ['collection'])
+  })
+
+  test(`${entry} both science opt-ins recover delivery and batches without general workers`, () => {
+    assert.deepEqual(startup({ TASK_WORKER_DISABLED: '1', SCIENCE_DELIVERY_AUTOMATION_ENABLED: '1', SCIENCE_COLLECTION_AUTOMATION_ENABLED: '1' }, entry), ['workflow', 'collection'])
+  })
+
   test(`${entry} permits explicitly disabling delivery without disabling collection workers`, () => {
     assert.deepEqual(startup({ SCIENCE_DELIVERY_AUTOMATION_ENABLED: '0' }, entry), ['collection'])
+  })
+
+  test(`${entry} permits explicitly disabling collection without disabling delivery`, () => {
+    assert.deepEqual(startup({ SCIENCE_COLLECTION_AUTOMATION_ENABLED: '0' }, entry), ['workflow'])
+    assert.deepEqual(startup({ TASK_WORKER_DISABLED: '1', SCIENCE_DELIVERY_AUTOMATION_ENABLED: '1', SCIENCE_COLLECTION_AUTOMATION_ENABLED: '0' }, entry), ['workflow'])
+  })
+
+  test(`${entry} permits explicitly disabling delivery while collection is opted in`, () => {
+    assert.deepEqual(startup({ TASK_WORKER_DISABLED: '1', SCIENCE_DELIVERY_AUTOMATION_ENABLED: '0', SCIENCE_COLLECTION_AUTOMATION_ENABLED: '1' }, entry), ['collection'])
+  })
+
+  test(`${entry} both explicit opt-outs disable science recovery while general workers are enabled`, () => {
+    assert.deepEqual(startup({ SCIENCE_DELIVERY_AUTOMATION_ENABLED: '0', SCIENCE_COLLECTION_AUTOMATION_ENABLED: '0' }, entry), [])
   })
 
   test(`${entry} delivery opt-out keeps all science recovery off with task workers disabled`, () => {
