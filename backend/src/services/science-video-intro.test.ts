@@ -6,8 +6,12 @@ import path from 'node:path'
 import os from 'node:os'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { getEventListeners } from 'node:events'
+import { performance } from 'node:perf_hooks'
+import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { prepareScienceVideoWithIntro, prepareScienceVideoWithIntroOnly, prepareScienceVideoIntroPreview, resolveScienceVideoIntroSource } from './science-video-intro.js'
+import { prepareScienceVideoWithIntro, prepareScienceVideoWithIntroOnly, prepareScienceVideoIntroPreview, resolveScienceVideoIntroSource,
+  runScienceVideoIntroRender, scienceVideoIntroRenderTimeoutMs } from './science-video-intro.js'
 
 const exec = promisify(execFile)
 const signal = () => new AbortController().signal
@@ -57,6 +61,201 @@ async function frequency(filename: string, timestamp: number) {
   for (let index = 1; index < samples.length; index++) if (samples[index - 1]! < 0 && samples[index]! >= 0) crossings++
   return crossings * sampleRate / samples.length
 }
+
+async function controlledRender(t: TestContext, passthroughPrefix = false) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'science-render-deadline-'))
+  const control = path.join(root, 'control.json'), pidFile = path.join(root, 'encoder.pid'), attempts = path.join(root, 'attempts.jsonl')
+  const realFfmpeg = (await exec('which', ['ffmpeg'])).stdout.trim()
+  let revision = 0, pid = 0
+  await fs.writeFile(control, JSON.stringify({ revision, seconds: 0 }))
+  const wrapper = `#!${process.execPath}
+const fs=require('node:fs'),cp=require('node:child_process'),args=process.argv.slice(2);
+if(args.includes('-progress'))fs.appendFileSync(${JSON.stringify(attempts)},JSON.stringify(args)+'\\n');
+if(!args.includes('-progress')||(${passthroughPrefix}&&args.includes('-an'))){const r=cp.spawnSync(${JSON.stringify(realFfmpeg)},args,{stdio:'inherit'});process.exit(r.status??1)}
+process.on('SIGTERM',()=>{});
+fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));
+let revision=-1;
+const poll=()=>{let data;try{data=JSON.parse(fs.readFileSync(${JSON.stringify(control)},'utf8'))}catch{return}
+if(data.revision===revision)return;revision=data.revision;
+if(data.exit)process.exit(0);
+process.stdout.write('out_time_us='+Math.round(data.seconds*1000000)+'\\nspeed=0.25x\\nprogress=continue\\n');};
+poll();setInterval(poll,10);
+`
+  await fs.writeFile(path.join(root, 'ffmpeg'), wrapper, { mode: 0o700 })
+  const previousPath = process.env.PATH
+  process.env.PATH = `${root}${path.delimiter}${previousPath || ''}`
+  t.after(async () => {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath
+    if (pid) { try { process.kill(pid, 'SIGKILL') } catch {} }
+    await fs.rm(root, { recursive: true, force: true })
+  })
+  const controller = new AbortController(), records: number[] = []
+  async function started() {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      try { pid = Number(await fs.readFile(pidFile, 'utf8')); return } catch {}
+      await delay(10)
+    }
+    assert.fail('Controlled encoder did not start')
+  }
+  async function received(count: number) {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (records.length >= count) { pid = Number(await fs.readFile(pidFile, 'utf8')); return }
+      await delay(10)
+    }
+    assert.fail('Controlled encoder did not report its expected progress')
+  }
+  return {controller, records, attempts, received, started,
+    start(totalSeconds: number) {
+      const running = runScienceVideoIntroRender(['-y', path.join(root, 'output.mp4')], controller.signal,
+        seconds => records.push(seconds), totalSeconds)
+      void running.catch(() => {})
+      return running
+    },
+    async progress(seconds: number) {
+      const count = records.length + 1
+      await fs.writeFile(control, JSON.stringify({ revision: ++revision, seconds }))
+      await received(count)
+    },
+    async finish() { await fs.writeFile(control, JSON.stringify({ revision: ++revision, exit: true })) },
+    assertClosed() {
+      assert.ok(pid > 1)
+      assert.throws(() => process.kill(pid, 0), (error: NodeJS.ErrnoException) => error.code === 'ESRCH')
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0, 'the renderer removes its abort listeners after close')
+    },
+  }
+}
+
+test('render budgets scale with media duration and remain bounded for short and long inputs', () => {
+  assert.equal(scienceVideoIntroRenderTimeoutMs(2), 30 * 60_000)
+  assert.equal(scienceVideoIntroRenderTimeoutMs(715.469333), Math.ceil(715.469333 * 8_000) + 10 * 60_000)
+  assert.ok(scienceVideoIntroRenderTimeoutMs(715.469333) > 715.469333 / .25 * 1000)
+  assert.equal(scienceVideoIntroRenderTimeoutMs(1000000), 6 * 60 * 60_000)
+  for (const value of [0, -1, NaN, Infinity]) assert.throws(() => scienceVideoIntroRenderTimeoutMs(value), /时长无效/)
+})
+
+test('a long composition with advancing output survives the old 30-minute deadline', async t => {
+  const f = await controlledRender(t)
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const running = f.start(715.469333)
+  await f.received(1)
+  for (const minutes of [5, 10, 15, 20, 25, 31]) {
+    clock = minutes * 60_000
+    await f.progress(clock / 1000 * .25)
+    t.mock.timers.tick(10_000)
+  }
+  await f.finish(); await running
+  assert.equal(f.records.at(-1), 465)
+  f.assertClosed()
+})
+
+test('repeated or regressing timestamps do not extend the no-progress deadline', async t => {
+  const f = await controlledRender(t)
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const running = f.start(715.469333)
+  await f.received(1); await f.progress(1)
+  clock = 9 * 60_000
+  await f.progress(1); t.mock.timers.tick(10_000)
+  clock = 10 * 60_000 + 1
+  await f.progress(.5)
+  const rejected = assert.rejects(running, (error: any) => error.code === 'SCIENCE_COMPOSITION_STALLED' && error.signal === 'SIGKILL'
+    && error.retryable === true && !error.message.includes('SCIENCE_COMPOSITION_'))
+  t.mock.timers.tick(10_000)
+  await rejected
+  f.assertClosed()
+})
+
+test('an encoder that never emits advancing frames has a finite startup deadline', async t => {
+  const f = await controlledRender(t)
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const running = f.start(715.469333)
+  await f.received(1)
+  clock = 10 * 60_000 + 1
+  const rejected = assert.rejects(running, (error: any) => error.code === 'SCIENCE_COMPOSITION_STALLED')
+  t.mock.timers.tick(10_000)
+  await rejected
+  f.assertClosed()
+})
+
+test('continued progress cannot bypass the six-hour absolute render limit', async t => {
+  const f = await controlledRender(t)
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const running = f.start(1000000)
+  await f.received(1)
+  clock = 6 * 60 * 60_000 - 1
+  await f.progress(500); t.mock.timers.tick(10_000)
+  clock += 2
+  await f.progress(501)
+  const rejected = assert.rejects(running, (error: any) => error.code === 'SCIENCE_COMPOSITION_TIMEOUT' && error.retryable === true
+    && !error.message.includes('SCIENCE_COMPOSITION_'))
+  t.mock.timers.tick(10_000)
+  await rejected
+  f.assertClosed()
+})
+
+test('cancellation clears the watchdog and listeners and waits for the unresponsive child to close', async t => {
+  const f = await controlledRender(t)
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const intervals = t.mock.method(globalThis, 'setInterval'), clear = t.mock.method(globalThis, 'clearInterval')
+  const running = f.start(715.469333)
+  await f.received(1)
+  const rejected = assert.rejects(running, (error: any) => /abort|cancel/i.test(error.message) && error.retryable !== true)
+  f.controller.abort(new Error('cancel controlled encoder'))
+  await rejected
+  assert.equal(intervals.mock.callCount(), 1)
+  assert.ok(clear.mock.calls.some(call => call.arguments[0] === intervals.mock.calls[0]!.result))
+  f.assertClosed()
+})
+
+for (const phase of ['prefix', 'copy'] as const) test(`a stalled fast-copy ${phase} does not restart the full composition`, async t => {
+  const media = await fixture(t), reports: string[] = []
+  await exec('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15:duration=3',
+    '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=3',
+    '-c:v', 'libx264', '-preset', 'fast', '-bf', '0', '-g', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', media.videoPath])
+  const sourceHash = await digest(media.videoPath), f = await controlledRender(t, phase === 'copy')
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const running = prepareScienceVideoWithIntroOnly(media, { signal: f.controller.signal, introPath: media.introPath,
+    report: message => reports.push(message) })
+  const rejected = assert.rejects(running, (error: any) => error.code === 'SCIENCE_COMPOSITION_STALLED' && error.retryable === true)
+  await f.started()
+  clock = 10 * 60_000 + 1; t.mock.timers.tick(10_000)
+  await rejected
+  const args = (await fs.readFile(f.attempts, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+  assert.equal(args.length, phase === 'prefix' ? 1 : 2)
+  assert.equal(args.at(-1)!.includes('concat'), phase === 'copy')
+  assert.ok(reports.every(message => !message.includes('兼容模式')), reports.join('\n'))
+  assert.equal(await digest(media.videoPath), sourceHash)
+  assert.deepEqual(await fs.readdir(media.directory), [])
+  f.assertClosed()
+})
+
+test('a stalled hardware composition does not restart in software or commit partial media', async t => {
+  const media = await fixture(t), f = await controlledRender(t)
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  t.mock.method(os, 'platform', () => 'darwin')
+  t.mock.method(os, 'arch', () => 'x64')
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const running = prepareScienceVideoWithIntro(media, { signal: f.controller.signal, introPath: media.introPath,
+    presenterPath: media.presenterPath, onProgress: progress => f.records.push(progress.processedSeconds) })
+  const rejected = assert.rejects(running, (error: any) => error.code === 'SCIENCE_COMPOSITION_STALLED')
+  await f.received(1)
+  clock = 10 * 60_000 + 1; t.mock.timers.tick(10_000)
+  await rejected
+  const args = (await fs.readFile(f.attempts, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+  assert.deepEqual(args.map(item => item[item.indexOf('-c:v') + 1]), ['h264_videotoolbox'])
+  assert.deepEqual(await fs.readdir(media.directory), [])
+  f.assertClosed()
+})
 
 test('prepends the actual intro before the main, normalizes media formats and preserves both original audio segments', async t => {
   const f = await fixture(t), mainHash = await digest(f.videoPath), introHash = await digest(f.introPath)

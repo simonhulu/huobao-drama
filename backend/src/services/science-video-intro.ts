@@ -4,6 +4,7 @@ import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -231,8 +232,15 @@ function renderThreadCount(kind: 'DECODE' | 'ENCODE' | 'FILTER', fallback: numbe
   return String(Math.min(4, os.availableParallelism(), Number.isSafeInteger(requested) && requested > 0 ? requested : fallback))
 }
 
-async function runRender(args: string[], signal: AbortSignal, report: RenderProgress) {
+export function scienceVideoIntroRenderTimeoutMs(totalSeconds: number) {
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) throw new Error('科普合成时长无效')
+  return Math.min(6 * 60 * 60_000, Math.max(30 * 60_000, Math.ceil(totalSeconds * 8_000) + 10 * 60_000))
+}
+
+export async function runScienceVideoIntroRender(args: string[], signal: AbortSignal, report: RenderProgress, totalSeconds: number) {
   signal.throwIfAborted()
+  const timeoutMs = scienceVideoIntroRenderTimeoutMs(totalSeconds), startedAt = performance.now()
+  let lastProgressAt = startedAt, processedSeconds = 0, deadlineError: Error | undefined
   const decodeThreads = renderThreadCount('DECODE', 1), encodeThreads = renderThreadCount('ENCODE', 2)
   const filterThreads = renderThreadCount('FILTER', 1)
   // Codec thread options belong to each input or output, rather than the entire command.
@@ -240,10 +248,23 @@ async function runRender(args: string[], signal: AbortSignal, report: RenderProg
   const rendering = exec('ffmpeg', ['-progress', 'pipe:1', '-stats_period', '1',
     '-filter_threads', filterThreads, '-filter_complex_threads', filterThreads,
     ...boundedArgs, '-threads:v', encodeThreads, args.at(-1)!],
-    { signal, killSignal: 'SIGKILL', timeout: 30 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+    { signal, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 })
   const closed = new Promise<void>(resolve => rendering.child.once('close', () => resolve()))
   const abort = () => { rendering.child.kill('SIGKILL') }
   signal.addEventListener('abort', abort, { once: true })
+  const watchdog = setInterval(() => {
+    if (deadlineError || signal.aborted) return
+    const now = performance.now()
+    const code = now - startedAt >= timeoutMs ? 'SCIENCE_COMPOSITION_TIMEOUT'
+      : now - lastProgressAt >= 10 * 60_000 ? 'SCIENCE_COMPOSITION_STALLED' : undefined
+    if (!code) return
+    deadlineError = Object.assign(new Error(code === 'SCIENCE_COMPOSITION_TIMEOUT'
+      ? '科普合成超过时长预算，已停止原编码进程'
+      : '科普合成连续10分钟无有效进展，已停止原编码进程'),
+    { code, retryable: true, killed: true, signal: 'SIGKILL' })
+    abort()
+  }, 10_000)
+  watchdog.unref()
   const lines = createInterface({ input: rendering.child.stdout! })
   const updates = (async () => {
     const record = new Map<string, string>()
@@ -255,8 +276,11 @@ async function runRender(args: string[], signal: AbortSignal, report: RenderProg
       if (key !== 'progress') continue
       const microseconds = Number(record.get('out_time_us'))
       const speed = Number(record.get('speed')?.replace(/x$/, ''))
-      if (Number.isFinite(microseconds) && microseconds >= 0)
+      if (Number.isFinite(microseconds) && microseconds >= 0) {
+        const current = Math.min(totalSeconds, microseconds / 1_000_000)
+        if (current > processedSeconds) { processedSeconds = current; lastProgressAt = performance.now() }
         report(microseconds / 1_000_000, Number.isFinite(speed) && speed > 0 ? speed : undefined, value === 'end')
+      }
       record.clear()
     }
   })()
@@ -267,17 +291,20 @@ async function runRender(args: string[], signal: AbortSignal, report: RenderProg
     abort()
     lines.close()
     await Promise.allSettled([rendering, updates])
-    throw error
+    signal.throwIfAborted()
+    throw deadlineError || error
   } finally {
+    clearInterval(watchdog)
     lines.close()
     signal.removeEventListener('abort', abort)
-    if (signal.aborted) { abort(); await closed }
+    if (signal.aborted) abort()
+    await closed
   }
 }
 
-async function encodeVideo(args: string[], finish: string[], width: number, height: number, signal: AbortSignal, report: RenderProgress) {
+async function encodeVideo(args: string[], finish: string[], width: number, height: number, signal: AbortSignal, report: RenderProgress, totalSeconds: number) {
   const encoder = getVideoEncoderOptions({ width, height })
-  const run = (parameters: string[]) => runRender([...args, ...parameters, ...finish], signal, report)
+  const run = (parameters: string[]) => runScienceVideoIntroRender([...args, ...parameters, ...finish], signal, report, totalSeconds)
   try {
     await run(encoder)
   } catch (error) {
@@ -330,15 +357,15 @@ async function copyBodyAfterIntro(introPath: string, sourcePath: string, tempora
     await encodeVideo(['-nostdin', '-hide_banner', '-v', 'error', '-y', '-i', introPath, '-t', String(at), '-i', sourcePath,
       '-filter_complex', concatFilter(intro, { ...main, duration: at }, main.width, main.height, undefined, false), '-map', '[v]'],
     ['-an', '-pix_fmt', 'yuv420p', '-r', main.fps, '-frames:v', String(frames), '-bf', '0',
-      '-video_track_timescale', String(main.copy.timeScale), ...main.copy.colorOptions, prefix], main.width, main.height, signal, report)
+      '-video_track_timescale', String(main.copy.timeScale), ...main.copy.colorOptions, prefix], main.width, main.height, signal, report, prefixDuration)
     const quote = (filename: string) => "'" + filename.replaceAll("'", "'\\''") + "'"
     await fs.writeFile(list, `ffconcat version 1.0\nfile ${quote(prefix)}\nduration ${prefixDuration.toFixed(9)}\n`
       + `file ${quote(sourcePath)}\ninpoint ${at.toFixed(9)}\nduration ${(main.videoDuration - at).toFixed(9)}\n`, { signal })
     options.report?.('正在直接复制正文视频流并拼接原声')
-    await runRender(['-nostdin', '-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list,
+    await runScienceVideoIntroRender(['-nostdin', '-hide_banner', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list,
       '-i', introPath, '-i', sourcePath, '-filter_complex', concatAudioFilter(intro, main, 1).join(';'),
       '-map', '0:v:0', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
-      '-movflags', '+faststart', temporary], signal, report)
+      '-movflags', '+faststart', temporary], signal, report, intro.duration + main.duration)
     const output = await probeVideo(temporary, signal)
     const expectedFrames = frames + main.copy.frames - Math.round(at * fps)
     if (output.frames !== expectedFrames || Math.abs(output.videoDuration - expectedFrames / fps) > .01)
@@ -412,8 +439,10 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
     let copied = false
     if (!presenterPath) {
       try { copied = await copyBodyAfterIntro(introPath, sourcePath, temporary, intro, main, options, report) }
-      catch {
+      catch (error) {
         signal.throwIfAborted()
+        const failure = error as { code?: string }
+        if (failure.code === 'SCIENCE_COMPOSITION_TIMEOUT' || failure.code === 'SCIENCE_COMPOSITION_STALLED') throw error
         options.report?.('正文视频流复制校验未通过，正在使用兼容模式合成成片')
       }
     }
@@ -422,7 +451,7 @@ async function prepareScienceVideo(input: ScienceVideoIntroInput, options: Scien
         '-filter_complex', concatFilter(intro, main, width, height, presenterFraming), '-map', '[v]', '-map', '[a]']
       const finish = ['-pix_fmt', 'yuv420p', '-r', main.fps, '-fps_mode', 'cfr', '-c:a', 'aac', '-b:a', '192k',
         '-ar', '48000', '-ac', '2', '-movflags', '+faststart', temporary]
-      await encodeVideo(args, finish, width, height, signal, report)
+      await encodeVideo(args, finish, width, height, signal, report, totalSeconds)
     }
     const output = await probeVideo(temporary, signal)
     const [fpsNumerator, fpsDenominator = 1] = main.fps.split('/').map(Number)
