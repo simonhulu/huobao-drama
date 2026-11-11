@@ -26,6 +26,8 @@ function fixture(t: test.TestContext, config: {empty?: boolean; enabled?: boolea
     },
     knownYoutubeIds: () => new Set([...jobs.values()].map(job => new URL(job.sourceUrl).searchParams.get('v')!)),
     jobsForCollection: id => structuredClone([...jobs.values()].filter(job => job.collectionId === id)),
+    jobsForCollections: ids => new Map([...ids].map(id => [id, structuredClone([...jobs.values()].filter(job => job.collectionId === id))])),
+    jobForCollection(collectionId, id) { const job = jobs.get(id); return job?.collectionId === collectionId ? structuredClone(job) : undefined },
     create(input, options = {}) {
       assert.equal(options.defer, true); assert.equal(options.collectionOnly, true)
       const job = makeJob(options.collectionId!, {title: input.title, sourceUrl: input.sourceUrl,
@@ -92,7 +94,7 @@ function fixture(t: test.TestContext, config: {empty?: boolean; enabled?: boolea
     fs.writeFileSync(filename, JSON.stringify(run))
     return {id, run, filename, jobs: [...jobs.values()].filter(job => job.collectionId === id)}
   }
-  return {root, service, jobs, calls, visits, seed, options,
+  return {root, service, jobs, calls, visits, seed, options, workflow,
     authorize(fields: Record<string, any> = {}) {
       return seed(0, {status: 'completed', processing: {status: 'completed', message: 'Finished'},
         createdAt: later(1000), updatedAt: later(1000), ...fields})
@@ -115,6 +117,38 @@ test('refill is explicitly disabled by default', async t => {
   const h = fixture(t, {enabled: false})
   h.service.runAutomaticRecovery(); await h.collected()
   assert.equal(h.visits.length, 0); assert.equal(h.intents().length, 0)
+})
+
+test('one recovery pass groups collection reads without rescanning each blocked batch', t => {
+  const h = fixture(t)
+  for (let index = 0; index < 12; index++) h.seed(1, {status: 'needs_attention',
+    processing: {status: 'needs_attention', message: '请登录原华生账号'}, updatedAt: later(2000)},
+  {status: 'needs_attention', message: '请登录原华生账号'})
+  const other = h.seed(1, {status: 'needs_attention', huashengAccountName: 'hs-other',
+    processing: {status: 'needs_attention', message: '请登录原华生账号'}, updatedAt: later(2000)},
+  {status: 'needs_attention', message: '请登录原华生账号'})
+  const grouped = t.mock.method(h.workflow, 'jobsForCollections')
+  const individual = t.mock.method(h.workflow, 'jobsForCollection')
+  assert.deepEqual(h.service.runAutomaticRecovery(), [])
+  assert.equal(grouped.mock.calls.length, 2, 'recovery and refill use separate fresh snapshots')
+  assert.equal(individual.mock.calls.length, 0, 'blocker comparisons and sorting reuse the grouped snapshot')
+  assert.equal([...grouped.mock.calls[0]!.arguments[0]].length, 13)
+  assert.equal([...grouped.mock.calls[1]!.arguments[0]].length, 12)
+  assert.ok(![...grouped.mock.calls[1]!.arguments[0]].includes(other.id))
+  assert.deepEqual(h.calls, [])
+  assert.deepEqual(h.visits, [])
+  assert.equal(h.intents().length, 0)
+})
+
+test('recovery does not scan jobs while another process owns the only active batch', t => {
+  const h = fixture(t, {enabled: false})
+  h.seed(1, {ownerPid: process.ppid, processing: {status: 'running', message: 'Foreign producer'}})
+  const grouped = t.mock.method(h.workflow, 'jobsForCollections')
+  const individual = t.mock.method(h.workflow, 'jobsForCollection')
+  assert.deepEqual(h.service.runAutomaticRecovery(), [])
+  assert.equal(grouped.mock.calls.length, 0)
+  assert.equal(individual.mock.calls.length, 0)
+  assert.deepEqual(h.calls, [])
 })
 
 for (const pending of [0, 1, 2, 3, 8]) test(`refill keeps the low/high watermarks with ${pending} consumable jobs`, async t => {
@@ -189,7 +223,7 @@ import fs from 'node:fs';
 import {ScienceCollectionService} from ${JSON.stringify(new URL('./science-collection.ts', import.meta.url).href)};
 const service = new ScienceCollectionService({stateRoot:${JSON.stringify(h.root)},workflow:{
   validateBatchAccounts:(_mode,hs,bj)=>({huashengAccountName:hs,baijiahaoAccountName:bj}),
-  knownYoutubeIds:()=>new Set(),jobsForCollection:()=>[],
+  knownYoutubeIds:()=>new Set(),jobsForCollection:()=>[],jobsForCollections:ids=>new Map([...ids].map(id=>[id,[]])),jobForCollection:()=>undefined,
 },collect:async ({signal})=>{
   fs.appendFileSync(${JSON.stringify(dispatches)},process.pid+'\\n');
   await new Promise((resolve,reject)=>{if(signal.aborted)reject(signal.reason);else signal.addEventListener('abort',()=>reject(signal.reason),{once:true})});
@@ -249,6 +283,8 @@ const {ScienceCollectionService}=await import(${JSON.stringify(new URL('./scienc
 const service=new ScienceCollectionService({stateRoot:${JSON.stringify(h.root)},workflow:{
  validateBatchAccounts:(_mode,hs,bj)=>({huashengAccountName:hs,baijiahaoAccountName:bj}),
  knownYoutubeIds:()=>new Set(),jobsForCollection:id=>jobs.filter(job=>job.collectionId===id),
+ jobsForCollections:ids=>new Map([...ids].map(id=>[id,jobs.filter(job=>job.collectionId===id)])),
+ jobForCollection:(collectionId,id)=>jobs.find(job=>job.collectionId===collectionId&&job.id===id),
  runBatchJob:async(id,mode,signal)=>{fs.appendFileSync(${JSON.stringify(dispatches)},'process '+process.pid+'\\n');await wait(signal)},
 },collect:async({signal})=>{fs.appendFileSync(${JSON.stringify(dispatches)},'collect '+process.pid+'\\n');await wait(signal)}});
 process.on('message',async()=>{await service.stop();process.disconnect()});
@@ -515,7 +551,7 @@ test('an unsuccessful recovery needs a newer successful result before another at
   assert.deepEqual(h.calls, [old.jobs[1]!.id])
 })
 
-for (const change of ['processing-stop', 'collection-stop', 'scope-edited'] as const)
+for (const change of ['processing-stop', 'collection-stop', 'collection-stopped', 'scope-edited'] as const)
   test(`automatic recovery preserves a concurrent ${change} after selection`, t => {
     const h = fixture(t)
     h.service.saveSettings({youtubeChannels: []})
@@ -529,6 +565,7 @@ for (const change of ['processing-stop', 'collection-stop', 'scope-edited'] as c
       current.updatedAt = later(4000)
       if (change === 'processing-stop') { current.stopRequested = true; current.processing.status = 'stopped' }
       if (change === 'collection-stop') current.collectionStopRequested = true
+      if (change === 'collection-stopped') { current.collectionStopRequested = true; current.collection.status = 'stopped' }
       if (change === 'scope-edited') current.targetCount = 100
       changed = JSON.stringify(current)
       fs.writeFileSync(old.filename, changed)

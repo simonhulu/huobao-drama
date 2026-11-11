@@ -77,6 +77,8 @@ function fixture(t: test.TestContext, config: {
     },
     knownYoutubeIds: () => new Set([...jobs.values()].map(job => new URL(job.sourceUrl).searchParams.get('v')!)),
     jobsForCollection: id => structuredClone([...jobs.values()].filter(job => job.collectionId === id)),
+    jobsForCollections: ids => new Map([...ids].map(id => [id, workflow.jobsForCollection(id)])),
+    jobForCollection(collectionId, id) { const job = jobs.get(id); return job?.collectionId === collectionId ? structuredClone(job) : undefined },
     validateBatchAccounts: config.validateAccounts || ((_mode, hs, bj) => ({ huashengAccountName: hs ?? 'hs-one', baijiahaoAccountName: bj ?? 'bj-one' })),
     cancel(id) {
       canceled.push(id)

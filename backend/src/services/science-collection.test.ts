@@ -60,6 +60,8 @@ function fixture(t: any, config: {
     },
     knownYoutubeIds() { return new Set([...jobs.values()].map(job => new URL(job.sourceUrl).searchParams.get('v')!)) },
     jobsForCollection(id) { return structuredClone([...jobs.values()].filter(job => job.collectionId === id)) },
+    jobsForCollections(ids) { return new Map([...ids].map(id => [id, workflow.jobsForCollection(id)])) },
+    jobForCollection(collectionId, id) { const job = jobs.get(id); return job?.collectionId === collectionId ? structuredClone(job) : undefined },
     cancel(id) {
       canceled.push(id)
       const job = jobs.get(id)!

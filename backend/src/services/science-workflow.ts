@@ -292,6 +292,20 @@ export class ScienceWorkflowService {
     return new Set(this.all(true).map(job => parseHistoryYoutubeUrl(job.sourceUrl).videoId).filter((id): id is string => Boolean(id)))
   }
   jobsForCollection(collectionId: string) { return this.all(true).filter(job => job.collectionId === collectionId).map(job => this.publicJob(job)) }
+  jobsForCollections(collectionIds: Iterable<string>) {
+    const grouped = new Map([...collectionIds].map(id => [id, [] as ScienceJob[]]))
+    if (!grouped.size) return grouped
+    for (const job of this.all(true)) {
+      const jobs = job.collectionId ? grouped.get(job.collectionId) : undefined
+      if (jobs) jobs.push(this.publicJob(job))
+    }
+    return grouped
+  }
+  jobForCollection(collectionId: string, jobId: string) {
+    if (!fs.existsSync(this.filename(jobId))) return undefined
+    const job = this.read(jobId, true)
+    return job.collectionId === collectionId ? this.publicJob(job) : undefined
+  }
   validateBatchAccounts(mode: ScienceBatchMode, huashengAccountName?: string | null, baijiahaoAccountName?: string | null) {
     const huashengAccount = this.selectedAccount(this.hs, huashengAccountName, true)
     const baijiahaoAccount = this.selectedAccount(this.bjh, baijiahaoAccountName, true)

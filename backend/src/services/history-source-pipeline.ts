@@ -360,6 +360,7 @@ export async function releaseHistoryDownloaderMedia(source: HistorySource, optio
 // checkpoint even if a crash happens between deleting files and saving cleanup.
 async function releaseSourceMedia(source: HistorySource, storageRoot: string,
   releaseDownload?: typeof releaseHistoryDownloaderMedia, signal?: AbortSignal): Promise<HistorySource> {
+  signal?.throwIfAborted()
   if (!['douyin', 'youtube'].includes(source.platform) || getHistorySourceArtifactState(source).transcript !== 'current') return source
   const media = JSON.parse(source.mediaJson) as SourceMedia
   const cleanup = { ...media.cleanup }
@@ -371,6 +372,7 @@ async function releaseSourceMedia(source: HistorySource, storageRoot: string,
       const directory = sourceDirectory(source.id, root)
       const result = await releaseSourceMediaFiles({ directory, ownerType: 'history-source', ownerId: String(source.id),
         sourceSha256: media.videoSha256!, transcriptSha256: textHash(source.rawTranscript!),
+        referenceOptions: { isolated: true, timeoutMs: 5000 },
         fileHashes: Object.fromEntries([['source.mp4', media.videoSha256!],
           ...(media.chunks || []).map((chunk, index) => [`audio-${String(index).padStart(3, '0')}.wav`, chunk.sha256])]),
         matchesFile: name => /^(?:source\.mp4|audio-\d+\.wav)(?:\.part)?$/.test(name)
@@ -383,17 +385,23 @@ async function releaseSourceMedia(source: HistorySource, storageRoot: string,
       delete media.videoPath
       media.chunks = media.chunks?.map(({ path: _path, ...chunk }) => chunk)
     } catch (error) {
+      signal?.throwIfAborted()
       errors.push(`本地临时素材清理失败（${(error as NodeJS.ErrnoException).code || '目录不可用'}），可稍后重试`)
     }
     cleanup.releasedBytes = (cleanup.releasedBytes || 0) + freed
   }
+  signal?.throwIfAborted()
   if (source.platform === 'douyin' && releaseDownload && media.downloadId && !cleanup.downloaderReleasedAt) {
     try {
       const result = await releaseDownload(source, { signal })
       cleanup.downloaderReleasedAt = new Date().toISOString()
       cleanup.downloaderFreedBytes = (cleanup.downloaderFreedBytes || 0) + result.freedBytes
-    } catch (error) { errors.push(`下载器缓存清理待重试：${safeError(error)}`) }
+    } catch (error) {
+      signal?.throwIfAborted()
+      errors.push(`下载器缓存清理待重试：${safeError(error)}`)
+    }
   }
+  signal?.throwIfAborted()
   cleanup.error = errors.length ? errors.join('；') : undefined
   media.cleanup = cleanup
   const mediaJson = JSON.stringify(media)

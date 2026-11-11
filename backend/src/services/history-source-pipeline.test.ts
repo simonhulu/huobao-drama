@@ -1,10 +1,13 @@
-import test, { beforeEach } from 'node:test'
+import test, { beforeEach, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync } from 'node:fs'
-import { access, mkdir, readFile, rename, symlink, unlink, writeFile } from 'node:fs/promises'
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
+import { access, mkdir, readFile, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import childProcess from 'node:child_process'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
+import Database from 'better-sqlite3'
 import type { HistoryPipelineDependencies } from './history-source-pipeline.js'
 
 const dbDir = mkdtempSync(join(tmpdir(), 'huobao-history-pipeline-db-'))
@@ -59,6 +62,94 @@ function youtubeSource() {
   return storeHistoryYoutubeSource({videoId: 'VprFAzjTTuM', sourceUrl: 'https://www.youtube.com/watch?v=VprFAzjTTuM',
     title: '频道原视频', authorName: '指定频道', observedAt: new Date().toISOString(), collectionUrl: 'https://www.youtube.com/@history/videos'})
 }
+
+function blockedCleanup(t: TestContext, onScan?: () => void) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'huobao-history-cleanup-')))
+  mkdirSync(join(root, 'data'))
+  const database = new Database(join(root, 'data/huobao_drama.db'))
+  database.exec('CREATE TABLE remotion_assets(project_id INTEGER,local_path TEXT)')
+  const exits: Promise<{ code: number | null; signal: NodeJS.Signals | null }>[] = []
+  const children: childProcess.ChildProcess[] = []
+  const originalFork = childProcess.fork
+  const fork = t.mock.method(childProcess, 'fork', function(this: typeof childProcess, ...args: Parameters<typeof originalFork>) {
+    const child = Reflect.apply(originalFork, this, args)
+    children.push(child)
+    exits.push(new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal }))))
+    database.exec('BEGIN EXCLUSIVE')
+    onScan?.()
+    return child
+  })
+  syncBuiltinESMExports()
+  t.after(async () => {
+    fork.mock.restore(); syncBuiltinESMExports()
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await Promise.all(exits)
+    if (database.inTransaction) database.exec('ROLLBACK')
+    database.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  return { storageRoot: join(root, 'data/storage/history-scripts'), database, fork, exits }
+}
+
+test('blocked source cleanup retains media and continues correction without blocking the producer event loop', { timeout: 15000 }, async t => {
+  const record = youtubeSource(), f = fixture(), blocked = blockedCleanup(t)
+  const directory = join(blocked.storageRoot, String(record.id))
+  let ticks = 0
+  const timer = setInterval(() => ticks++, 10), started = Date.now()
+  let completed: Awaited<ReturnType<typeof processHistorySource>>
+  try {
+    completed = await processHistorySource(record.id, { ...f, storageRoot: blocked.storageRoot })
+  } finally {
+    clearInterval(timer)
+    if (blocked.database.inTransaction) blocked.database.exec('ROLLBACK')
+  }
+  assert.equal(blocked.fork.mock.callCount(), 1, 'production source cleanup must use the isolated worker')
+  assert.equal((await blocked.exits[0]!).signal, 'SIGKILL')
+  assert.ok(Date.now() - started < 7500, 'narration must not wait for SQLite busy_timeout')
+  assert.ok(ticks > 10, 'the producer event loop must remain responsive during the SQLite wait')
+  assert.equal(completed.status, 'needs_review')
+  assert.equal(getHistorySourceArtifactState(completed).transcript, 'current')
+  assert.equal(requireCurrentHistoryScript(completed), completed.rewrittenScript)
+  assert.match(JSON.parse(completed.mediaJson).cleanup.error, /SOURCE_MEDIA_GUARD_FAILED/)
+  assert.equal(JSON.parse(completed.mediaJson).cleanup.localReleasedAt, undefined)
+  assert.deepEqual(await readFile(join(directory, 'source.mp4')), Buffer.alloc(128, 1))
+  assert.deepEqual(await readFile(join(directory, 'audio-000.wav')), Buffer.alloc(128, 1))
+  const manifest = JSON.parse(await readFile(join(directory, 'storage-release.json'), 'utf8'))
+  assert.equal(manifest.status, 'retained')
+  assert.equal(manifest.retention.code, 'SOURCE_MEDIA_GUARD_FAILED')
+  assert.match(manifest.retention.message, /5000 ms read budget/)
+  assert.equal(manifest.files.every((file: { status: string }) => file.status === 'retained'), true)
+  assert.deepEqual(f.counts, { download: 1, probe: 1, extract: 1, asr: 1, correct: 1, recreate: 1, rewrite: 0 })
+  await assert.rejects(access(join(directory, 'process.lock')))
+
+  blocked.fork.mock.restore(); syncBuiltinESMExports()
+  const retried = await processHistorySource(record.id, { ...f, storageRoot: blocked.storageRoot })
+  assert.equal(retried.rewrittenScript, completed.rewrittenScript)
+  assert.deepEqual(f.counts, { download: 1, probe: 1, extract: 1, asr: 1, correct: 1, recreate: 1, rewrite: 0 })
+  assert.equal(JSON.parse(retried.mediaJson).cleanup.error, undefined)
+  assert.ok(JSON.parse(retried.mediaJson).cleanup.localReleasedAt)
+  await assert.rejects(access(join(directory, 'source.mp4')))
+})
+
+test('cancellation during blocked source cleanup preserves ASR and prevents all later provider calls', { timeout: 15000 }, async t => {
+  const record = source(), f = fixture(), controller = new AbortController()
+  const blocked = blockedCleanup(t, () => controller.abort(new Error('Stopped during source cleanup')))
+  let downloaderCalls = 0
+  f.dependencies.releaseDownload = async () => { downloaderCalls++; return { freedBytes: 0 } }
+  await assert.rejects(processHistorySource(record.id, { ...f, storageRoot: blocked.storageRoot, signal: controller.signal }), /Stopped during source cleanup/)
+  assert.equal(blocked.fork.mock.callCount(), 1)
+  assert.equal((await blocked.exits[0]!).signal, 'SIGKILL')
+  assert.equal(downloaderCalls, 0, 'cancellation must not be swallowed as a cleanup warning')
+  assert.deepEqual(f.counts, { download: 1, probe: 1, extract: 1, asr: 1, correct: 0, recreate: 0, rewrite: 0 })
+  const stored = getHistorySource(record.id)!
+  assert.equal(stored.status, 'transcribed')
+  assert.equal(getHistorySourceArtifactState(stored).transcript, 'current')
+  const directory = join(blocked.storageRoot, String(record.id))
+  assert.deepEqual(await readFile(join(directory, 'source.mp4')), Buffer.alloc(128, 1))
+  assert.deepEqual(await readFile(join(directory, 'audio-000.wav')), Buffer.alloc(128, 1))
+  assert.equal(JSON.parse(await readFile(join(directory, 'storage-release.json'), 'utf8')).status, 'retained')
+  await assert.rejects(access(join(directory, 'process.lock')))
+})
 
 test('expired YouTube production starts a new draft while reusing ASR and preserving the prior draft and delivery', async () => {
   const record = youtubeSource(), f = fixture()

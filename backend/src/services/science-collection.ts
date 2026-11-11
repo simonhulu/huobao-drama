@@ -66,7 +66,7 @@ interface StoredRun extends ScienceCollectionRun {
   pendingProcessingRequest?: boolean
   collectionOwnerPid?: number; collectionStopRequested?: boolean
 }
-type Workflow = Pick<ScienceWorkflowService, 'create' | 'knownYoutubeIds' | 'jobsForCollection' | 'runBatchJob' | 'validateBatchAccounts' | 'cancel'>
+type Workflow = Pick<ScienceWorkflowService, 'create' | 'knownYoutubeIds' | 'jobsForCollection' | 'jobsForCollections' | 'jobForCollection' | 'runBatchJob' | 'validateBatchAccounts' | 'cancel'>
 export interface ScienceCollectionOptions { stateRoot?: string; workflow?: Workflow; collect?: typeof collectHistoryYoutubeVideos; now?: () => number }
 interface LiveRun { id: string; token: string; controller: AbortController; done: Promise<void> }
 // Shared by service instances, including test/route instances, so reads cannot orphan a live worker.
@@ -268,7 +268,8 @@ export class ScienceCollectionService {
     try {
       if (automaticRecovery) {
         const current = this.read(run.id)
-        if (current.stopRequested || current.collectionStopRequested || JSON.stringify(current) !== JSON.stringify(run))
+        if (current.stopRequested || current.collectionStopRequested && current.collection?.status !== 'stopped'
+          || JSON.stringify(current) !== JSON.stringify(run))
           throw new ScienceWorkflowError('原批次状态已变化，保留最新记录等待下次核对')
         run = current
       }
@@ -407,18 +408,18 @@ export class ScienceCollectionService {
       && /(?:执行|服务|本机).*中断/.test(`${job.message} ${item.message} ${run.message}`)
     return true
   }
-  private hasAutomaticWork(run: StoredRun) {
-    const jobs = new Map(this.workflow.jobsForCollection(run.id).map(job => [job.id, job]))
+  private hasAutomaticWork(run: StoredRun, snapshot = this.workflow.jobsForCollection(run.id)) {
+    const jobs = new Map(snapshot.map(job => [job.id, job]))
     if (run.items.every(item => ['completed', 'deleted'].includes(item.status))) return true
     return run.items.some(item => (!run.retry || (run.pendingRetryJobIds ?? run.retry.jobIds).includes(item.jobId))
       && (this.canAutomaticallyProcess(run, item, jobs.get(item.jobId))
         || Boolean(jobs.get(item.jobId) && achieved(jobs.get(item.jobId)!, run))))
   }
-  private runProcessingQueue(explicitRunId?: string) {
+  private runProcessingQueue(explicitRunId?: string, jobsForRun?: (run: StoredRun) => ScienceJob[]) {
     if (this.stopping || live.has(this.stateRoot)) return []
     const run = this.all().reverse().find(run => run.processing?.status === 'queued'
       && !run.stopRequested && run.collection && !isActive(run.collection.status) && run.collection.status !== 'interrupted'
-      && run.items.length && (run.id === explicitRunId || run.pendingProcessingRequest || this.hasAutomaticWork(run)))
+      && run.items.length && (run.id === explicitRunId || run.pendingProcessingRequest || this.hasAutomaticWork(run, jobsForRun?.(run))))
     if (!run) return []
     try { this.launch(run, run.id !== explicitRunId && !run.pendingProcessingRequest); return [run.id] }
     catch (error) {
@@ -471,7 +472,7 @@ export class ScienceCollectionService {
     })
     let startedHere = false
     try {
-      let job = this.workflow.jobsForCollection(id).find(value => value.id === jobId)
+      let job = this.workflow.jobForCollection(id, jobId)
       let observedExecution = false
       let result: ScienceJob
       for (;;) {
@@ -481,7 +482,7 @@ export class ScienceCollectionService {
           observedExecution = true
           await delay(250, undefined, { signal })
           this.verifyOwner(id, signal)
-          job = this.workflow.jobsForCollection(id).find(value => value.id === jobId)
+          job = this.workflow.jobForCollection(id, jobId)
         }
         if (!job) throw new ScienceWorkflowError('原批次任务不存在或归属已变化')
         if (job.deletedAt) { skipDeleted(); return }
@@ -493,7 +494,7 @@ export class ScienceCollectionService {
         try { startedHere = true; result = await this.workflow.runBatchJob(jobId, run.mode, signal); break }
         catch (error) {
           signal.throwIfAborted()
-          job = this.workflow.jobsForCollection(id).find(value => value.id === jobId)
+          job = this.workflow.jobForCollection(id, jobId)
           if (!job || !awaitingWorkflow(job)) throw error
         }
       }
@@ -506,7 +507,7 @@ export class ScienceCollectionService {
         : `已完成 ${current.counts.completed}${run.targetCount === null ? '' : `/${run.targetCount}`} 条${run.mode === 'drafts' ? '二创稿' : run.mode === 'videos' ? '成片' : '百家号作品'}`)
     } catch (error) {
       signal.throwIfAborted()
-      if (this.workflow.jobsForCollection(id).some(job => job.id === jobId && job.deletedAt)) { skipDeleted(); return }
+      if (this.workflow.jobForCollection(id, jobId)?.deletedAt) { skipDeleted(); return }
       this.update(id, current => {
         const saved = current.items.find(value => value.jobId === jobId)!
         saved.status = error && typeof error === 'object' && (error as { retryable?: boolean }).retryable === true ? 'paused' : 'failed'
@@ -518,7 +519,7 @@ export class ScienceCollectionService {
     } finally {
       // User stops revoke this batch's retry chain; service shutdown remains recoverable.
       if (signal.aborted && startedHere && this.read(id).stopRequested === true) {
-        const job = this.workflow.jobsForCollection(id).find(value => value.id === jobId)
+        const job = this.workflow.jobForCollection(id, jobId)
         if (job && awaitingWorkflow(job)) this.workflow.cancel(jobId)
       }
       if (!signal.aborted) this.update(id, current => {
@@ -538,7 +539,7 @@ export class ScienceCollectionService {
         this.verifyOwner(id, signal)
         if (automaticRecovery) {
           const item = this.read(id).items.find(item => item.jobId === jobId)
-          const job = this.workflow.jobsForCollection(id).find(job => job.id === jobId)
+          const job = this.workflow.jobForCollection(id, jobId)
           if (!item || !this.canAutomaticallyProcess(run, item, job)) continue
         }
         if (!['completed', 'deleted'].includes(this.read(id).items.find(item => item.jobId === jobId)?.status || '')) await this.processItem(id, jobId, signal)
@@ -563,7 +564,7 @@ export class ScienceCollectionService {
       const item = run.items.find(item => !visited.has(item.jobId) && !['completed', 'deleted'].includes(item.status))
       if (!item) break
       visited.add(item.jobId)
-      const job = automaticRecovery ? this.workflow.jobsForCollection(id).find(job => job.id === item.jobId) : undefined
+      const job = automaticRecovery ? this.workflow.jobForCollection(id, item.jobId) : undefined
       if (automaticRecovery && !this.canAutomaticallyProcess(run, item, job)) continue
       await this.processItem(id, item.jobId, signal)
     }
@@ -806,15 +807,20 @@ export class ScienceCollectionService {
       }
     }
     if (live.has(this.stateRoot)) return started
-    const queued = this.runProcessingQueue()
-    if (queued.length) return [...started, ...queued]
     const runs = this.all()
+    let jobsByRun: Map<string, ScienceJob[]> | undefined
+    const jobsForRun = (run: StoredRun) => {
+      jobsByRun ??= this.workflow.jobsForCollections(runs.map(run => run.id))
+      return jobsByRun.get(run.id) ?? this.workflow.jobsForCollection(run.id)
+    }
+    const queued = this.runProcessingQueue(undefined, jobsForRun)
+    if (queued.length) return [...started, ...queued]
     if (runs.some(run => isActive(run.status) && (!run.processing || isActive(run.processing.status)))) return started
     const run = runs.find(run => (run.processing?.status === 'interrupted' || !run.processing && run.status === 'interrupted')
       && run.stopRequested !== true && !alive(run.ownerPid) && (!run.collection || !isActive(run.collection.status))
-      && this.hasAutomaticWork(run))
-      ?? runs.filter(run => this.processingBlockerRecovered(run, runs) && this.hasAutomaticWork(run))
-        .sort((a, b) => this.latestSuccessAt(b) - this.latestSuccessAt(a))[0]
+      && this.hasAutomaticWork(run, jobsForRun(run)))
+      ?? runs.filter(run => this.processingBlockerRecovered(run, runs, jobsForRun) && this.hasAutomaticWork(run, jobsForRun(run)))
+        .sort((a, b) => this.latestSuccessAt(b, jobsForRun(b)) - this.latestSuccessAt(a, jobsForRun(a)))[0]
     if (!run) return started
     try {
       this.workflow.validateBatchAccounts(run.mode, run.huashengAccountName, run.baijiahaoAccountName)
@@ -832,21 +838,21 @@ export class ScienceCollectionService {
       return started
     }
   }
-  private latestSuccessAt(run: StoredRun) {
-    return this.workflow.jobsForCollection(run.id).reduce((latest, job) => {
+  private latestSuccessAt(run: StoredRun, jobs = this.workflow.jobsForCollection(run.id)) {
+    return jobs.reduce((latest, job) => {
       const at = Date.parse(job.updatedAt)
       return achieved(job, run) && job.huashengAccountName === run.huashengAccountName
         && job.baijiahaoAccountName === run.baijiahaoAccountName && Number.isFinite(at) ? Math.max(latest, at) : latest
     }, 0)
   }
-  private processingBlockerRecovered(run: StoredRun, runs: StoredRun[]) {
+  private processingBlockerRecovered(run: StoredRun, runs: StoredRun[], jobsForRun: (run: StoredRun) => ScienceJob[]) {
     if (process.env.SCIENCE_COLLECTION_REFILL_ENABLED !== '1' || run.processing?.status !== 'needs_attention'
       || !batchBlocker(run.processing.message) || run.stopRequested || run.collectionStopRequested || alive(run.ownerPid)
       || !run.collection || !['completed', 'needs_attention'].includes(run.collection.status)) return false
     const blockedAt = Date.parse(run.updatedAt)
     return Number.isFinite(blockedAt) && runs.some(other => other.mode === run.mode
       && other.huashengAccountName === run.huashengAccountName && other.baijiahaoAccountName === run.baijiahaoAccountName
-      && this.latestSuccessAt(other) > blockedAt)
+      && this.latestSuccessAt(other, jobsForRun(other)) > blockedAt)
   }
   private refillPaused(runs: StoredRun[], settings: ScienceCollectionSettings, jobsByRun: Map<string, ScienceJob[]>) {
     const relevant = runs.filter(run => run.mode === settings.mode && run.huashengAccountName === settings.huashengAccountName
@@ -892,9 +898,9 @@ export class ScienceCollectionService {
     catch (error) { if (error instanceof ScienceWorkflowError) return []; throw error }
     try {
       const runs = this.all()
-      const jobsByRun = new Map(runs.filter(run => run.mode === settings.mode
+      const jobsByRun = this.workflow.jobsForCollections(runs.filter(run => run.mode === settings.mode
         && run.huashengAccountName === settings.huashengAccountName && run.baijiahaoAccountName === settings.baijiahaoAccountName)
-        .map(run => [run.id, this.workflow.jobsForCollection(run.id)]))
+        .map(run => run.id))
       if (this.refillPaused(runs, settings, jobsByRun)) return []
       const scope = {youtubeChannels: settings.youtubeChannels, mode: settings.mode,
         huashengAccountName: settings.huashengAccountName, baijiahaoAccountName: settings.baijiahaoAccountName}

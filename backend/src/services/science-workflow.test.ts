@@ -91,6 +91,66 @@ function fixture(t: any, overrides: Partial<ScienceWorkflowOptions> = {}) {
   return { service, route, hs, bjh, h, b, calls, root, payloads, options }
 }
 const sourceUrl = 'https://youtu.be/abcdefghijk'
+
+test('collection snapshots scan each job once and preserve ordering, deleted jobs and fresh external state', t => {
+  const h = fixture(t), one = `science-batch-${randomUUID()}`, two = `science-batch-${randomUUID()}`
+  const first = h.service.create({sourceUrl}, {defer: true, collectionId: one})
+  const second = h.service.create({sourceUrl: 'https://youtu.be/bcdefghijkl'}, {defer: true, collectionId: one})
+  const third = h.service.create({sourceUrl: 'https://youtu.be/cdefghijklm'}, {defer: true, collectionId: two})
+  h.service.create({sourceUrl: 'https://youtu.be/defghijklmn'}, {defer: true})
+  const file = path.join(h.root, 'jobs', second.id, 'job.json')
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  fs.writeFileSync(file, JSON.stringify({...stored, deletedAt: '2026-11-11T00:00:00Z', createdAt: '2099-01-01T00:00:00Z'}))
+  const reads = t.mock.method(fs, 'readFileSync')
+  const snapshot = h.service.jobsForCollections([one, two, 'empty', one])
+  assert.equal(reads.mock.calls.filter(call => String(call.arguments[0]).endsWith('/job.json')).length, 4)
+  reads.mock.restore()
+  assert.deepEqual(snapshot.get(one)!.map(job => job.id), [second.id, first.id])
+  assert.ok(snapshot.get(one)![0]!.deletedAt)
+  assert.deepEqual(snapshot.get(two)!.map(job => job.id), [third.id])
+  assert.deepEqual(snapshot.get('empty'), [])
+  snapshot.get(one)![1]!.logs.push({at: 'now', message: 'caller edit'})
+  const firstFile = path.join(h.root, 'jobs', first.id, 'job.json')
+  const external = JSON.parse(fs.readFileSync(firstFile, 'utf8'))
+  fs.writeFileSync(firstFile, JSON.stringify({...external, status: 'paused', message: '已手动暂停此任务', automaticDelivery: false}))
+  const fresh = h.service.jobsForCollections([one]).get(one)!.find(job => job.id === first.id)!
+  assert.equal(fresh.message, '已手动暂停此任务')
+  assert.equal(fresh.automaticRecoveryAllowed, false)
+  assert.ok(!fresh.logs.some(log => log.message === 'caller edit'))
+  assert.deepEqual(h.service.jobsForCollections([]), new Map())
+})
+
+test('collection snapshots retain legacy repair and dead-owner recovery before selecting jobs', t => {
+  const h = fixture(t), batch = `science-batch-${randomUUID()}`, job = h.service.create({sourceUrl}, {defer: true, collectionId: batch})
+  const file = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  fs.writeFileSync(file, JSON.stringify({...stored, status: 'running', ownerPid: 99999999}))
+  const snapshot = h.service.jobsForCollections([batch])
+  assert.equal(snapshot.get(batch)![0]!.status, 'paused')
+  assert.match(snapshot.get(batch)![0]!.message, /执行已中断/)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).ownerPid, undefined)
+  fs.writeFileSync(file, JSON.stringify({...stored, status: 'review', stage: 'review'}))
+  const repaired = h.service.jobsForCollections([batch]).get(batch)![0]!
+  assert.equal(repaired.status, 'queued')
+  assert.equal(repaired.stage, 'produce')
+})
+
+test('polling an original collection job reads only its file and rechecks external ownership and deletion', t => {
+  const h = fixture(t), batch = `science-batch-${randomUUID()}`
+  const job = h.service.create({sourceUrl}, {defer: true, collectionId: batch})
+  h.service.create({sourceUrl: 'https://youtu.be/bcdefghijkl'}, {defer: true, collectionId: batch})
+  const reads = t.mock.method(fs, 'readFileSync')
+  assert.equal(h.service.jobForCollection(batch, job.id)?.id, job.id)
+  assert.equal(reads.mock.calls.filter(call => String(call.arguments[0]).endsWith('/job.json')).length, 1)
+  reads.mock.restore()
+  const filename = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(filename, 'utf8'))
+  fs.writeFileSync(filename, JSON.stringify({...stored, deletedAt: '2026-11-11T00:00:00Z'}))
+  assert.ok(h.service.jobForCollection(batch, job.id)?.deletedAt)
+  fs.writeFileSync(filename, JSON.stringify({...stored, collectionId: `science-batch-${randomUUID()}`}))
+  assert.equal(h.service.jobForCollection(batch, job.id), undefined)
+  fs.rmSync(filename)
+  assert.equal(h.service.jobForCollection(batch, job.id), undefined)
+})
+
 async function prepared(h: ReturnType<typeof fixture>, url = sourceUrl) {
   const job = h.service.create({ sourceUrl: url }, { defer: true })
   h.service.prepare(job.id); await h.service.waitForIdle()
