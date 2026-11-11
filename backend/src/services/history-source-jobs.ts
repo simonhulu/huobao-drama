@@ -621,6 +621,11 @@ export function createHistorySourceJobHandler(overrides: Partial<JobDependencies
           if (saved.length) {
             for (const source of saved) encounteredVideos.add(source.sourceVideoId)
             const pending = saved.filter(source => getHistorySourceArtifactState(source).rewritten !== 'current')
+            const currentIndex = pending.findIndex(source => source.id === state.currentSourceId)
+            if (currentIndex > 0) {
+              const [current] = pending.splice(currentIndex, 1)
+              pending.unshift(current!)
+            }
             state.sourceIds = saved.slice(-100).map(source => source.id)
             state.counts.selected = saved.length
             state.counts.completed = saved.length - pending.length

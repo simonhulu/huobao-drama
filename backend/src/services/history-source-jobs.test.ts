@@ -462,6 +462,81 @@ test('resuming an old collection recovers a source previously skipped by HTTP 42
   assert.equal(getHistorySourceJob(job.id)!.counts.failed,0)
 })
 
+test('resuming YouTube prioritizes its interrupted current source over earlier failures for a one-source target', async () => {
+  const { job } = startHistorySourceJob({ source: 'youtube', youtube: { url: youtubeCandidate().collectionUrl },
+    targetCount: 1, existingSources: 'skip' })
+  const first = storeHistoryYoutubeSource(youtubeCandidate('failed00001'))
+  const second = storeHistoryYoutubeSource(youtubeCandidate('failed00002'))
+  const current = storeHistoryYoutubeSource(youtubeCandidate('current0001'))
+  const outsider = storeHistoryYoutubeSource(youtubeCandidate('outside0001'))
+  for (const source of [first, second]) updateHistorySource(source.id, { status: 'failed', lastError: 'Previous media failure' })
+  completeDraft(current.id)
+  updateHistorySource(current.id, { status: 'transcribed', correctedTranscript: null, rewrittenScript: null, reviewJson: null })
+  const sourceIds = [first.id, second.id, current.id]
+  for (const source of [first, second, current]) appendTaskEvent(job.id, 'history.progress', {
+    stage: 'transcribing', message: '正在转写 4/4', counts: { scanned: 3, selected: 3, completed: 0, failed: 2 },
+    currentSourceId: source.id, currentTitle: source.title, sourceIds, browserUrl: source.sourceUrl, level: 'info',
+  })
+  db.update(schema.creationTasks).set({ status: 'stale', errorCode: 'task_lease_lost' })
+    .where(eq(schema.creationTasks.id, job.id)).run()
+  const untouched = [first, second, outsider].map(source => getHistorySource(source.id))
+  const payload = getTask(job.id)!.payload, processed: number[] = []
+  registerTaskHandler(HISTORY_SOURCING_TASK_TYPE, createHistorySourceJobHandler({
+    checkYoutubeReadiness: async () => {},
+    collectYoutube: async () => assert.fail('The saved current source must reach the target before another channel scan'),
+    continueProduction: async () => assert.fail('Fresh-only recovery keeps original admission policy'),
+    process: async id => {
+      processed.push(id)
+      assert.equal(id, current.id, 'Earlier failed members must not replace the interrupted source')
+      assert.equal(getHistorySourceArtifactState(getHistorySource(id)!).transcript, 'current')
+      return completeDraft(id)
+    },
+  }))
+  assert.equal(resumeHistorySourceJob(job.id)!.id, job.id)
+  assert.equal(resumeHistorySourceJob(job.id)!.id, job.id, 'Repeated resume cannot create another task')
+  await worker()
+  const result = getHistorySourceJob(job.id)!
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(processed, [current.id])
+  assert.deepEqual(result.sourceIds, sourceIds)
+  assert.deepEqual(result.counts, { scanned: 3, selected: 3, completed: 1, failed: 2 })
+  assert.deepEqual(getTask(job.id)!.payload, payload)
+  assert.deepEqual([first, second, outsider].map(source => getHistorySource(source.id)), untouched)
+  assert.equal(db.select().from(schema.creationTasks).all().length, 1)
+  assert.equal(db.select().from(schema.historyScriptSources).all().length, 4)
+  assert.equal(await worker(), false)
+})
+
+for (const kind of ['completed', 'deleted', 'other-platform'] as const) {
+  test(`YouTube recovery does not promote a ${kind} current source outside its pending members`, async () => {
+    const { job } = startHistorySourceJob({ source: 'youtube', youtube: { url: youtubeCandidate().collectionUrl }, targetCount: null })
+    const first = storeHistoryYoutubeSource(youtubeCandidate('pending0001'))
+    const second = storeHistoryYoutubeSource(youtubeCandidate('pending0002'))
+    const current = kind === 'other-platform' ? storeHistorySource(candidate())
+      : storeHistoryYoutubeSource(youtubeCandidate('current0001'))
+    if (kind === 'completed') completeDraft(current.id)
+    if (kind === 'deleted') deleteHistorySource(current.id)
+    const sourceIds = [first.id, second.id, current.id]
+    for (const source of [first, second, current]) appendTaskEvent(job.id, 'history.progress', {
+      stage: 'storing', message: 'Original checkpoint', counts: { scanned: 3, selected: 3, completed: 0, failed: 0 },
+      currentSourceId: source.id, currentTitle: source.title, sourceIds, browserUrl: source.sourceUrl, level: 'info',
+    })
+    stopHistorySourceJob(job.id)
+    const before = getHistorySource(current.id, { includeDeleted: true }), processed: number[] = []
+    registerTaskHandler(HISTORY_SOURCING_TASK_TYPE, createHistorySourceJobHandler({
+      checkYoutubeReadiness: async () => {},
+      collectYoutube: async options => { options.report({ stage: 'exhausted', message: '频道到底', scanned: 0 }) },
+      process: async id => { processed.push(id); return completeDraft(id) },
+    }))
+    resumeHistorySourceJob(job.id)
+    await worker()
+    assert.deepEqual(processed, [first.id, second.id])
+    assert.deepEqual(getHistorySource(current.id, { includeDeleted: true }), before)
+    assert.equal(getHistorySourceJob(job.id)!.counts.completed, kind === 'completed' ? 3 : 2)
+    assert.equal(db.select().from(schema.creationTasks).all().length, 1)
+  })
+}
+
 test('continuing YouTube keeps the original task and resumes saved failures before reading the channel', async () => {
   let blocked = true
   const processed: number[] = []
@@ -519,7 +594,7 @@ test('continuing stopped YouTube recovers sources older than the 100-item UI sna
   assert.equal(response.status, 200)
   assert.equal(getTask(job.id)!.cancelRequested, false)
   await worker()
-  assert.deepEqual(processed, sourceIds.filter(id => id !== sourceIds[1]))
+  assert.deepEqual(processed, [sourceIds.at(-1)!, ...sourceIds.slice(0, -1).filter(id => id !== sourceIds[1])])
   assert.equal(getHistorySourceJob(job.id)!.counts.completed, 102)
   assert.equal(getHistorySourceJob(job.id)!.counts.failed, 0)
 })
