@@ -9,12 +9,15 @@ from numbers import Real
 import os
 from pathlib import Path
 import queue
+import re
 import select
 import subprocess
 import sys
 import threading
 import time
 from types import MethodType, SimpleNamespace
+
+from playback import IndexedSequence, plan_indices, validate_playback
 
 
 MODEL = "musetalk-v15"
@@ -134,12 +137,27 @@ def validate_reference_fps(reference, fps):
     return float(rate)
 
 
+def reference_frame_count(reference):
+    result = subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+        "-show_entries", "stream=nb_read_frames", "-of", "json", str(reference),
+    ], check=True, capture_output=True, text=True, timeout=120)
+    try:
+        frames = int(json.loads(result.stdout)["streams"][0]["nb_read_frames"])
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise RuntimeError("Cannot count the gesture bank reference frames") from error
+    if frames < 1:
+        raise RuntimeError("Gesture bank reference has no decoded frames")
+    return frames
+
+
 def check_cancelled(cancel):
     if cancel is not None and cancel.is_set():
         raise GenerationCancelled("Generation cancelled")
 
 
-def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None):
+def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None, *,
+                   playback=None, avatar_profile_sha256=None):
     """Keep upstream synthesis/blending; encode only the delivered circle.
 
     The official inference method starts a consumer thread and normally joins it.
@@ -155,8 +173,13 @@ def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None):
     original_process = avatar.process_frames
     original_skip = upstream.args.skip_save_images
     original_datagen = upstream.datagen
+    if playback is not None:
+        playback = validate_playback(playback)
+    playback_plan = None
+    plan_ready = threading.Event()
     failures = []
     stopped = threading.Event()
+    consumer_expected = threading.Event()
     consumer_started = threading.Event()
     consumer_done = threading.Event()
     codec_args = (["-c:v", "libx264", "-preset", "veryfast", "-crf", "25", "-threads", "2"]
@@ -170,6 +193,15 @@ def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None):
             raise RuntimeError("Frame encoder stopped")
 
     def checked_datagen(*args, **kwargs):
+        nonlocal playback_plan
+        consumer_expected.set()
+        if playback is not None:
+            if len(args) < 2 or (len(args) > 3 and args[3] != 0) or kwargs.get("delay_frame", 0) != 0:
+                raise RuntimeError("Gesture playback requires the pinned zero-delay datagen call")
+            playback_plan = plan_indices(playback, len(args[0]), file_hash(audio), avatar_profile_sha256)
+            args = (args[0], IndexedSequence(args[1], playback_plan), *args[2:])
+            # Publish one plan before the first synthesized batch reaches the consumer.
+            plan_ready.set()
         for batch in original_datagen(*args, **kwargs):
             check_running()
             yield batch
@@ -205,6 +237,14 @@ def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None):
         def process_frames(self, frames, video_len, skip_save_images):
             consumer_started.set()
             try:
+                if playback is not None:
+                    deadline = time.monotonic() + 120
+                    while not plan_ready.wait(0.25):
+                        check_running()
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("No gesture playback plan for 120 seconds")
+                    if len(playback_plan) != video_len:
+                        raise RuntimeError("Gesture playback plan does not match the synthesis frame count")
                 for index in range(video_len):
                     deadline = time.monotonic() + 120
                     while True:
@@ -215,7 +255,7 @@ def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None):
                         except queue.Empty:
                             if time.monotonic() >= deadline:
                                 raise TimeoutError("No generated frame for 120 seconds")
-                    cycle_index = index % len(self.coord_list_cycle)
+                    cycle_index = playback_plan[index] if playback is not None else index % len(self.coord_list_cycle)
                     bbox = self.coord_list_cycle[cycle_index]
                     x1, y1, x2, y2 = bbox
                     face = upstream.cv2.resize(result, (x2 - x1, y2 - y1))
@@ -258,7 +298,7 @@ def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None):
             encoder.wait()
             if not encoder.stdin.closed:
                 encoder.stdin.close()
-            consumer_stuck = consumer_started.is_set() and not consumer_done.wait(timeout=5)
+            consumer_stuck = (consumer_started.is_set() or consumer_expected.is_set()) and not consumer_done.wait(timeout=5)
             avatar.process_frames = original_process
             upstream.args.skip_save_images = original_skip
             upstream.datagen = original_datagen
@@ -267,11 +307,11 @@ def pipe_inference(avatar, upstream, audio, name, fps, codec, cancel=None):
 
 
 class MuseTalkRuntime:
-    """One model and cached avatar, reused serially by the HTTP worker."""
+    """One shared model and one resident avatar, used serially by the HTTP worker."""
 
     def __init__(self, root, reference, fps=25, batch_size=20, codec="libx264", preprocessing_module=None,
                  *, precision="fp16", extra_margin=10, parsing_mode="jaw", left_cheek_width=90,
-                 right_cheek_width=90, audio_lookahead_frames=0):
+                 right_cheek_width=90, audio_lookahead_frames=0, avatar_registry=None):
         self.root = Path(root).resolve()
         self.reference = Path(reference).resolve()
         self.preprocessing_module = Path(preprocessing_module or
@@ -312,11 +352,60 @@ class MuseTalkRuntime:
             "avatar_id": f"xiaolu-r4-{profile_hash[:24]}",
             "reference_sha256": reference_hash, "fps": fps,
         }
+        self.avatar_profiles = {self.identity["avatar_id"]: {
+            "identity": self.identity, "reference": self.reference,
+            "quality_config": self.quality_config, "cache_id": self.identity["avatar_id"],
+        }}
+        if avatar_registry is not None:
+            registry_path = Path(avatar_registry).resolve()
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            if not isinstance(registry, dict) or set(registry) != {"avatars"} or not isinstance(registry["avatars"], dict):
+                raise ValueError("Avatar registry must contain an avatars object")
+            for avatar_id, entry in registry["avatars"].items():
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", avatar_id) or avatar_id in self.avatar_profiles:
+                    raise ValueError("Invalid or duplicate registered avatar ID")
+                if not isinstance(entry, dict) or set(entry) not in (
+                        {"reference", "reference_sha256"}, {"reference", "reference_sha256", "playback"}):
+                    raise ValueError("Each registered avatar requires reference and reference_sha256")
+                if not isinstance(entry["reference"], str) or not entry["reference"].strip():
+                    raise ValueError("Registered avatar reference must be a nonempty path")
+                reference = (registry_path.parent / entry["reference"]).resolve()
+                expected = entry["reference_sha256"]
+                if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                    raise ValueError("Registered avatar reference_sha256 must be a SHA-256 hash")
+                if not reference.is_file() or file_hash(reference) != expected:
+                    raise ValueError(f"Registered avatar reference checksum does not match: {avatar_id}")
+                quality = {**self.quality_config, "reference_sha256": expected}
+                playback = validate_playback(entry["playback"]) if "playback" in entry else None
+                if playback is not None:
+                    quality["playback"] = playback
+                profile = hashlib.sha256(json.dumps(quality, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+                self.avatar_profiles[avatar_id] = {
+                    "identity": {**self.identity, "avatar_id": avatar_id, "reference_sha256": expected,
+                                 "avatar_profile_sha256": profile},
+                    "reference": reference, "quality_config": quality, "cache_id": f"{avatar_id}-{profile[:24]}",
+                    **({"playback": playback} if playback is not None else {}),
+                }
         self.torch = self.upstream = self.avatar = None
+        self.active_avatar_id = None
         self.load_metrics = {}
 
+    def identity_for(self, avatar_id=None):
+        avatar_id = self.identity["avatar_id"] if avatar_id is None else avatar_id
+        if avatar_id not in self.avatar_profiles:
+            raise KeyError("Unknown registered avatar")
+        profile = self.avatar_profiles[avatar_id]
+        if avatar_id != self.identity["avatar_id"] and file_hash(profile["reference"]) != profile["identity"]["reference_sha256"]:
+            raise ValueError("Registered avatar reference checksum changed")
+        return dict(profile["identity"])
+
+    def quality_for(self, avatar_id=None):
+        selected = self.identity_for(avatar_id)
+        return dict(self.avatar_profiles[selected["avatar_id"]]["quality_config"])
+
     def load(self):
-        if self.avatar is not None:
+        if self.upstream is not None:
+            self._load_avatar()
             return
         started = time.perf_counter()
         self.load_metrics["reference_fps"] = validate_reference_fps(self.reference, self.fps)
@@ -394,26 +483,47 @@ class MuseTalkRuntime:
         torch.cuda.synchronize()
         self.load_metrics.update(model_load_seconds=time.perf_counter() - started,
                                  gpu=torch.cuda.get_device_name(0), torch_version=torch.__version__)
-        cached = self.root / "results/v15/avatars" / self.identity["avatar_id"]
+        self.torch, self.upstream = torch, upstream
+        self._load_avatar()
+
+    def _load_avatar(self, avatar_id=None):
+        selected = self.identity_for(avatar_id)
+        if self.avatar is not None and self.active_avatar_id == selected["avatar_id"]:
+            return
+        profile = self.avatar_profiles[selected["avatar_id"]]
+        validate_reference_fps(profile["reference"], self.fps)
+        forward_frames = None
+        if "playback" in profile:
+            forward_frames = reference_frame_count(profile["reference"])
+            if forward_frames != profile["playback"]["segments"][-1]["end_frame"]:
+                raise RuntimeError("Gesture playback segments do not cover the decoded reference frames")
+        cached = self.root / "results/v15/avatars" / profile["cache_id"]
         preparing = not (cached / "latents.pt").is_file()
         if preparing and cached.exists():
             raise RuntimeError(f"Incomplete avatar preparation needs recovery: {cached}")
+        if self.avatar is not None:
+            self.avatar = None
+            self.active_avatar_id = None
+            self.torch.cuda.empty_cache()
         before = time.perf_counter()
-        avatar = upstream.Avatar(self.identity["avatar_id"], str(self.reference), 0, self.batch_size, preparing)
+        avatar = self.upstream.Avatar(profile["cache_id"], str(profile["reference"]), 0, self.batch_size, preparing)
         try:
             validate_avatar(avatar)
+            if forward_frames is not None and len(avatar.frame_list_cycle) != forward_frames * 2:
+                raise RuntimeError("Gesture bank cache must contain the pinned forward-and-reverse frame cycle")
         except RuntimeError as error:
             raise RuntimeError(f"{error}; rebuild the avatar cache at {cached}") from error
-        torch.cuda.synchronize()
+        self.torch.cuda.synchronize()
         self.load_metrics.update(avatar_prepared=preparing,
                                  avatar_load_or_prepare_seconds=time.perf_counter() - before,
-                                 quality_config=self.quality_config)
-        self.torch, self.upstream, self.avatar = torch, upstream, avatar
+                                 quality_config=profile["quality_config"])
+        self.avatar, self.active_avatar_id = avatar, selected["avatar_id"]
 
-    def generate(self, audio, output, cancel):
-        if self.avatar is None:
+    def generate(self, audio, output, cancel, *, avatar_id=None):
+        if self.upstream is None:
             raise RuntimeError("Runtime has not loaded")
         check_cancelled(cancel)
+        self._load_avatar(avatar_id)
         output = Path(output).resolve()
         if output.exists():
             raise FileExistsError(output)
@@ -422,7 +532,12 @@ class MuseTalkRuntime:
         started = time.perf_counter()
         try:
             with self.torch.inference_mode():
-                pipe_inference(self.avatar, self.upstream, audio, output.stem, self.fps, self.codec, cancel)
+                profile = self.avatar_profiles[self.active_avatar_id]
+                playback_options = ({"playback": profile["playback"],
+                                     "avatar_profile_sha256": profile["identity"]["avatar_profile_sha256"]}
+                                    if "playback" in profile else {})
+                pipe_inference(self.avatar, self.upstream, audio, output.stem, self.fps, self.codec, cancel,
+                               **playback_options)
             self.torch.cuda.synchronize()
             check_cancelled(cancel)
             source_duration = float(media_info(audio)["format"]["duration"])

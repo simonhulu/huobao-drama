@@ -20,12 +20,13 @@ import shutil
 import signal
 import sys
 import threading
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from runtime import GenerationCancelled, MuseTalkRuntime, add_quality_arguments, file_hash
 
 
 REQUEST_ID = re.compile(r"[0-9a-f]{64}\Z")
+AVATAR_ID = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
 MAX_UPLOAD_BYTES = 128 * 1024 * 1024
 TERMINAL = {"completed", "failed", "cancelled"}
 
@@ -100,7 +101,33 @@ class JobService:
         temporary.replace(directory / "record.json")
 
     def _compatible(self, record):
-        return all(record.get(key) == value for key, value in self.identity.items())
+        try:
+            selected = self._identity(record.get("avatar_selection"),
+                                      record.get("reference_sha256") if record.get("avatar_selection") else None)
+            return all(record.get(key) == value for key, value in selected.items())
+        except APIError:
+            return False
+
+    def _identity(self, avatar_id=None, reference_sha256=None):
+        if avatar_id is None and reference_sha256 is None:
+            return dict(self.identity)
+        if not isinstance(avatar_id, str) or not AVATAR_ID.fullmatch(avatar_id) \
+                or not isinstance(reference_sha256, str) or not REQUEST_ID.fullmatch(reference_sha256):
+            raise APIError(400, "Provide valid avatar_id and reference_sha256 together")
+        try:
+            if hasattr(self.runner, "identity_for"):
+                selected = self.runner.identity_for(avatar_id)
+            elif avatar_id == self.identity["avatar_id"]:
+                selected = dict(self.identity)
+            else:
+                raise KeyError("Unknown registered avatar")
+        except KeyError as error:
+            raise APIError(404, "Unknown registered avatar") from error
+        except (OSError, ValueError) as error:
+            raise APIError(409, "Registered avatar reference failed checksum validation") from error
+        if selected["reference_sha256"] != reference_sha256:
+            raise APIError(409, "Registered avatar reference_sha256 does not match")
+        return selected
 
     def _audio_path(self, record):
         suffix = record.get("audio_suffix")
@@ -136,12 +163,25 @@ class JobService:
             self.worker = threading.Thread(target=self._work, name="musetalk-gpu-worker", daemon=False)
             self.worker.start()
 
-    def health(self):
+    def health(self, avatar_id=None):
         with self.lock:
+            if avatar_id is None:
+                selected = dict(self.identity)
+            else:
+                if not isinstance(avatar_id, str) or not AVATAR_ID.fullmatch(avatar_id):
+                    raise APIError(400, "Invalid avatar_id")
+                try:
+                    selected = self.runner.identity_for(avatar_id)
+                except (AttributeError, KeyError) as error:
+                    raise APIError(404, "Unknown registered avatar") from error
+                except (OSError, ValueError) as error:
+                    raise APIError(409, "Registered avatar reference failed checksum validation") from error
             result = {"ok": self.status == "ready" and not self.stopping,
-                      "status": self.status, **self.identity, "queue_depth": len(self.pending),
+                      "status": self.status, **selected, "queue_depth": len(self.pending),
                       "active_job_id": self.active_id}
-            if hasattr(self.runner, "quality_config"):
+            if hasattr(self.runner, "quality_for"):
+                result["quality_config"] = self.runner.quality_for(avatar_id)
+            elif hasattr(self.runner, "quality_config"):
                 result["quality_config"] = dict(self.runner.quality_config)
             if self.error:
                 result["error"] = self.error
@@ -153,14 +193,16 @@ class JobService:
         if len(self.pending) >= self.max_queue:
             raise APIError(429, "MuseTalk queue is full; retry later with the same request_id")
 
-    def submit(self, request_id, audio):
+    def submit(self, request_id, audio, avatar_id=None, reference_sha256=None):
         self._job_directory(request_id)
         suffix = audio_suffix(audio)
         digest = hashlib.sha256(audio).hexdigest()
+        selected = self._identity(avatar_id, reference_sha256)
         with self.changed:
             if request_id in self.jobs:
                 record = self.jobs[request_id]
-                if record["audio_sha256"] != digest or not self._compatible(record):
+                if record["audio_sha256"] != digest or not self._compatible(record) \
+                        or any(record.get(key) != value for key, value in selected.items()):
                     raise APIError(409, "request_id is already bound to a different audio/model/avatar")
                 return self._public(record), False
             self._require_capacity()
@@ -173,7 +215,9 @@ class JobService:
                     os.fsync(target.fileno())
                 record = {"id": request_id, "job_id": request_id, "request_id": request_id,
                           "status": "queued", "audio_sha256": digest, "audio_suffix": suffix,
-                          **self.identity, "created_at": now(), "attempt": 1}
+                          **selected, "created_at": now(), "attempt": 1}
+                if avatar_id is not None:
+                    record["avatar_selection"] = avatar_id
                 self._persist(record)
             except BaseException:
                 shutil.rmtree(directory)
@@ -224,6 +268,9 @@ class JobService:
             self._require_capacity()
             retained = {key: record[key] for key in ("id", "job_id", "request_id", "audio_sha256",
                                                     "audio_suffix", "created_at", *self.identity)}
+            for key in ("avatar_selection", "avatar_profile_sha256"):
+                if key in record:
+                    retained[key] = record[key]
             retained.update(status="queued", attempt=record.get("attempt", 1) + 1, retried_at=now())
             self._persist(retained)
             self.jobs[job_id] = retained
@@ -276,7 +323,11 @@ class JobService:
             partial = directory / "result.partial.mp4"
             try:
                 partial.unlink(missing_ok=True)
-                metadata = self.runner.generate(self._audio_path(record), partial, cancel)
+                selected = record.get("avatar_selection")
+                if not self._compatible(record):
+                    raise RuntimeError("Stored job avatar identity no longer matches the registry")
+                metadata = self.runner.generate(self._audio_path(record), partial, cancel,
+                                                **({"avatar_id": selected} if selected is not None else {}))
                 if not partial.is_file() or not partial.stat().st_size:
                     raise RuntimeError("Runtime did not produce an MP4")
                 digest = file_hash(partial)
@@ -330,12 +381,12 @@ def read_submission(content_type, body):
     fields = {}
     for part in message.iter_parts():
         name = part.get_param("name", header="content-disposition")
-        if part.get_content_disposition() != "form-data" or name not in ("audio", "request_id") or name in fields:
+        if part.get_content_disposition() != "form-data" or name not in ("audio", "request_id", "avatar_id", "reference_sha256") or name in fields:
             raise APIError(400, "Expected one audio file and one request_id")
         if part.is_multipart() or part.defects:
             raise APIError(400, "Invalid multipart field")
         fields[name] = part.get_payload(decode=True)
-    if fields.keys() != {"audio", "request_id"} or not fields["audio"]:
+    if fields.keys() not in ({"audio", "request_id"}, {"audio", "request_id", "avatar_id", "reference_sha256"}) or not fields["audio"]:
         raise APIError(400, "Expected one audio file and one request_id")
     try:
         request_id = fields["request_id"].decode("ascii")
@@ -343,7 +394,16 @@ def read_submission(content_type, body):
         raise APIError(400, "Invalid request_id") from error
     if not REQUEST_ID.fullmatch(request_id):
         raise APIError(400, "request_id must be 64 lowercase hexadecimal characters")
-    return request_id, fields["audio"]
+    if "avatar_id" not in fields:
+        return request_id, fields["audio"]
+    try:
+        avatar_id = fields["avatar_id"].decode("ascii")
+        reference_sha256 = fields["reference_sha256"].decode("ascii")
+    except UnicodeDecodeError as error:
+        raise APIError(400, "Invalid avatar identity fields") from error
+    if not AVATAR_ID.fullmatch(avatar_id) or not REQUEST_ID.fullmatch(reference_sha256):
+        raise APIError(400, "Invalid avatar identity fields")
+    return request_id, fields["audio"], avatar_id, reference_sha256
 
 
 class APIServer(ThreadingHTTPServer):
@@ -376,10 +436,14 @@ class APIHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _dispatch(self):
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
         service = self.server.service
         if self.command == "GET" and path == "/health":
-            self._json(200, service.health())
+            query = parse_qs(url.query, keep_blank_values=True)
+            if set(query) - {"avatar_id"} or "avatar_id" in query and len(query["avatar_id"]) != 1:
+                raise APIError(400, "Health accepts one optional avatar_id")
+            self._json(200, service.health(query.get("avatar_id", [None])[0]))
             return
         if self.command == "POST" and path == "/v1/lipsync":
             if self.headers.get("Transfer-Encoding"):
@@ -396,8 +460,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 body = self.rfile.read(length)
                 if len(body) != length:
                     raise APIError(400, "Incomplete narration upload")
-                request_id, audio = read_submission(self.headers.get("Content-Type", ""), body)
-                record, created = service.submit(request_id, audio)
+                submission = read_submission(self.headers.get("Content-Type", ""), body)
+                record, created = service.submit(*submission)
             finally:
                 self.server.upload_slots.release()
             self._json(201 if created else 200, record)
@@ -452,6 +516,7 @@ def main():
     parser.add_argument("--queue-size", type=int, default=2)
     parser.add_argument("--codec", choices=("libx264", "h264_nvenc"), default="libx264")
     parser.add_argument("--preprocessing-module", type=Path)
+    parser.add_argument("--avatar-registry", type=Path, default=os.environ.get("MUSETALK_AVATAR_REGISTRY"))
     args = parser.parse_args()
     if not args.root or not args.reference or not args.jobs:
         parser.error("Set --root, --reference, --jobs (or corresponding MUSETALK_* environment variables)")
@@ -464,7 +529,7 @@ def main():
                             args.codec, args.preprocessing_module, precision=args.precision,
                             extra_margin=args.extra_margin, parsing_mode=args.parsing_mode,
                             left_cheek_width=args.left_cheek_width, right_cheek_width=args.right_cheek_width,
-                            audio_lookahead_frames=args.audio_lookahead_frames)
+                            audio_lookahead_frames=args.audio_lookahead_frames, avatar_registry=args.avatar_registry)
     service = JobService(args.jobs, runner, args.queue_size)
     server = APIServer((args.host, args.port), service)
 

@@ -124,6 +124,136 @@ function pendingMusetalk(h: ReturnType<typeof fixture>, id: string, patch: Recor
   return { file, videoPath }
 }
 
+function scienceLibraryEnv(t:any,libraryPath:string|undefined) {
+  const previous={enabled:process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED,path:process.env.SCIENCE_PRESENTER_LIBRARY_PATH}
+  process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED=libraryPath?'1':'0'
+  if(libraryPath)process.env.SCIENCE_PRESENTER_LIBRARY_PATH=libraryPath
+  else delete process.env.SCIENCE_PRESENTER_LIBRARY_PATH
+  t.after(()=>{
+    if(previous.enabled===undefined)delete process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED;else process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED=previous.enabled
+    if(previous.path===undefined)delete process.env.SCIENCE_PRESENTER_LIBRARY_PATH;else process.env.SCIENCE_PRESENTER_LIBRARY_PATH=previous.path
+  })
+}
+
+async function scienceIntroLibrary(root:string) {
+  const videoPath=path.join(root,'reviewed-xiaolu.mp4')
+  await new Promise<void>((resolve,reject)=>{
+    const child=spawn('ffmpeg',['-nostdin','-v','error','-y','-f','lavfi','-i','color=green:s=160x90:r=12',
+      '-f','lavfi','-i','sine=frequency=440:sample_rate=16000','-t','10.1','-c:v','libx264','-preset','ultrafast','-threads','1','-pix_fmt','yuv420p','-c:a','aac',videoPath],{stdio:'ignore'})
+    child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(`ffmpeg exited ${code}`)))
+  })
+  const clip={status:'ready',character:'science',presenter:'xiaolu',fingerprint:'1'.repeat(64),videoPath,
+    videoSha256:createHash('sha256').update(fs.readFileSync(videoPath)).digest('hex'),avatarId:'xiaolu-reviewed-01',referenceSha256:'2'.repeat(64)}
+  const libraryPath=path.join(root,'reviewed-library.json')
+  fs.writeFileSync(libraryPath,JSON.stringify({version:1,character:'science',presenter:'xiaolu',clips:[clip]}))
+  return {libraryPath,clip}
+}
+
+test('only new science jobs snapshot the opt-in library; enabling it cannot retrofit an old job or expose local policy paths',async t=>{
+  scienceLibraryEnv(t,undefined)
+  const h=fixture(t),old=h.service.create({sourceUrl},{defer:true})
+  const oldFile=path.join(h.root,'jobs',old.id,'job.json'),oldStored=JSON.parse(fs.readFileSync(oldFile,'utf8'))
+  delete oldStored.introPolicy;fs.writeFileSync(oldFile,JSON.stringify(oldStored))
+  const libraryPath=path.join(h.root,'future-ready.json')
+  process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED='1';process.env.SCIENCE_PRESENTER_LIBRARY_PATH=libraryPath
+  const added=h.service.create({sourceUrl:'https://youtu.be/lmnopqrstuv'},{defer:true})
+  const file=path.join(h.root,'jobs',added.id,'job.json'),stored=JSON.parse(fs.readFileSync(file,'utf8'))
+  assert.deepEqual(stored.introPolicy,{version:1,character:'science',presenter:'xiaolu',libraryPath})
+  delete process.env.SCIENCE_PRESENTER_LIBRARY_PATH;process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED='0'
+  assert.equal((h.service.detail(added.id) as any).introPolicy,undefined)
+  h.service.detail(old.id)
+  assert.equal(JSON.parse(fs.readFileSync(oldFile,'utf8')).introPolicy,undefined)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file,'utf8')).introPolicy,stored.introPolicy)
+})
+
+test('an opt-in science job resumes its chosen intro and matching MuseTalk avatar after a failure and backend restart',async t=>{
+  const h=fixture(t,{presenterMode:'musetalk'}),library=await scienceIntroLibrary(h.root)
+  scienceLibraryEnv(t,library.libraryPath)
+  const job=await prepared(h),{videoPath}=pendingMusetalk(h,job.id)
+  const bindings:Array<{avatarId?:string;referenceSha256?:string}>=[],intros:string[]=[],bodySources:string[]=[]
+  let attempts=0
+  h.options.prepareMusetalkPresenter=async(input,options)=>{
+    bindings.push({avatarId:options.avatarId,referenceSha256:options.referenceSha256})
+    bodySources.push(createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex'))
+    if(++attempts===1)throw Error('GPU fixture interrupted once')
+    return {presenterPath:input.videoPath,sourceSha256:createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex')}
+  }
+  h.options.prepareVideo=async(input,options)=>{
+    intros.push(options.introPath!)
+    return {videoPath:input.videoPath,introSha256:library.clip.videoSha256,sourceSha256:createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex')}
+  }
+  h.service.produce(job.id,false);await h.service.waitForIdle()
+  const selectionFile=path.join(h.root,'jobs',job.id,'intro/science-presenter-selection.json')
+  assert.ok(fs.existsSync(selectionFile),'selection must be saved before contacting the GPU')
+  const selected=fs.readFileSync(selectionFile,'utf8')
+  await h.service.stop()
+  process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED='0';delete process.env.SCIENCE_PRESENTER_LIBRARY_PATH
+  const restarted=new ScienceWorkflowService(h.options);t.after(()=>restarted.stop())
+  restarted.produce(job.id,false);await restarted.waitForIdle()
+  assert.equal(restarted.detail(job.id).status,'ready')
+  assert.deepEqual(bindings,[{avatarId:library.clip.avatarId,referenceSha256:library.clip.referenceSha256},{avatarId:library.clip.avatarId,referenceSha256:library.clip.referenceSha256}])
+  assert.deepEqual(intros,[library.clip.videoPath])
+  assert.equal(fs.readFileSync(selectionFile,'utf8'),selected)
+  assert.equal(fs.readFileSync(videoPath,'utf8'),'finished-video')
+  const calls=attempts
+  restarted.covers(job.id);await restarted.waitForIdle()
+  assert.equal(attempts,calls,'an already composed edition cannot generate another avatar or select another intro')
+  const file=path.join(h.root,'jobs',job.id,'job.json'),stored=JSON.parse(fs.readFileSync(file,'utf8'))
+  fs.writeFileSync(videoPath,'a newly exported edition of the same original narration')
+  fs.writeFileSync(file,JSON.stringify({...stored,videoCompositionPending:true,status:'needs_attention'}))
+  restarted.produce(job.id,false);await restarted.waitForIdle()
+  assert.equal(restarted.detail(job.id).status,'ready')
+  assert.equal(fs.readFileSync(selectionFile,'utf8'),selected,'a new source edition cannot draw another intro')
+  assert.equal(bindings.length,3);assert.deepEqual(bindings[2],bindings[0])
+  assert.equal(bodySources[0],bodySources[1]);assert.notEqual(bodySources[1],bodySources[2])
+  assert.deepEqual(intros,[library.clip.videoPath,library.clip.videoPath])
+})
+
+test('a selected Xiaolu intro is shared by preview and the exact-avatar GPU readiness check',async t=>{
+  const h=fixture(t,{presenterMode:'musetalk'}),library=await scienceIntroLibrary(h.root)
+  scienceLibraryEnv(t,library.libraryPath)
+  const job=await prepared(h);pendingMusetalk(h,job.id)
+  const previews:string[]=[];let checks=0
+  h.options.prepareIntroPreview=async(input,options)=>{
+    previews.push(options.introPath!)
+    return {videoPath:input.videoPath,introSha256:library.clip.videoSha256,sourceSha256:createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex')}
+  }
+  h.options.checkMusetalkAvailability=async options=>{
+    checks++;assert.equal(options.avatarId,library.clip.avatarId);assert.equal(options.referenceSha256,library.clip.referenceSha256)
+    return {ready:false,message:'fixture GPU is busy'}
+  }
+  h.options.prepareMusetalkPresenter=async()=>assert.fail('readiness wait must not submit lipsync')
+  h.service.previewIntro(job.id);await h.service.waitForIdle()
+  h.service.produce(job.id,false,{waitForPresenter:true});await h.service.waitForIdle()
+  assert.deepEqual(previews,[library.clip.videoPath]);assert.equal(checks,1)
+  assert.equal(h.service.detail(job.id).status,'waiting_remote')
+})
+
+test('an opt-in job without approved clips stops before GPU checks or composition, while a legacy job keeps its fixed-intro route',async t=>{
+  const h=fixture(t,{presenterMode:'musetalk'}),libraryPath=path.join(h.root,'empty-library.json')
+  fs.writeFileSync(libraryPath,JSON.stringify({version:1,character:'science',presenter:'xiaolu',clips:[]}))
+  scienceLibraryEnv(t,libraryPath)
+  const added=await prepared(h);pendingMusetalk(h,added.id)
+  let checks=0,presenters=0
+  h.options.checkMusetalkAvailability=async()=>{checks++;return {ready:true,message:'unexpected readiness'}}
+  h.options.prepareMusetalkPresenter=async()=>{presenters++;return assert.fail('no unreviewed GPU submission')}
+  h.service.produce(added.id,false,{waitForPresenter:true});await h.service.waitForIdle()
+  assert.equal(checks,0);assert.equal(presenters,0)
+  assert.equal(h.service.detail(added.id).status,'needs_attention')
+  const old=await prepared(h,'https://youtu.be/lmnopqrstuv'),pending=pendingMusetalk(h,old.id)
+  const stored=JSON.parse(fs.readFileSync(pending.file,'utf8'));delete stored.introPolicy
+  fs.writeFileSync(pending.file,JSON.stringify(stored));h.options.presenterMode='none'
+  let compositions=0
+  h.options.prepareIntroVideo=async(input,options)=>{
+    compositions++;assert.equal(options.introPath,undefined)
+    return {videoPath:input.videoPath,introSha256:'a'.repeat(64),sourceSha256:createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex')}
+  }
+  h.service.produce(old.id,false);await h.service.waitForIdle()
+  assert.equal(h.service.detail(old.id).status,'ready');assert.equal(compositions,1)
+  assert.equal(JSON.parse(fs.readFileSync(pending.file,'utf8')).introPolicy,undefined)
+  assert.equal(fs.existsSync(path.join(h.root,'jobs',old.id,'intro/science-presenter-selection.json')),false)
+})
+
 test('GPU waiting survives repeated offline checks and restart, then finishes the original main and covers', async t => {
   let now = Date.now(), ready = false, checks = 0, gpuJobs = 0, composites = 0
   t.mock.method(Date, 'now', () => now)

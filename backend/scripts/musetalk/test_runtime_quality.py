@@ -1,15 +1,19 @@
 """Quality configuration and avatar cache regressions without CUDA dependencies."""
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from runtime import MuseTalkRuntime, add_quality_arguments, apply_audio_lookahead, validate_avatar, validate_reference_fps
+from runtime import MuseTalkRuntime, add_quality_arguments, apply_audio_lookahead, reference_frame_count, validate_avatar, validate_reference_fps
 
 
 class Conditions(list):
@@ -64,6 +68,118 @@ class RuntimeQualityTests(unittest.TestCase):
         self.assertNotEqual(self.runtime().identity["avatar_id"], changed_reference["avatar_id"])
         self.assertRegex(original["avatar_id"], r"^[A-Za-z0-9_-]{1,160}$")
         self.assertEqual(set(original), {"model", "source_revision", "avatar_id", "reference_sha256", "fps"})
+
+    def registry(self, entry=None):
+        reference = self.root / "history.mp4"
+        reference.write_bytes(b"history reference")
+        registry = self.root / "avatars.json"
+        registry.write_text(json.dumps({"avatars": {"xiaoba-history-01": entry or {
+            "reference": reference.name, "reference_sha256": hashlib.sha256(reference.read_bytes()).hexdigest(),
+        }}}), encoding="ascii")
+        return registry, reference
+
+    def test_registry_binds_real_reference_and_quality_without_changing_default_identity(self):
+        registry, reference = self.registry()
+        original = self.runtime()
+        runtime = self.runtime(avatar_registry=registry)
+        self.assertEqual(runtime.identity, original.identity)
+        selected = runtime.identity_for("xiaoba-history-01")
+        self.assertEqual(selected["avatar_id"], "xiaoba-history-01")
+        self.assertEqual(selected["reference_sha256"], hashlib.sha256(reference.read_bytes()).hexdigest())
+        self.assertRegex(selected["avatar_profile_sha256"], r"^[a-f0-9]{64}$")
+        self.assertNotEqual(self.runtime(avatar_registry=registry, precision="fp32").identity_for("xiaoba-history-01"), selected)
+        self.assertEqual(runtime.quality_for("xiaoba-history-01")["reference_sha256"], selected["reference_sha256"])
+        with self.assertRaises(KeyError):
+            runtime.identity_for("unknown")
+        reference.write_bytes(b"changed after startup")
+        with self.assertRaisesRegex(ValueError, "checksum changed"):
+            runtime.identity_for("xiaoba-history-01")
+
+    def test_registry_rejects_unpinned_or_missing_references_before_loading_models(self):
+        for entry in ({"reference": "history.mp4", "reference_sha256": "0" * 64},
+                      {"reference": "missing.mp4", "reference_sha256": "0" * 64},
+                      {"reference": "history.mp4", "reference_sha256": "invalid"},
+                      {"reference": "history.mp4"}, {"reference": "", "reference_sha256": "0" * 64}):
+            with self.subTest(entry=entry):
+                registry, _ = self.registry(entry)
+                with self.assertRaises(ValueError):
+                    self.runtime(avatar_registry=registry)
+
+    def bank_registry(self, playback=None):
+        registry, reference = self.registry()
+        body = json.loads(registry.read_text())
+        body["avatars"]["xiaoba-history-01"]["playback"] = playback if playback is not None else {
+            "mode": "shuffle-segments-v1",
+            "segments": [{"start_frame": 0, "end_frame": 1}, {"start_frame": 1, "end_frame": 2}],
+        }
+        registry.write_text(json.dumps(body))
+        return registry, reference
+
+    def test_playback_settings_change_profile_and_cache_identity_without_changing_default_avatar(self):
+        registry, _ = self.registry()
+        original = self.runtime(avatar_registry=registry)
+        registry, _ = self.bank_registry()
+        shuffled = self.runtime(avatar_registry=registry)
+        self.assertEqual(original.identity, shuffled.identity)
+        selected = "xiaoba-history-01"
+        self.assertNotEqual(original.identity_for(selected), shuffled.identity_for(selected))
+        self.assertNotEqual(original.avatar_profiles[selected]["cache_id"], shuffled.avatar_profiles[selected]["cache_id"])
+        self.assertEqual(shuffled.quality_for(selected)["playback"]["mode"], "shuffle-segments-v1")
+        registry, _ = self.bank_registry({"mode": "shuffle-segments-v1", "segments": [
+            {"start_frame": 0, "end_frame": 1}, {"start_frame": 1, "end_frame": 3},
+        ]})
+        self.assertNotEqual(shuffled.identity_for(selected), self.runtime(avatar_registry=registry).identity_for(selected))
+
+    def test_invalid_playback_is_rejected_before_loading_models(self):
+        for playback in ({"mode": "reverse", "segments": []},
+                         {"mode": "shuffle-segments-v1", "segments": [{"start_frame": 0, "end_frame": 2}]},
+                         {"mode": "shuffle-segments-v1", "segments": [
+                             {"start_frame": 0, "end_frame": 1}, {"start_frame": 2, "end_frame": 3}]}):
+            with self.subTest(playback=playback):
+                registry, _ = self.bank_registry(playback)
+                with self.assertRaises(ValueError):
+                    self.runtime(avatar_registry=registry)
+
+    def test_playback_must_cover_decoded_forward_frames_and_match_upstream_cache_length(self):
+        registry, _ = self.bank_registry()
+        runtime = self.runtime(avatar_registry=registry)
+        runtime.torch = SimpleNamespace(cuda=SimpleNamespace(synchronize=Mock(), empty_cache=Mock()))
+        avatar = AvatarValidationTests().avatar()
+        runtime.upstream = SimpleNamespace(Avatar=Mock(return_value=avatar))
+        with patch("runtime.validate_reference_fps", return_value=25), patch("runtime.reference_frame_count", return_value=3):
+            with self.assertRaisesRegex(RuntimeError, "do not cover the decoded"):
+                runtime._load_avatar("xiaoba-history-01")
+            runtime.upstream.Avatar.assert_not_called()
+        with patch("runtime.validate_reference_fps", return_value=25), patch("runtime.reference_frame_count", return_value=2):
+            with self.assertRaisesRegex(RuntimeError, "forward-and-reverse"):
+                runtime._load_avatar("xiaoba-history-01")
+            for name, values in vars(avatar).items():
+                setattr(avatar, name, values + list(reversed(values)))
+            runtime._load_avatar("xiaoba-history-01")
+            self.assertIs(runtime.avatar, avatar)
+
+    def test_avatar_switch_reuses_shared_models_and_only_keeps_one_resident_avatar(self):
+        registry, _ = self.registry()
+        runtime = self.runtime(avatar_registry=registry)
+        runtime.torch = SimpleNamespace(cuda=SimpleNamespace(synchronize=Mock(), empty_cache=Mock()))
+        upstream = SimpleNamespace(Avatar=Mock(side_effect=lambda *args: AvatarValidationTests().avatar()))
+        runtime.upstream = upstream
+        with patch("runtime.validate_reference_fps", return_value=25):
+            runtime._load_avatar()
+            default_avatar = runtime.avatar
+            runtime._load_avatar("xiaoba-history-01")
+            self.assertIsNot(runtime.avatar, default_avatar)
+            history_avatar = runtime.avatar
+            runtime._load_avatar("xiaoba-history-01")
+            self.assertIs(runtime.avatar, history_avatar)
+            runtime._load_avatar()
+            runtime.load()
+        self.assertIs(runtime.upstream, upstream)
+        self.assertEqual(upstream.Avatar.call_count, 3)
+        self.assertEqual(runtime.torch.cuda.empty_cache.call_count, 2)
+        self.assertEqual(upstream.Avatar.call_args_list[0].args[0], runtime.identity["avatar_id"])
+        self.assertTrue(upstream.Avatar.call_args_list[1].args[0].startswith("xiaoba-history-01-"))
+        self.assertEqual(runtime.active_avatar_id, runtime.identity["avatar_id"])
 
     def test_invalid_quality_parameters_are_rejected_before_loading_models(self):
         for changed in ({"fps": 30}, {"precision": "bf16"}, {"parsing_mode": "unknown"},
@@ -208,6 +324,24 @@ class ReferenceFrameRateTests(unittest.TestCase):
             with self.subTest(metadata=metadata), patch("runtime.media_info", return_value=metadata):
                 with self.assertRaisesRegex(RuntimeError, "Resample the original reference to 25 FPS"):
                     validate_reference_fps("reference.mp4", 25)
+
+
+class ReferenceFrameCountTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_count_decodes_actual_reference_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.mp4"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                            "color=s=32x32:r=25:d=0.08", "-frames:v", "2", "-an", "-c:v", "libx264",
+                            str(reference)], check=True, timeout=30)
+            self.assertEqual(reference_frame_count(reference), 2)
+
+    def test_missing_or_empty_count_is_rejected(self):
+        for count in (None, "N/A", "0", "-1"):
+            output = {"streams": [{"nb_read_frames": count}]}
+            with self.subTest(count=count), patch("runtime.subprocess.run", return_value=SimpleNamespace(stdout=json.dumps(output))):
+                with self.assertRaises(RuntimeError):
+                    reference_frame_count("reference.mp4")
 
 
 class AvatarValidationTests(unittest.TestCase):

@@ -20,6 +20,7 @@ import type { ScienceVideoIntroProgress } from './science-video-intro.js'
 import type * as mediaTools from './science-workflow-media.js'
 import { hasScienceTranscriptCheckpoint, releaseScienceSourceMedia } from './science-workflow-media.js'
 import { SCIENCE_COVER_COMPOSITION_VERSION } from './science-cover-poster.js'
+import { sciencePresenterPolicyFromEnv, selectSciencePresenterIntro, type SciencePresenterPolicy } from './science-presenter-intro.js'
 
 export const SCIENCE_BAIJIAHAO_TAG = '#热爆趣创赛#'
 export const SCIENCE_CREATION_DECLARATION = '个人观点，仅供参考'
@@ -91,6 +92,7 @@ interface StoredJob extends Omit<ScienceJob, 'sourceVideoUrl' | 'videoUrl' | 'la
   exportRecovery?: { taskId: string; projectHash: string; deadlineAt?: string; zeroSince?: string; retryDispatchedAt?: string;
     lastProgress?: number; lastProgressAt?: string }
   mainVideoPath?: string; presenterPath?: string
+  introPolicy?: SciencePresenterPolicy | null
   uploadAttempt?: CbaUploadRecoveryCurrent; autoUpload?: boolean; automaticDelivery?: boolean; ownerPid?: number
   uploadRestartPending?: boolean; uploadRetryCount?: number
   uploadHistory?: Array<{ attempt: CbaUploadRecoveryCurrent; archivedAt: string }>
@@ -237,7 +239,7 @@ export class ScienceWorkflowService {
     const { version: _version, media, sourceTitle: _title, sourceAuthor: _author, plan, productionCompleted: _complete,
       productionScriptHash: _hash, productionAccountName: _account, separateIntro: _intro, exportDispatched: _dispatch, exportTask: _task,
       exportRecovery: _exportRecovery,
-      videoPath, mainVideoPath: _mainVideoPath, presenterPath: _presenterPath, transcriptCheckpoint: _transcriptCheckpoint, writingCheckpoint: _writingCheckpoint, coverAssets, coverSourceDigest: _coverDigest, coverSequence: _coverSequence, coverRequest, coverUploadRevision: _coverUploadRevision, uploadAttempt, uploadHistory: _uploadHistory, uploadRestartPending: _uploadRestartPending, uploadRetryCount: _uploadRetryCount, autoUpload: _auto, automaticDelivery: _delivery, automaticProduction: _production, ownerPid: _pid, ...result } = job
+      videoPath, mainVideoPath: _mainVideoPath, presenterPath: _presenterPath, introPolicy: _introPolicy, transcriptCheckpoint: _transcriptCheckpoint, writingCheckpoint: _writingCheckpoint, coverAssets, coverSourceDigest: _coverDigest, coverSequence: _coverSequence, coverRequest, coverUploadRevision: _coverUploadRevision, uploadAttempt, uploadHistory: _uploadHistory, uploadRestartPending: _uploadRestartPending, uploadRetryCount: _uploadRetryCount, autoUpload: _auto, automaticDelivery: _delivery, automaticProduction: _production, ownerPid: _pid, ...result } = job
     const asset = (kind: string) => `/api/v1/science-pop/workflow/jobs/${job.id}/assets/${kind}`
     const receipt = result.upload?.submitted ? this.trustedSubmission(job) : result.upload
     const stage = result.upload?.submitted && !receipt ? 'upload' : result.stage
@@ -316,7 +318,7 @@ export class ScienceWorkflowService {
     const job: StoredJob = { version: 1, id: `science-${randomUUID()}`, title: value.title || '新的冷知识科普', sourceUrl: source.url,
       createdAt: timestamp, updatedAt: timestamp, status: 'draft', stage: 'download', message: '已建立科普任务', transcript: '', script: '',
       factChecks: [], sources: [source.url], projectUrl: null, checkpoint: null, upload: null, logs: [], media: {}, sourceTitle: '', sourceAuthor: '',
-      ...accounts,
+      ...accounts, introPolicy: sciencePresenterPolicyFromEnv() || null,
       ...(options.collectionId ? { collectionId: options.collectionId } : {}), ...(options.sourceChannel ? { sourceChannel: parseHistoryYoutubeUrl(options.sourceChannel).url } : {}) }
     this.write(job)
     return options.defer ? this.publicJob(job) : this.produce(job.id, value.mode === 'upload')
@@ -577,8 +579,14 @@ export class ScienceWorkflowService {
       if (waitForPresenter) {
         this.modify(id, { stage: 'export', exportStep: 'presenter', automaticRetry: undefined })
         try {
+          let selected
+          if(job.introPolicy) {
+            const intro=await import('./science-video-intro.js')
+            const main=await intro.resolveScienceVideoIntroSource({videoPath:this.localFile(id,job.mainVideoPath||job.videoPath),directory:path.join(this.directory(id),'intro')},{signal})
+            selected=await this.selectPresenterIntro(job,main.sourceSha256,signal)
+          }
           const check = this.options.checkMusetalkAvailability || (await import('./science-musetalk-video.js')).checkScienceMusetalkAvailability
-          const availability = await check({ signal })
+          const availability = await check({ signal, ...(selected?{avatarId:selected.avatarId,referenceSha256:selected.referenceSha256}:{}) })
           signal.throwIfAborted()
           if (!availability.ready) {
             this.modify(id, { status: 'waiting_remote', presenterWait: { ...this.read(id).presenterWait!, nextCheckAt: new Date(Date.now() + 60_000).toISOString() },
@@ -833,18 +841,27 @@ export class ScienceWorkflowService {
       throw new ScienceWorkflowError('制作版本已变化（封面或成片文件不一致），请先重新生成封面，再上传发表')
     return inspected
   }
+  private async selectPresenterIntro(job: StoredJob, sourceSha256: string, signal: AbortSignal) {
+    const policy=job.introPolicy
+    if(!policy)return undefined
+    if(policy.version!==1||policy.character!=='science'||policy.presenter!=='xiaolu'||!path.isAbsolute(policy.libraryPath))
+      throw new ScienceWorkflowError('原任务的小鹭片头策略无效，请恢复原记录')
+    return selectSciencePresenterIntro({jobId:job.id,sourceSha256,libraryPath:policy.libraryPath,directory:path.join(this.directory(job.id),'intro')},{signal})
+  }
   private async prepareIntroPreview(id: string, signal: AbortSignal) {
     const job = this.read(id), intro = await import('./science-video-intro.js')
     this.modify(id, { exportStep: 'compose', compositionProgress: undefined })
     const directory = path.join(this.directory(id), 'intro')
     const main = await intro.resolveScienceVideoIntroSource({ videoPath: this.localFile(id, job.mainVideoPath || job.videoPath), directory }, { signal })
+    const selected=await this.selectPresenterIntro(job,main.sourceSha256,signal)
     this.modify(id, { mainVideoPath: main.videoPath })
     this.report(id, '正在拼接固定片头预览，随后继续视频合成', 'export')
     const prepare = this.options.prepareIntroPreview || intro.prepareScienceVideoIntroPreview
-    const preview = await prepare({ videoPath: main.videoPath, directory }, { signal, report: message => this.report(id, message, 'export'),
+    const preview = await prepare({ videoPath: main.videoPath, directory }, { signal, ...(selected?{introPath:selected.videoPath}:{}), report: message => this.report(id, message, 'export'),
       onProgress: progress => this.recordCompositionProgress(id, progress, signal) })
     signal.throwIfAborted()
     if (preview.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('片头预览与原正片版本不一致，已保留原任务')
+    if(selected&&preview.introSha256!==selected.videoSha256)throw new ScienceWorkflowError('片头预览与原任务已选的小鹭片头不一致')
     this.modify(id, { videoPath: preview.videoPath, videoCompositionPending: true,
       ...(preview.videoPath !== job.videoPath ? { coverAssets: undefined, coverSourceDigest: undefined, coverRequest: undefined } : {}) })
   }
@@ -857,6 +874,7 @@ export class ScienceWorkflowService {
       const onProgress = (progress: ScienceVideoIntroProgress) => this.recordCompositionProgress(id, progress, signal)
       const main = await intro.resolveScienceVideoIntroSource({ videoPath: this.localFile(id, job.mainVideoPath || job.videoPath), directory }, { signal })
       job = this.modify(id, { mainVideoPath: main.videoPath })
+      const selected=await this.selectPresenterIntro(job,main.sourceSha256,signal)
       let video: Awaited<ReturnType<typeof intro.prepareScienceVideoWithIntro>>
       const presenterMode = this.options.presenterMode ?? (process.env.SCIENCE_PRESENTER_MODE?.trim() || 'musetalk')
       if (!['none', 'sync', 'musetalk'].includes(presenterMode)) throw new ScienceWorkflowError('SCIENCE_PRESENTER_MODE 必须为 musetalk 或 none')
@@ -867,7 +885,7 @@ export class ScienceWorkflowService {
           this.report(id, '正在使用远程 MuseTalk 生成正文同步口型，复用缓存主播素材', 'export')
           const generate = this.options.prepareMusetalkPresenter || (await import('./science-musetalk-video.js')).prepareScienceMusetalkVideo
           presenter = await generate({ videoPath: main.videoPath, directory: path.join(this.directory(id), 'presenter-musetalk') },
-            { signal, report: message => this.report(id, message, 'export') })
+            { signal, ...(selected?{avatarId:selected.avatarId,referenceSha256:selected.referenceSha256}:{}), report: message => this.report(id, message, 'export') })
           signal.throwIfAborted()
           if (presenter.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('MuseTalk 主播与正片版本不一致')
         } catch (error) {
@@ -883,7 +901,7 @@ export class ScienceWorkflowService {
         this.modify(id, { exportStep: 'compose' })
         const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
         video = await prepare({ videoPath: main.videoPath, directory },
-          { signal, presenterPath: presenter.presenterPath, presenterFraming: 'half-body', report: message => this.report(id, message, 'export'), onProgress })
+          { signal, ...(selected?{introPath:selected.videoPath}:{}), presenterPath: presenter.presenterPath, presenterFraming: 'half-body', report: message => this.report(id, message, 'export'), onProgress })
         signal.throwIfAborted()
         if (video.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('视频合成与原正片版本不一致，已保留原任务')
         this.modify(id, { presenterPath: presenter.presenterPath })
@@ -895,24 +913,25 @@ export class ScienceWorkflowService {
         this.modify(id, { exportStep: 'presenter' })
         this.report(id, '正在根据正片旁白生成同步口型的主播视频', 'export')
         const generate = this.options.preparePresenter || (await import('./science-presenter-video.js')).prepareSciencePresenterVideo
-        const presenter = await generate({ videoPath: main.videoPath, directory: path.join(this.directory(id), 'presenter') },
+        const presenter = await generate({ videoPath: main.videoPath, directory: path.join(this.directory(id), 'presenter'), ...(selected?{referencePath:selected.videoPath}:{}) },
           { signal, report: message => this.report(id, message, 'export') })
         signal.throwIfAborted()
         if (presenter.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('主播口播与正片版本不一致，请继续原任务重新核对')
         this.modify(id, { presenterPath: presenter.presenterPath, exportStep: 'compose', compositionProgress: undefined })
         const prepare = this.options.prepareVideo || intro.prepareScienceVideoWithIntro
         video = await prepare({ videoPath: main.videoPath, directory },
-          { signal, presenterPath: presenter.presenterPath, report: message => this.report(id, message, 'export'), onProgress })
+          { signal, ...(selected?{introPath:selected.videoPath}:{}), presenterPath: presenter.presenterPath, report: message => this.report(id, message, 'export'), onProgress })
       } else {
         this.report(id, '正在本地拼接固定片头与正文，正文不叠加主播圆窗', 'export')
         const prepare = this.options.prepareIntroVideo || intro.prepareScienceVideoWithIntroOnly
         video = await prepare({ videoPath: main.videoPath, directory },
-          { signal, report: message => this.report(id, message, 'export'), onProgress })
+          { signal, ...(selected?{introPath:selected.videoPath}:{}), report: message => this.report(id, message, 'export'), onProgress })
         signal.throwIfAborted()
         if (video.sourceSha256 !== main.sourceSha256) throw new ScienceWorkflowError('视频合成与原正片版本不一致，已保留原任务')
         this.modify(id, { presenterPath: undefined })
       }
       signal.throwIfAborted()
+      if(selected&&video.introSha256!==selected.videoSha256)throw new ScienceWorkflowError('合成结果与原任务已选的小鹭片头不一致')
       job = this.modify(id, { videoPath: video.videoPath, videoCompositionPending: false,
         ...(video.videoPath !== job.videoPath ? { coverAssets: undefined, coverSourceDigest: undefined, coverRequest: undefined } : {}) })
     }

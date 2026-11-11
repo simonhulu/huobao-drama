@@ -15,7 +15,7 @@ const MODEL = 'musetalk-v15'
 const REVISION = '0a89dec45a0192b824e3cf4daf96c239440c5ed8'
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const validHash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
-interface Identity { model: string; source_revision: string; avatar_id: string; reference_sha256: string; fps: number }
+interface Identity { model: string; source_revision: string; avatar_id: string; reference_sha256: string; fps: number; avatar_profile_sha256?: string }
 interface RemoteJob extends Identity {
   id?: string; job_id?: string; request_id: string; audio_sha256: string
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -29,6 +29,23 @@ interface Api { apiUrl: string; close(): Promise<void> }
 export interface ScienceMusetalkVideoOptions {
   signal: AbortSignal
   report?: (message: string) => void
+  avatarId?: string
+  referenceSha256?: string
+}
+
+function avatarSelection(options: Pick<ScienceMusetalkVideoOptions, 'avatarId' | 'referenceSha256'>) {
+  if (options.avatarId === undefined && options.referenceSha256 === undefined) return undefined
+  if (typeof options.avatarId !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/.test(options.avatarId) || !validHash(options.referenceSha256)) {
+    throw new Error('MuseTalk 指定头像必须同时提供有效 avatarId 和 referenceSha256')
+  }
+  return { avatarId: options.avatarId, referenceSha256: options.referenceSha256 }
+}
+
+function selectedIdentity(value: unknown, selected: ReturnType<typeof avatarSelection>) {
+  const result = identity(value)
+  if (selected && (result.avatar_id !== selected.avatarId || result.reference_sha256 !== selected.referenceSha256
+    || !validHash(result.avatar_profile_sha256))) throw new Error('MuseTalk 指定头像或参考视频哈希不一致，不能使用默认头像')
+  return result
 }
 
 function positive(name: string, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
@@ -167,17 +184,20 @@ async function media(filename: string, signal: AbortSignal) {
 
 function identity(value: any): Identity {
   if (value?.model !== MODEL || value?.source_revision !== REVISION || !/^[A-Za-z0-9_-]{1,160}$/.test(value?.avatar_id || '')
-    || !validHash(value?.reference_sha256) || ![15, 20, 25].includes(value?.fps)) throw new Error('MuseTalk 服务的模型、头像或帧率校验失败')
-  return { model: value.model, source_revision: value.source_revision, avatar_id: value.avatar_id, reference_sha256: value.reference_sha256, fps: value.fps }
+    || !validHash(value?.reference_sha256) || ![15, 20, 25].includes(value?.fps)
+    || value?.avatar_profile_sha256 !== undefined && !validHash(value.avatar_profile_sha256)) throw new Error('MuseTalk 服务的模型、头像或帧率校验失败')
+  return { model: value.model, source_revision: value.source_revision, avatar_id: value.avatar_id, reference_sha256: value.reference_sha256, fps: value.fps,
+    ...(value.avatar_profile_sha256 !== undefined ? { avatar_profile_sha256: value.avatar_profile_sha256 } : {}) }
 }
 
-export async function checkScienceMusetalkAvailability(options: { signal: AbortSignal }): Promise<{ ready: boolean; message: string }> {
+export async function checkScienceMusetalkAvailability(options: Pick<ScienceMusetalkVideoOptions, 'signal' | 'avatarId' | 'referenceSha256'>): Promise<{ ready: boolean; message: string }> {
   options.signal.throwIfAborted()
+  const selected = avatarSelection(options)
   const deadline = AbortSignal.timeout(22_000), signal = AbortSignal.any([options.signal, deadline])
   let api: Api | undefined
   try {
     api = await openApi(signal)
-    const response = await fetch(`${api.apiUrl}/health`, { signal })
+    const response = await fetch(`${api.apiUrl}/health${selected ? `?avatar_id=${encodeURIComponent(selected.avatarId)}` : ''}`, { signal })
     if (!response.ok) {
       await response.body?.cancel().catch(() => {})
       if ([408, 429].includes(response.status) || response.status >= 500 && response.status <= 599) {
@@ -188,7 +208,7 @@ export async function checkScienceMusetalkAvailability(options: { signal: AbortS
     const health = await response.json() as any
     signal.throwIfAborted()
     if (health?.status === 'loading') return { ready: false, message: 'MuseTalk 正在加载主播缓存，等待服务就绪' }
-    identity(health)
+    selectedIdentity(health, selected)
     if (health.ok === true && health.status === 'ready') return { ready: true, message: 'MuseTalk 服务已就绪' }
     throw new Error('MuseTalk 健康检查返回异常服务状态，请检查服务配置及运行情况')
   } catch (error) {
@@ -218,6 +238,7 @@ function validateJob(value: any, checkpoint: Checkpoint): RemoteJob {
 /** Generate one full-narration presenter using a cached avatar on the remote GPU. */
 export async function prepareScienceMusetalkVideo(input: { videoPath: string; directory: string }, options: ScienceMusetalkVideoOptions): Promise<{ presenterPath: string; sourceSha256: string }> {
   options.signal.throwIfAborted()
+  const selected = avatarSelection(options)
   let signal = options.signal
   const directory = path.resolve(input.directory), source = path.resolve(input.videoPath)
   await fs.mkdir(directory, { recursive: true })
@@ -273,13 +294,13 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
     let health: any
     const readinessDeadline = Date.now() + 60_000
     while (true) {
-      health = await requestJson('/health')
+      health = await requestJson(`/health${selected ? `?avatar_id=${encodeURIComponent(selected.avatarId)}` : ''}`)
       if (health?.ok && health.status === 'ready') break
       if (health?.status !== 'loading' || Date.now() >= readinessDeadline) throw new Error('MuseTalk 远程服务尚未就绪，请稍后继续原任务')
       options.report?.('远程 MuseTalk 正在加载主播缓存')
       await delay(1000, undefined, { signal })
     }
-    const model = identity(health)
+    const model = selectedIdentity(health, selected)
     const contentHash = hash(JSON.stringify([1, sourceSha256, model]))
     const work = path.join(directory, `musetalk-${contentHash}`)
     await fs.mkdir(work, { recursive: true })
@@ -317,6 +338,10 @@ export async function prepareScienceMusetalkVideo(input: { videoPath: string; di
       const form = new FormData()
       form.set('request_id', requestId)
       form.set('audio', new Blob([await fs.readFile(audioPath)], { type: 'audio/flac' }), 'narration.flac')
+      if (selected) {
+        form.set('avatar_id', selected.avatarId)
+        form.set('reference_sha256', selected.referenceSha256)
+      }
       const job = validateJob(await requestJson('/v1/lipsync', { method: 'POST', body: form },
         positive('MUSETALK_UPLOAD_TIMEOUT_MS', 180_000, 600_000)), checkpoint)
       checkpoint.jobId = job.job_id ?? job.id

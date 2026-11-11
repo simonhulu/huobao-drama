@@ -25,6 +25,13 @@ def request_id(value):
     return hashlib.sha256(value.encode("ascii")).hexdigest()
 
 
+def multipart(fields):
+    parts = []
+    for name, value in fields:
+        parts.append(b'--b\r\nContent-Disposition: form-data; name="' + name.encode("ascii") + b'"\r\n\r\n' + value + b'\r\n')
+    return b"".join(parts) + b"--b--\r\n"
+
+
 def wait_until(predicate, timeout=3):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -68,6 +75,25 @@ class FakeRunner:
                     "width": 360, "height": 360, "elapsed_seconds": 1.0}
         finally:
             self.active -= 1
+
+
+class MultiAvatarRunner(FakeRunner):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.history_identity = {**self.identity, "avatar_id": "xiaoba-history-01",
+                                 "reference_sha256": "b" * 64, "avatar_profile_sha256": "c" * 64}
+        self.avatar_calls = []
+
+    def identity_for(self, avatar_id=None):
+        if avatar_id in (None, self.identity["avatar_id"]):
+            return dict(self.identity)
+        if avatar_id == self.history_identity["avatar_id"]:
+            return dict(self.history_identity)
+        raise KeyError("Unknown registered avatar")
+
+    def generate(self, audio, output, cancel, *, avatar_id=None):
+        self.avatar_calls.append(avatar_id)
+        return super().generate(audio, output, cancel)
 
 
 class JobServiceTests(unittest.TestCase):
@@ -131,6 +157,64 @@ class JobServiceTests(unittest.TestCase):
         with self.assertRaises(APIError) as caught:
             service.submit(job_id, WAV)
         self.assertEqual(caught.exception.status, 409)
+
+    def test_explicit_avatar_identity_is_bound_to_health_job_and_serial_execution(self):
+        runner = MultiAvatarRunner()
+        service = self.service(runner)
+        selected = runner.history_identity
+        self.assertEqual(service.health("xiaoba-history-01")["reference_sha256"], selected["reference_sha256"])
+        self.assertEqual(service.health()["avatar_id"], runner.identity["avatar_id"])
+        job_id = request_id("history")
+        record, created = service.submit(job_id, WAV, selected["avatar_id"], selected["reference_sha256"])
+        self.assertTrue(created)
+        self.assertEqual(record["avatar_profile_sha256"], selected["avatar_profile_sha256"])
+        self.completed(service, job_id)
+        duplicate, created = service.submit(job_id, WAV, selected["avatar_id"], selected["reference_sha256"])
+        self.assertFalse(created)
+        self.assertEqual(duplicate["avatar_selection"], selected["avatar_id"])
+        with self.assertRaises(APIError) as caught:
+            service.submit(job_id, WAV)
+        self.assertEqual(caught.exception.status, 409)
+        service.submit(request_id("science-after-history"), WAV)
+        self.completed(service, request_id("science-after-history"))
+        self.assertEqual(runner.avatar_calls, ["xiaoba-history-01", None])
+        self.assertEqual((runner.load_calls, runner.max_active), (1, 1))
+
+    def test_explicit_avatar_never_falls_back_for_missing_or_changed_registry_entries(self):
+        runner = MultiAvatarRunner()
+        service = self.service(runner, start=False)
+        for avatar_id, reference_sha256, status in (("unknown", "b" * 64, 404),
+                                                   ("xiaoba-history-01", "a" * 64, 409),
+                                                   ("xiaoba-history-01", None, 400),
+                                                   (None, "b" * 64, 400)):
+            with self.subTest(avatar_id=avatar_id, reference_sha256=reference_sha256):
+                with self.assertRaises(APIError) as caught:
+                    service.submit(request_id("invalid"), WAV, avatar_id, reference_sha256)
+                self.assertEqual(caught.exception.status, status)
+        self.assertEqual(service.jobs, {})
+        service.submit(request_id("changed-before-run"), WAV, "xiaoba-history-01", "b" * 64)
+        runner.history_identity["avatar_profile_sha256"] = "d" * 64
+        service.start()
+        wait_until(lambda: service.get(request_id("changed-before-run"))["status"] == "failed")
+        self.assertEqual(runner.calls, [])
+        with self.assertRaises(APIError) as caught:
+            service.retry(request_id("changed-before-run"))
+        self.assertEqual(caught.exception.status, 409)
+
+    def test_explicit_avatar_survives_restart_and_retry_without_rebinding(self):
+        first = self.service(MultiAvatarRunner(), start=False)
+        job_id = request_id("history-restart")
+        first.submit(job_id, FLAC, "xiaoba-history-01", "b" * 64)
+        first.close()
+        self.services.remove(first)
+        runner = MultiAvatarRunner()
+        second = self.service(runner)
+        self.assertTrue(second.get(job_id)["recoverable"])
+        retried = second.retry(job_id)
+        self.assertEqual(retried["avatar_profile_sha256"], "c" * 64)
+        self.assertEqual(retried["avatar_selection"], "xiaoba-history-01")
+        self.completed(second, job_id)
+        self.assertEqual(runner.avatar_calls, ["xiaoba-history-01"])
 
     def test_bounded_queue_and_queued_cancellation(self):
         service = self.service(start=False, max_queue=1)
@@ -235,7 +319,7 @@ class JobServiceTests(unittest.TestCase):
             JobService(self.directory.name, FakeRunner())
 
     def test_http_multipart_status_result_and_error_contract(self):
-        service = self.service()
+        service = self.service(MultiAvatarRunner())
         server = APIServer(("127.0.0.1", 0), service, max_upload_bytes=2048)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -274,6 +358,20 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(request("DELETE", f"/v1/jobs/{job_id}")[0], 200)
             self.assertEqual(request("POST", f"/v1/jobs/{job_id}/retry")[0], 200)
             self.assertEqual(len(service.runner.calls), 1)
+            status, response = request("GET", "/health?avatar_id=xiaoba-history-01")
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(response)["avatar_profile_sha256"], "c" * 64)
+            self.assertEqual(request("GET", "/health?avatar_id=unknown")[0], 404)
+            self.assertEqual(request("GET", "/health?avatar_id=xiaoba-history-01&avatar_id=other")[0], 400)
+            history_job = request_id("http-history")
+            history_form = multipart([("request_id", history_job.encode("ascii")), ("audio", WAV),
+                                      ("avatar_id", b"xiaoba-history-01"), ("reference_sha256", b"b" * 64)])
+            status, response = request("POST", "/v1/lipsync", history_form,
+                                       {"Content-Type": "multipart/form-data; boundary=b"})
+            self.assertEqual(status, 201)
+            self.assertEqual(json.loads(response)["avatar_selection"], "xiaoba-history-01")
+            self.completed(service, history_job)
+            self.assertEqual(service.runner.avatar_calls, [None, "xiaoba-history-01"])
         finally:
             server.shutdown()
             server.server_close()
@@ -285,6 +383,15 @@ class JobServiceTests(unittest.TestCase):
                 b"b" * 64 + b"\r\n--b--\r\n")
         with self.assertRaises(APIError):
             read_submission("multipart/form-data; boundary=b", body)
+
+    def test_parser_requires_complete_valid_avatar_identity_pair(self):
+        base = [("request_id", b"a" * 64), ("audio", WAV)]
+        for extra in ([("avatar_id", b"xiaoba-history-01")], [("reference_sha256", b"b" * 64)],
+                      [("avatar_id", b"../escape"), ("reference_sha256", b"b" * 64)],
+                      [("avatar_id", b"xiaoba-history-01"), ("reference_sha256", b"invalid")],
+                      [("avatar_id", b"xiaoba-history-01"), ("avatar_id", b"other"), ("reference_sha256", b"b" * 64)]):
+            with self.subTest(extra=extra), self.assertRaises(APIError):
+                read_submission("multipart/form-data; boundary=b", multipart(base + extra))
 
 
 class FakeFrame:

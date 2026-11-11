@@ -28,23 +28,36 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2,
   await clip(remote, remoteDuration, remoteFps, true)
   const output = await fs.readFile(remote)
   const identity = { model: 'musetalk-v15', source_revision: '0a89dec45a0192b824e3cf4daf96c239440c5ed8',
-    avatar_id: 'xiaolu-r3-fixture', reference_sha256: '1'.repeat(64), fps: remoteFps }
+    avatar_id: 'xiaolu-r3-fixture', reference_sha256: '1'.repeat(64), fps: remoteFps,
+    avatar_profile_sha256: undefined as string | undefined }
   const state = { submissions: 0, retries: 0, deletes: 0, polls: 0, downloads: 0, pending: false, wrongAudio: false, dropSubmission: false, dropSubmissions: 0,
     loadingReads: 0, failedPoll: false, onPoll: undefined as (() => void) | undefined, onResult: undefined as (() => void) | undefined,
-    jobs: new Map<string, any>(), requests: [] as string[], uploaded: undefined as Buffer | undefined }
+    jobs: new Map<string, any>(), requests: [] as string[], uploaded: undefined as Buffer | undefined,
+    avatars: new Map<string, typeof identity>(), selections: [] as { avatarId: string | null; referenceSha256: string | null }[],
+    healthFallback: false, wrongAvatar: false }
   const server = createServer(async (request, response) => {
     try {
       state.requests.push(`${request.method} ${request.url}`)
       const send = (data: unknown) => { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(data)) }
-      if (request.url === '/health') { const loading = state.loadingReads-- > 0; send({ ...identity, ok: !loading, status: loading ? 'loading' : 'ready' }); return }
+      const url = new URL(request.url || '/', 'http://localhost')
+      if (url.pathname === '/health') {
+        const avatarId = url.searchParams.get('avatar_id')
+        const selected = avatarId && !state.healthFallback ? state.avatars.get(avatarId) : identity
+        if (!selected) { response.statusCode = 404; send({ error: 'Unknown registered avatar' }); return }
+        const loading = state.loadingReads-- > 0; send({ ...selected, ok: !loading, status: loading ? 'loading' : 'ready' }); return
+      }
       if (request.url === '/v1/lipsync' && request.method === 'POST') {
         const parts: Buffer[] = []; for await (const part of request) parts.push(part)
         const form = await new Response(Buffer.concat(parts), { headers: { 'Content-Type': request.headers['content-type']! } }).formData()
         const id = String(form.get('request_id')), audio = form.get('audio') as File
+        const avatarId = form.get('avatar_id') as string | null, referenceSha256 = form.get('reference_sha256') as string | null
+        state.selections.push({ avatarId, referenceSha256 })
+        const selected = avatarId ? state.avatars.get(avatarId) : identity
+        if (!selected || avatarId && selected.reference_sha256 !== referenceSha256) { response.statusCode = 409; send({ error: 'Avatar mismatch' }); return }
         assert.match(id, /^[a-f0-9]{64}$/)
         state.uploaded = Buffer.from(await audio.arrayBuffer())
         state.submissions++
-        if (!state.jobs.has(id)) state.jobs.set(id, { ...identity, id, job_id: id, request_id: id,
+        if (!state.jobs.has(id)) state.jobs.set(id, { ...selected, id, job_id: id, request_id: id,
           audio_sha256: sha(state.uploaded), status: state.pending ? 'running' : 'completed', result_sha256: sha(output) })
         if (state.dropSubmission || state.dropSubmissions > 0) { state.dropSubmission = false; state.dropSubmissions = Math.max(0, state.dropSubmissions - 1); response.destroy(); return }
         send(state.jobs.get(id)); return
@@ -57,7 +70,8 @@ async function fixture(t: TestContext, mainDuration = 1.2, remoteDuration = 1.2,
         if (match[2] === '/result') { state.downloads++; state.onResult?.(); response.setHeader('Content-Type', 'video/mp4'); response.end(output); return }
         state.polls++; state.onPoll?.()
         if (state.failedPoll) { response.writeHead(500); response.end(); return }
-        send(state.wrongAudio ? { ...job, audio_sha256: '0'.repeat(64) } : job); return
+        send(state.wrongAudio ? { ...job, audio_sha256: '0'.repeat(64) }
+          : state.wrongAvatar ? { ...job, avatar_id: identity.avatar_id } : job); return
       }
       response.writeHead(404); response.end()
     } catch (error) { response.writeHead(500); response.end(String(error)) }
@@ -114,6 +128,53 @@ test('the availability probe only reads health and creates no task files when th
   assert.deepEqual(f.state.requests, ['GET /health'])
   assert.deepEqual(await fs.readdir(f.root, { recursive: true }), before)
   assert.equal(f.state.submissions, 0); assert.equal(f.state.retries, 0); assert.equal(f.state.deletes, 0)
+})
+
+function historyAvatar(f: Awaited<ReturnType<typeof fixture>>) {
+  const selected = { ...f.identity, avatar_id: 'xiaoba-history-01', reference_sha256: '2'.repeat(64), avatar_profile_sha256: '3'.repeat(64) }
+  f.state.avatars.set(selected.avatar_id, selected)
+  return { selected, options: { avatarId: selected.avatar_id, referenceSha256: selected.reference_sha256 } }
+}
+
+test('an explicit avatar health probe verifies the registered identity without accepting the science default', async t => {
+  const f = await fixture(t), { options } = historyAvatar(f)
+  assert.equal((await checkScienceMusetalkAvailability({ signal: signal(), ...options })).ready, true)
+  assert.deepEqual(f.state.requests, ['GET /health?avatar_id=xiaoba-history-01'])
+  f.state.healthFallback = true
+  await assert.rejects(checkScienceMusetalkAvailability({ signal: signal(), ...options }), /不能使用默认头像/)
+  assert.equal(f.state.submissions, 0)
+})
+
+test('explicit avatar requests bind identity and profile to the checkpoint and reuse one job after a lost acknowledgement', async t => {
+  const f = await fixture(t), { options, selected } = historyAvatar(f)
+  f.state.dropSubmission = true
+  const result = await prepareScienceMusetalkVideo(f, { signal: signal(), ...options })
+  const checkpoint = JSON.parse(await fs.readFile(path.join(path.dirname(result.presenterPath), 'musetalk.json'), 'utf8'))
+  assert.equal(checkpoint.identity.avatar_id, selected.avatar_id)
+  assert.equal(checkpoint.identity.reference_sha256, selected.reference_sha256)
+  assert.equal(checkpoint.identity.avatar_profile_sha256, selected.avatar_profile_sha256)
+  assert.deepEqual(f.state.selections, [options, options].map(x => ({ avatarId: x.avatarId, referenceSha256: x.referenceSha256 })))
+  assert.equal(f.state.jobs.size, 1)
+  assert.equal(f.state.submissions, 2)
+  assert.deepEqual(await prepareScienceMusetalkVideo(f, { signal: signal(), ...options }), result)
+  assert.equal(f.state.submissions, 2)
+})
+
+test('missing explicit avatars, changed reference hashes and incomplete identity options stop before submission', async t => {
+  const f = await fixture(t), { options } = historyAvatar(f)
+  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal(), avatarId: options.avatarId }), /同时提供/)
+  assert.equal(f.state.requests.length, 0)
+  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal(), ...options, avatarId: 'xiaoba-unknown' }), /HTTP 404/)
+  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal(), ...options, referenceSha256: '4'.repeat(64) }), /不能使用默认头像/)
+  assert.equal(f.state.submissions, 0)
+})
+
+test('a polled job with the wrong avatar is rejected even when its audio and request IDs match', async t => {
+  const f = await fixture(t), { options } = historyAvatar(f)
+  f.state.wrongAvatar = true
+  await assert.rejects(prepareScienceMusetalkVideo(f, { signal: signal(), ...options }), /头像或模型版本不一致/)
+  assert.equal(f.state.jobs.size, 1)
+  assert.equal(f.state.downloads, 0)
 })
 
 test('the availability probe reports loading without polling or creating a GPU task', async t => {
