@@ -7,6 +7,7 @@ import { z } from 'zod'
 import { parseHistoryYoutubeUrl } from './history-source-youtube-url.js'
 import type { collectHistoryYoutubeVideos, HistoryYoutubeCandidate } from './history-source-youtube.js'
 import { getScienceWorkflowService, ScienceWorkflowError, type ScienceJob, type ScienceWorkflowService } from './science-workflow.js'
+import {acquireNbaJobLock, NbaJobLockBusyError} from './nba-job-lock.js'
 
 const defaultRoot = fileURLToPath(new URL('../../../data/science-pop/collection/', import.meta.url))
 const modeSchema = z.enum(['drafts', 'videos', 'upload'])
@@ -36,6 +37,12 @@ export const scienceCollectionRetrySchema = z.object({
     .refine(values => new Set(values).size === values.length, '任务编号不能重复').optional(),
 }).strict()
 const settingsPatchSchema = scienceCollectionSettingsSchema.partial().refine(value => Object.keys(value).length > 0, '请提交采集设置')
+const refillSchema = z.object({
+  version: z.literal(1), request: scienceCollectionStartSchema.extend({targetCount: z.number().int().min(1).max(8),
+    mode: modeSchema, huashengAccountName: accountSchema, baijiahaoAccountName: accountSchema}), settings: scienceCollectionSettingsSchema,
+  runId: z.string().regex(/^science-batch-[a-f0-9-]{36}$/).nullable(),
+  settledAt: z.number().int().nonnegative().nullable(), nextAttemptAt: z.number().int().nonnegative().nullable(),
+}).strict()
 export type ScienceCollectionMode = z.infer<typeof modeSchema>
 export type ScienceCollectionSettings = z.infer<typeof scienceCollectionSettingsSchema>
 export interface ScienceCollectionItem {
@@ -56,10 +63,11 @@ export interface ScienceCollectionRun extends ScienceCollectionSettings {
 interface StoredRun extends ScienceCollectionRun {
   version: 1; requestId: string; inputHash: string; ownerPid?: number; stopRequested?: boolean
   pendingRetryJobIds?: string[]
+  pendingProcessingRequest?: boolean
   collectionOwnerPid?: number; collectionStopRequested?: boolean
 }
 type Workflow = Pick<ScienceWorkflowService, 'create' | 'knownYoutubeIds' | 'jobsForCollection' | 'runBatchJob' | 'validateBatchAccounts' | 'cancel'>
-export interface ScienceCollectionOptions { stateRoot?: string; workflow?: Workflow; collect?: typeof collectHistoryYoutubeVideos }
+export interface ScienceCollectionOptions { stateRoot?: string; workflow?: Workflow; collect?: typeof collectHistoryYoutubeVideos; now?: () => number }
 interface LiveRun { id: string; token: string; controller: AbortController; done: Promise<void> }
 // Shared by service instances, including test/route instances, so reads cannot orphan a live worker.
 const live = new Map<string, LiveRun>()
@@ -73,10 +81,15 @@ function alive(pid: number | undefined) {
   if (!Number.isInteger(pid) || !pid || pid < 1) return false
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
-function atomicWrite(file: string, value: unknown) {
+function atomicWrite(file: string, value: unknown, durable = false) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
   const temporary = `${file}.${randomUUID()}.tmp`
-  try { fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { flag: 'wx', mode: 0o600 }); fs.renameSync(temporary, file) }
+  try {
+    const fd = fs.openSync(temporary, 'wx', 0o600)
+    try { fs.writeFileSync(fd, JSON.stringify(value, null, 2)); if (durable) fs.fsyncSync(fd) }
+    finally { fs.closeSync(fd) }
+    fs.renameSync(temporary, file)
+  }
   finally { fs.rmSync(temporary, { force: true }) }
 }
 const defaults = (): ScienceCollectionSettings => ({ youtubeChannels: [], targetCount: 5, mode: 'upload', huashengAccountName: null, baijiahaoAccountName: null })
@@ -103,6 +116,7 @@ export class ScienceCollectionService {
   readonly stateRoot: string
   private automaticTimer?: ReturnType<typeof setInterval>
   private stopping = false
+  private refillReservation?: {requestId: string; settings: ScienceCollectionSettings; token: string}
   constructor(private readonly options: ScienceCollectionOptions = {}) {
     const directory = path.resolve(options.stateRoot || defaultRoot)
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); this.stateRoot = fs.realpathSync(directory)
@@ -161,7 +175,7 @@ export class ScienceCollectionService {
   private publicRun(run: StoredRun): ScienceCollectionRun {
     const { version: _version, requestId: _request, inputHash: _hash, ownerPid: _pid, stopRequested: _stop,
       collectionOwnerPid: _collectionPid, collectionStopRequested: _collectionStop,
-      pendingRetryJobIds: _pendingRetry, ...result } = this.synchronize(structuredClone(run))
+      pendingRetryJobIds: _pendingRetry, pendingProcessingRequest: _pendingProcessing, ...result } = this.synchronize(structuredClone(run))
     return result
   }
   private update(id: string, change: (run: StoredRun) => void) { const run = this.read(id); change(run); this.write(run); return run }
@@ -192,7 +206,8 @@ export class ScienceCollectionService {
       if (existing.inputHash !== inputHash) throw new ScienceWorkflowError('该启动请求已使用不同设置，请刷新后重新开始')
       return this.publicRun(existing)
     }
-    const settings = this.settings()
+    const reservation = this.refillReservation?.requestId === request.requestId ? this.refillReservation : undefined
+    const settings = reservation?.settings ?? this.settings()
     if (!settings.youtubeChannels.length) throw new ScienceWorkflowError('请先维护至少一个 YouTube 频道', 400)
     const mode = request.mode ?? settings.mode
     const hs = request.huashengAccountName === undefined ? settings.huashengAccountName ?? undefined : request.huashengAccountName
@@ -207,9 +222,22 @@ export class ScienceCollectionService {
       collection: { status: 'running', message: '正在开始频道采集' },
       processing: { status: 'queued', message: '等待来源入库' },
       counts: { scanned: 0, selected: 0, skipped: 0, completed: 0, failed: 0 }, items: [], channelErrors: [], logs: [], createdAt: timestamp, updatedAt: timestamp }
-    return this.launchCollection(run)
+    return this.launchCollection(run, reservation?.token)
   }
   private acquire(id: string) {
+    return this.guardAcquisition(this.lockFile, () => this.acquireWorkerToken(id))
+  }
+  private guardAcquisition(filename: string, acquire: () => string) {
+    let release: () => void
+    try { release = acquireNbaJobLock(`${filename}.acquire`) }
+    catch (error) {
+      if (error instanceof NbaJobLockBusyError) throw new ScienceWorkflowError('另一个进程正在获取科普执行权，请稍后重试')
+      throw error
+    }
+    try { return acquire() }
+    finally { release() }
+  }
+  private acquireWorkerToken(id: string) {
     if (live.has(this.stateRoot)) throw new ScienceWorkflowError('已有科普批次正在执行，请等待或停止后再开始')
     if (this.all().some(run => isActive(run.status) && (!run.processing || isActive(run.processing.status)))) throw new ScienceWorkflowError('已有科普制作队列正在执行，请等待后继续')
     const token = randomUUID()
@@ -240,6 +268,11 @@ export class ScienceCollectionService {
     const handle: LiveRun = { id: run.id, token, controller, done: Promise.resolve() }
     live.set(this.stateRoot, handle)
     try {
+      if (automaticRecovery && run.processing?.status === 'interrupted') {
+        for (const item of run.items) if (item.message === '执行已停止，素材和检查点保留')
+          item.message = '服务执行中断，等待恢复'
+      }
+      delete run.pendingProcessingRequest
       run.status = 'running'; run.ownerPid = process.pid; run.stopRequested = false
       run.processing = { status: 'running', message: '正在处理已入库任务' }; this.write(run)
     }
@@ -288,6 +321,9 @@ export class ScienceCollectionService {
     return this.report(id, message)
   }
   private acquireCollection(id: string) {
+    return this.guardAcquisition(this.collectionLockFile, () => this.acquireCollectorToken(id))
+  }
+  private acquireCollectorToken(id: string) {
     if (collecting.has(this.stateRoot) || this.all().some(run =>
       run.collection ? isActive(run.collection.status) : !run.processing && !run.retry && isActive(run.status)))
       throw new ScienceWorkflowError('已有采集任务正在执行，请等待或停止采集后再开始')
@@ -317,8 +353,8 @@ export class ScienceCollectionService {
     if (handle?.id !== id || lock?.token !== handle.token) throw new ScienceWorkflowError('采集执行权已变化，已停止入库')
     if (this.read(id).collectionStopRequested) { handle.controller.abort(); signal.throwIfAborted() }
   }
-  private launchCollection(run: StoredRun) {
-    const token = this.acquireCollection(run.id), controller = new AbortController()
+  private launchCollection(run: StoredRun, collectionToken?: string) {
+    const token = collectionToken ?? this.acquireCollection(run.id), controller = new AbortController()
     const handle: LiveRun = { id: run.id, token, controller, done: Promise.resolve() }
     collecting.set(this.stateRoot, handle)
     try {
@@ -351,12 +387,31 @@ export class ScienceCollectionService {
   private releaseCollection(token: string) {
     try { if (JSON.parse(fs.readFileSync(this.collectionLockFile, 'utf8')).token === token) fs.rmSync(this.collectionLockFile) } catch { /* Do not remove another worker's lock. */ }
   }
-  private runProcessingQueue() {
+  private canAutomaticallyProcess(run: StoredRun, item: ScienceCollectionItem, job: ScienceJob | undefined) {
+    if (!job || job.deletedAt || ['completed', 'deleted'].includes(item.status) || achieved(job, run)
+      || job.uploadStatus === 'uncertain' || job.huashengAccountName !== run.huashengAccountName
+      || job.baijiahaoAccountName !== run.baijiahaoAccountName || ['failed', 'unknown'].includes(job.status)
+      || job.status === 'paused' && job.automaticRecoveryAllowed === false) return false
+    if (awaitingWorkflow(job)) return true
+    if (item.status === 'failed' || !['draft', 'queued', 'running', 'ready', 'completed', 'paused', 'waiting_remote', 'awaiting_export'].includes(job.status)) return false
+    if (job.status === 'paused') return !/手动|人工|用户/.test(job.message)
+      && /(?:执行|服务|本机).*中断/.test(`${job.message} ${item.message} ${run.message}`)
+    return true
+  }
+  private hasAutomaticWork(run: StoredRun) {
+    const jobs = new Map(this.workflow.jobsForCollection(run.id).map(job => [job.id, job]))
+    if (run.items.every(item => ['completed', 'deleted'].includes(item.status))) return true
+    return run.items.some(item => (!run.retry || (run.pendingRetryJobIds ?? run.retry.jobIds).includes(item.jobId))
+      && (this.canAutomaticallyProcess(run, item, jobs.get(item.jobId))
+        || Boolean(jobs.get(item.jobId) && achieved(jobs.get(item.jobId)!, run))))
+  }
+  private runProcessingQueue(explicitRunId?: string) {
     if (this.stopping || live.has(this.stateRoot)) return []
     const run = this.all().reverse().find(run => run.processing?.status === 'queued'
-      && run.collection && !isActive(run.collection.status) && run.collection.status !== 'interrupted' && run.items.length)
+      && !run.stopRequested && run.collection && !isActive(run.collection.status) && run.collection.status !== 'interrupted'
+      && run.items.length && (run.id === explicitRunId || run.pendingProcessingRequest || this.hasAutomaticWork(run)))
     if (!run) return []
-    try { this.launch(run); return [run.id] }
+    try { this.launch(run, run.id !== explicitRunId && !run.pendingProcessingRequest); return [run.id] }
     catch (error) {
       if (!(error instanceof ScienceWorkflowError)) throw error
       return []
@@ -472,6 +527,11 @@ export class ScienceCollectionService {
         ['queued', 'paused', 'running'].includes(run.items.find(item => item.jobId === jobId)?.status || '')) : run.retry.jobIds)
       for (const jobId of jobIds) {
         this.verifyOwner(id, signal)
+        if (automaticRecovery) {
+          const item = this.read(id).items.find(item => item.jobId === jobId)
+          const job = this.workflow.jobsForCollection(id).find(job => job.id === jobId)
+          if (!item || !this.canAutomaticallyProcess(run, item, job)) continue
+        }
         if (!['completed', 'deleted'].includes(this.read(id).items.find(item => item.jobId === jobId)?.status || '')) await this.processItem(id, jobId, signal)
       }
       this.verifyOwner(id, signal)
@@ -495,7 +555,7 @@ export class ScienceCollectionService {
       if (!item) break
       visited.add(item.jobId)
       const job = automaticRecovery ? this.workflow.jobsForCollection(id).find(job => job.id === item.jobId) : undefined
-      if (automaticRecovery && (!job || !awaitingWorkflow(job)) && (item.status === 'failed' || job?.status === 'needs_attention')) continue
+      if (automaticRecovery && !this.canAutomaticallyProcess(run, item, job)) continue
       await this.processItem(id, item.jobId, signal)
     }
     this.verifyOwner(id, signal)
@@ -601,8 +661,16 @@ export class ScienceCollectionService {
   }
   resume(id: string) {
     const run = this.synchronize(this.read(id))
-    if (isActive(run.status) || run.status === 'completed') return this.publicRun(run)
+    if (isActive(run.status)) return this.publicRun(run)
+    if (run.collection?.status === 'completed') run.collectionStopRequested = false
+    if (run.status === 'completed') {
+      run.stopRequested = false
+      if (!run.items.some(item => !['completed', 'deleted'].includes(item.status))) return this.finishProcessing(run)
+      this.write(run)
+      return this.publicRun(run)
+    }
     if (!run.retry && run.collection?.status !== 'completed' && !reached(run)) {
+      run.stopRequested = false; run.pendingProcessingRequest = true
       run.processing = { status: 'queued', message: '已恢复制作队列，等待采集入库' }
       this.write(run)
       return this.resumeCollection(id)
@@ -628,7 +696,15 @@ export class ScienceCollectionService {
   }
   resumeCollection(id: string) {
     const run = this.synchronize(this.read(id))
-    if (run.collection?.status === 'completed' || run.collection && isActive(run.collection.status)) return this.publicRun(run)
+    if (run.collection?.status === 'completed') {
+      run.collectionStopRequested = false
+      run.status = run.stopRequested ? 'stopped' : !run.processing || run.processing.status === 'completed'
+        ? run.channelErrors.length ? 'needs_attention' : 'completed'
+        : run.processing.status === 'queued' ? 'running' : run.processing.status
+      this.write(run)
+      return this.publicRun(run)
+    }
+    if (run.collection && isActive(run.collection.status)) return this.publicRun(run)
     if (run.retry) throw new ScienceWorkflowError('本次仅重试原任务，不能额外采集')
     run.processing ??= { status: 'queued', message: '等待制作已入库任务' }
     return this.launchCollection(run)
@@ -648,15 +724,29 @@ export class ScienceCollectionService {
   resumeProcessing(id: string) {
     const run = this.synchronize(this.read(id))
     if (run.processing && isActive(run.processing.status)) return this.publicRun(run)
+    run.stopRequested = false
     if (run.retry) {
       run.retry.finishedAt = null
       run.pendingRetryJobIds = run.retry.jobIds.filter(jobId => !['completed', 'deleted'].includes(run.items.find(item => item.jobId === jobId)?.status || ''))
     }
-    if (!run.items.some(item => !['completed', 'deleted'].includes(item.status))) return this.publicRun(run)
+    if (!run.items.some(item => !['completed', 'deleted'].includes(item.status))) return this.finishProcessing(run)
     run.collection ??= { status: 'completed', message: '使用已有入库任务，不重新采集' }
+    run.pendingProcessingRequest = true
     run.processing = { status: 'queued', message: '已恢复制作队列' }; run.stopRequested = false
-    this.write(run); this.runProcessingQueue()
+    this.write(run); this.runProcessingQueue(id)
     return this.publicRun(this.read(id))
+  }
+  private finishProcessing(run: StoredRun) {
+    const message = '原任务已全部完成或删除，无需重新制作'
+    run.processing = {status: 'completed', message}
+    run.collection ??= {status: 'completed', message: '使用原批次已入库来源'}
+    run.status = run.collection.status !== 'completed' ? run.collection.status
+      : run.channelErrors.length ? 'needs_attention' : 'completed'
+    run.message = message; run.currentJobId = null
+    delete run.pendingProcessingRequest
+    if (run.retry) { run.pendingRetryJobIds = []; run.retry.finishedAt ??= new Date().toISOString() }
+    this.write(run)
+    return this.publicRun(run)
   }
   retry(id: string, input: unknown) {
     const request = scienceCollectionRetrySchema.parse(input)
@@ -669,17 +759,28 @@ export class ScienceCollectionService {
       throw new ScienceWorkflowError('批次正在执行，不能更改重试范围，请等待或停止后再重试')
     }
     const jobIds = run.items.filter(item => !['completed', 'deleted'].includes(item.status) && (!requested || requested.includes(item.jobId))).map(item => item.jobId)
-    if (!jobIds.length) return this.publicRun(run)
+    if (!jobIds.length) {
+      if (!run.items.some(item => !['completed', 'deleted'].includes(item.status))) {
+        run.stopRequested = false
+        return this.finishProcessing(run)
+      }
+      return this.publicRun(run)
+    }
     run.retry = { jobIds, startedAt: new Date().toISOString(), finishedAt: null, completed: 0, failed: 0 }
     run.pendingRetryJobIds = [...jobIds]
     run.currentChannel = null; run.currentJobId = null
     run.message = `正在重试 ${jobIds.length} 条原批次任务，不采集新视频`
     run.collection ??= { status: 'completed', message: '原来源已入库，本次不重新采集' }
+    run.pendingProcessingRequest = true
     run.processing = { status: 'queued', message: run.message }; run.stopRequested = false; this.write(run)
-    this.runProcessingQueue()
+    this.runProcessingQueue(id)
     return this.publicRun(this.read(id))
   }
   runAutomaticRecovery() {
+    const started = this.recoverExisting()
+    return [...started, ...this.refill()]
+  }
+  private recoverExisting() {
     if (this.stopping) return []
     const started: string[] = []
     for (const run of this.all()) {
@@ -701,7 +802,8 @@ export class ScienceCollectionService {
     const runs = this.all()
     if (runs.some(run => isActive(run.status) && (!run.processing || isActive(run.processing.status)))) return started
     const run = runs.find(run => (run.processing?.status === 'interrupted' || !run.processing && run.status === 'interrupted')
-      && run.stopRequested !== true && !alive(run.ownerPid) && (!run.collection || !isActive(run.collection.status)))
+      && run.stopRequested !== true && !alive(run.ownerPid) && (!run.collection || !isActive(run.collection.status))
+      && this.hasAutomaticWork(run))
     if (!run) return started
     try {
       this.workflow.validateBatchAccounts(run.mode, run.huashengAccountName, run.baijiahaoAccountName)
@@ -717,6 +819,105 @@ export class ScienceCollectionService {
     } catch (error) {
       if (!(error instanceof ScienceWorkflowError)) throw error
       return started
+    }
+  }
+  private refillPaused(runs: StoredRun[], settings: ScienceCollectionSettings, jobsByRun: Map<string, ScienceJob[]>) {
+    const relevant = runs.filter(run => run.mode === settings.mode && run.huashengAccountName === settings.huashengAccountName
+      && run.baijiahaoAccountName === settings.baijiahaoAccountName)
+    let successfulAt = -Infinity
+    for (const run of relevant) for (const job of jobsByRun.get(run.id)!) {
+      if (achieved(job, run)) successfulAt = Math.max(successfulAt, Date.parse(job.updatedAt) || 0)
+    }
+    return relevant.some(run => {
+      if (run.stopRequested || run.collectionStopRequested || run.processing?.status === 'stopped' || run.collection?.status === 'stopped') return true
+      const jobs = jobsByRun.get(run.id)!.filter(job => !job.deletedAt)
+      if (jobs.some(job => job.status === 'paused' && !achieved(job, run) && !awaitingWorkflow(job)
+        && (job.automaticRecoveryAllowed === false || /手动|人工|用户/.test(job.message)
+          || !/(?:执行|服务|本机).*中断/.test(`${job.message} ${run.items.find(item => item.jobId === job.id)?.message} ${run.message}`)))) return true
+      if (run.processing?.status === 'needs_attention' && batchBlocker(run.processing.message)
+        && Date.parse(run.updatedAt) >= successfulAt && jobs.some(job => !achieved(job, run))) return true
+      return run.collection?.status === 'needs_attention' && batchBlocker(run.collection.message)
+        && Date.parse(run.updatedAt) >= successfulAt
+    })
+  }
+  private refill() {
+    if (this.stopping || process.env.SCIENCE_COLLECTION_REFILL_ENABLED !== '1' || collecting.has(this.stateRoot)) return []
+    const savedSettings = this.settings()
+    if (!savedSettings.youtubeChannels.length) return []
+    let settings: ScienceCollectionSettings
+    try { settings = {...savedSettings, ...this.workflow.validateBatchAccounts(savedSettings.mode,
+      savedSettings.huashengAccountName ?? undefined, savedSettings.baijiahaoAccountName ?? undefined)} }
+    catch { return [] }
+    let token: string
+    try { token = this.acquireCollection('science-refill') }
+    catch (error) { if (error instanceof ScienceWorkflowError) return []; throw error }
+    try {
+      const runs = this.all()
+      const jobsByRun = new Map(runs.filter(run => run.mode === settings.mode
+        && run.huashengAccountName === settings.huashengAccountName && run.baijiahaoAccountName === settings.baijiahaoAccountName)
+        .map(run => [run.id, this.workflow.jobsForCollection(run.id)]))
+      if (this.refillPaused(runs, settings, jobsByRun)) return []
+      const scope = {youtubeChannels: settings.youtubeChannels, mode: settings.mode,
+        huashengAccountName: settings.huashengAccountName, baijiahaoAccountName: settings.baijiahaoAccountName}
+      const key = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
+      const filename = path.join(this.stateRoot, 'refill', `${key}.json`)
+      let state: z.infer<typeof refillSchema> | undefined
+      if (fs.existsSync(filename)) {
+        try { state = refillSchema.parse(JSON.parse(fs.readFileSync(filename, 'utf8'))) }
+        catch { throw Error('科普补队 intent 无法读取，保留原记录等待处理') }
+        if (JSON.stringify(state.settings.youtubeChannels) !== JSON.stringify(settings.youtubeChannels)
+          || state.request.mode !== settings.mode || state.settings.mode !== settings.mode
+          || state.request.huashengAccountName !== settings.huashengAccountName || state.settings.huashengAccountName !== settings.huashengAccountName
+          || state.request.baijiahaoAccountName !== settings.baijiahaoAccountName || state.settings.baijiahaoAccountName !== settings.baijiahaoAccountName)
+          throw Error('科普补队 intent 配置不一致，已停止补队')
+      }
+      const now = this.options.now?.() ?? Date.now()
+      if (state) {
+        const run = runs.find(run => run.requestId === state!.request.requestId)
+        if (!run && state.runId !== null) throw Error('科普补队原批次丢失，保留 intent 等待处理')
+        if (run) {
+          if (run.inputHash !== createHash('sha256').update(JSON.stringify(state.request)).digest('hex')
+            || JSON.stringify(run.youtubeChannels) !== JSON.stringify(state.settings.youtubeChannels)
+            || state.runId !== null && state.runId !== run.id || run.mode !== state.request.mode
+            || run.targetCount !== state.request.targetCount || run.huashengAccountName !== state.request.huashengAccountName
+            || run.baijiahaoAccountName !== state.request.baijiahaoAccountName)
+            throw Error('科普补队 intent 与原批次不一致，已停止补队')
+          state.runId = run.id
+          if (!run.collection || isActive(run.collection.status) || run.collection.status === 'interrupted') return []
+          if (state.settledAt === null) {
+            state.settledAt = now
+            if (!run.items.length || !reached(run)) state.nextAttemptAt = now + 30 * 60_000
+            atomicWrite(filename, state, true)
+          }
+        }
+        if (state.nextAttemptAt !== null && state.nextAttemptAt > now) return []
+      }
+      const pending = new Set<string>()
+      for (const run of runs) {
+        if (run.mode !== settings.mode || run.huashengAccountName !== settings.huashengAccountName
+          || run.baijiahaoAccountName !== settings.baijiahaoAccountName || run.stopRequested || run.collectionStopRequested
+          || !['queued', 'running', 'interrupted'].includes(run.processing?.status || '')
+          || !run.collection || isActive(run.collection.status) || run.collection.status === 'interrupted') continue
+        const jobs = new Map(jobsByRun.get(run.id)!.map(job => [job.id, job]))
+        for (const item of run.items) if ((!run.retry || (run.pendingRetryJobIds ?? run.retry.jobIds).includes(item.jobId))
+          && this.canAutomaticallyProcess(run, item, jobs.get(item.jobId))) pending.add(item.jobId)
+      }
+      if (pending.size >= 3) return []
+      if (!state || state.settledAt !== null) {
+        state = {version: 1, request: {requestId: `refill-${randomUUID()}`, targetCount: 8 - pending.size, mode: settings.mode,
+          huashengAccountName: settings.huashengAccountName, baijiahaoAccountName: settings.baijiahaoAccountName},
+          settings, runId: null, settledAt: null, nextAttemptAt: null}
+        atomicWrite(filename, state, true)
+      }
+      // A crash must replay the saved request, including its original target.
+      if (pending.size + state.request.targetCount > 8) return []
+      this.refillReservation = {requestId: state.request.requestId, settings: state.settings, token}
+      const run = this.start(state.request)
+      state.runId = run.id; atomicWrite(filename, state, true)
+      return [run.id]
+    } finally {
+      this.refillReservation = undefined
+      if (collecting.get(this.stateRoot)?.token !== token) this.releaseCollection(token)
     }
   }
   startAutomaticRecovery() {

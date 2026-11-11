@@ -68,6 +68,7 @@ export interface ScienceJob {
   checkpoint: string | null; logs: Array<{ at: string; message: string }>; upload: SocialUploadResult | null
   hasUploadAttempt: boolean
   executionActive?: boolean
+  automaticRecoveryAllowed?: boolean
   autoUpload?: boolean; uploadStatus?: ScienceUploadStatus
   coverStyle?: string; coverInstruction?: string; coverRevision?: number; coverGenerationPending?: boolean
   plan?: SciencePlan | null
@@ -266,6 +267,7 @@ export class ScienceWorkflowService {
       landscapeCoverUrl: landscapeAvailable ? asset('landscape-cover') : null,
       portraitCoverUrl: portraitAvailable ? asset('portrait-cover') : null,
       hasUploadAttempt: Boolean(uploadAttempt), executionActive: this.isExecuting(job) || this.reviewingJobs.has(job.id),
+      automaticRecoveryAllowed: job.automaticDelivery !== false,
       coverGenerationPending: Boolean(coverRequest), autoUpload: job.autoUpload === true, uploadStatus }
   }
   detail(id: string) { return this.publicJob(this.read(id)) }

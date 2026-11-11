@@ -435,15 +435,20 @@ test('shutdown during a GPU availability probe preserves waiting intent while ex
         await new Promise<void>((_, reject) => { signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }) })
         throw new Error('unreachable')
       }, prepareMusetalkPresenter: async () => assert.fail('cancellation must never submit GPU work') }), job = await prepared(h)
-      const { file } = pendingMusetalk(h, job.id)
+      const collectionId = `science-batch-${randomUUID()}`
+      const { file } = pendingMusetalk(h, job.id, { collectionId })
       h.service.produce(job.id, undefined, { waitForPresenter: true }); await started
       if (stop === 'shutdown') await h.service.stop()
       else { h.service.cancel(job.id); await h.service.waitForIdle() }
       const paused = h.service.detail(job.id), saved = JSON.parse(fs.readFileSync(file, 'utf8'))
       assert.equal(paused.status, 'paused'); assert.equal(Boolean(paused.presenterWait), stop === 'shutdown')
       assert.equal(saved.automaticDelivery, stop === 'shutdown')
+      assert.equal(paused.automaticRecoveryAllowed, stop === 'shutdown')
+      assert.equal(h.service.jobsForCollection(collectionId).find(value => value.id === job.id)?.automaticRecoveryAllowed,
+        stop === 'shutdown')
       h.options.checkMusetalkAvailability = async () => ({ ready: false, message: 'GPU 忙' })
       const restored = new ScienceWorkflowService(h.options); t.after(() => restored.stop())
+      assert.equal(restored.detail(job.id).automaticRecoveryAllowed, stop === 'shutdown')
       now += 60_001
       assert.deepEqual(restored.runAutomaticExports(), stop === 'shutdown' ? [job.id] : []); await restored.waitForIdle()
       assert.equal(restored.detail(job.id).status, stop === 'shutdown' ? 'waiting_remote' : 'paused')
