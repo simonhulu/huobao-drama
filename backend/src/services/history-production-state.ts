@@ -78,13 +78,13 @@ export function isHistorySubmissionReceipt(value: unknown): value is Row {
 
 function inventory(database: Database.Database, ids: number[]) {
   const tables = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row => row.name))
-  const read = (table: string, owner: string) => {
+  const read = (table: string, owner: string, columns = '*') => {
     if (!tables.has(table) || !(database.pragma(`table_info(${table})`) as Array<{name:string}>).some(column => column.name === owner)) return []
     const rows: Row[] = []
     // Stay below SQLite builds with the conservative 999 bound-parameter limit.
     for (let offset = 0; offset < ids.length; offset += 500) {
       const batch = ids.slice(offset, offset + 500)
-      rows.push(...database.prepare(`SELECT * FROM ${table} WHERE ${owner} IN (${batch.map(() => '?').join(',')})`).all(...batch) as Row[])
+      rows.push(...database.prepare(`SELECT ${columns} FROM ${table} WHERE ${owner} IN (${batch.map(() => '?').join(',')})`).all(...batch) as Row[])
     }
     return rows.sort((a, b) => typeof a.id === 'number' && typeof b.id === 'number' ? b.id - a.id
       : String(b.updated_at || '').localeCompare(String(a.updated_at || '')))
@@ -94,7 +94,17 @@ function inventory(database: Database.Database, ids: number[]) {
     videos: read('history_video_deliveries', 'script_id'),
     huasheng: read('history_huasheng_jobs', 'source_id'),
     exports: read('history_huasheng_export_jobs', 'source_id'),
-    motion: read('history_motion_productions', 'script_id'),
+    // Keep large candidates and visual plans inside SQLite. Type tags preserve
+    // missing versus explicit null when matching legacy manuscript identities.
+    motion: read('history_motion_productions', 'script_id', `id,script_id,status,updated_at,
+      CASE WHEN json_valid(snapshot) THEN json_array(
+        json_type(snapshot,'$.script'),json_type(snapshot,'$.factory.scriptHash'),
+        json_extract(snapshot,'$.script','$.factory.scriptHash','$.message','$.error'))
+        ELSE '[]' END AS metadata`).map((row): Row => {
+      const [scriptType,hashType,fields] = JSON.parse(row.metadata)
+      const [script,scriptHash,message,error] = fields || []
+      return {...row,data:{script:scriptType?script:undefined,factory:hashType?{scriptHash}:undefined,message,error}}
+    }),
     packaging: read('history_video_packaging', 'script_id'),
     publications: read('history_social_upload_jobs', 'source_id'),
     intents: read('history_video_publication_intents', 'source_id'),
@@ -187,8 +197,8 @@ export function getHistoryProductionStates(database: Database.Database, sources:
       .filter((video, index, all) => all.findIndex(other => other.producer === video.producer) === index)
     const legacy = rows.legacy.find(row => row.script_id === source.id)
     const huasheng = rows.huasheng.find(row => row.source_id === source.id && row.script_sha256 === scriptSha256 && row.status !== 'canceled')
-    const motion = rows.motion.filter(row => row.script_id === source.id).map((row): Row => ({...row, data: object(row.snapshot)}))
-      .find(row => row.data.factory?.scriptHash === scriptSha256 || row.data.script === source.rewrittenScript)
+    const motion = rows.motion.find(row => row.script_id === source.id
+      && (row.data.factory?.scriptHash === scriptSha256 || row.data.script === source.rewrittenScript))
     const producers: HistoryProductionProducer[] = productionMode === 'dual' ? ['huasheng', 'motion']
       : productionMode === 'motion_backfill' ? ['motion']
         : [...new Set<HistoryProductionProducer>([...videos.map(video => video.producer as HistoryProductionProducer),

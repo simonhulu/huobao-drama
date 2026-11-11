@@ -49,10 +49,100 @@ function fixture(t: TestContext, mode: 'dual' | 'motion_backfill' | null = 'dual
       .run(source.id,id,options.draft?'draft':'publish',options.state || 'completed',JSON.stringify(result),
         options.legacyPath?JSON.stringify({videoPath:options.legacyPath}):null).lastInsertRowid
   }
+  const motion = (snapshot: unknown, options: {id?:string;status?:string;updatedAt?:string} = {}) => {
+    database.exec(`CREATE TABLE IF NOT EXISTS history_motion_productions(
+      id TEXT PRIMARY KEY,script_id INTEGER,status TEXT,updated_at TEXT,snapshot TEXT)`)
+    database.prepare('INSERT OR REPLACE INTO history_motion_productions VALUES(?,?,?,?,?)')
+      .run(options.id || 'motion-original', source.id, options.status || 'selecting', options.updatedAt || 'after', JSON.stringify(snapshot))
+  }
   t.after(() => {database.close();fs.rmSync(root,{recursive:true,force:true})})
-  return {database,root,source,digest,video,packageVideo,submission,material,
+  return {database,root,source,digest,video,packageVideo,submission,material,motion,
     read:()=>getHistoryProductionState(database,source,{root})}
 }
+
+test('motion state keeps original script matching, newest-job order, stored status and fresh progress', t => {
+  const h = fixture(t, null)
+  h.motion({script:'legacy snapshot text',factory:{scriptHash:h.digest},message:'原任务失败',error:'原错误'},
+    {status:'failed',updatedAt:'2026-11-01'})
+  h.motion({script:'另一稿件',factory:{scriptHash:hash('另一稿件')},message:'不属于当前稿件'},
+    {id:'newer-stale',updatedAt:'2026-11-03'})
+  assert.equal(h.read().versions[0]!.state,'attention')
+  assert.equal(h.read().versions[0]!.error,'原错误')
+  h.motion({script:h.source.rewrittenScript,factory:{scriptHash:'legacy-hash'},status:'failed',message:'正在准备画面 45/87'},
+    {id:'newer-current',updatedAt:'2026-11-02'})
+  const version = h.read().versions[0]!
+  assert.equal(version.state,'producing')
+  assert.equal(version.message,'正在准备画面 45/87')
+  h.motion({script:h.source.rewrittenScript,message:'准备画面已完成',error:'最新错误'},
+    {id:'newer-current',status:'needs_review',updatedAt:'2026-11-04'})
+  assert.equal(h.read().versions[0]!.state,'attention')
+  assert.equal(h.read().versions[0]!.error,'最新错误')
+})
+
+test('motion metadata distinguishes missing fields, explicit null and non-object snapshots', t => {
+  const h = fixture(t, null), source = {...h.source,rewrittenScript:null}
+  const read = () => getHistoryProductionState(h.database,source,{root:h.root})
+  for (const snapshot of [null,[],true,'text',{}, {factory:{}}, {script:'unrelated'}]) {
+    h.motion(snapshot)
+    assert.deepEqual(read().versions,[],JSON.stringify(snapshot))
+  }
+  h.database.prepare('UPDATE history_motion_productions SET snapshot=?').run('not valid JSON')
+  assert.deepEqual(read().versions,[])
+  for (const snapshot of [{script:null},{factory:{scriptHash:null}}]) {
+    h.motion(snapshot)
+    assert.equal(read().versions[0]!.state,'stale')
+  }
+  h.motion({script:{text:'not a manuscript string'}})
+  assert.deepEqual(getHistoryProductionState(h.database,{...h.source,rewrittenScript:'{"text":"not a manuscript string"}'},{root:h.root}).versions,[])
+})
+
+test('published Huasheng identity survives a sibling motion snapshot and its progress changes', t => {
+  const h = fixture(t), flower = h.video('huasheng')
+  const upload = h.submission(flower.id,{published:true})
+  const published = h.read().versions.find(version=>version.producer==='huasheng')!
+  for (const message of ['正在准备画面 38/87','正在准备画面 45/87']) {
+    h.motion({script:h.source.rewrittenScript,factory:{scriptHash:h.digest},message,
+      candidates:{unused:'x'.repeat(128*1024)}})
+    const state = h.read()
+    assert.deepEqual(state.versions.find(version=>version.producer==='huasheng'),published)
+    assert.equal(published.state,'published')
+    assert.equal(published.jobId,String(upload))
+    assert.equal(published.videoId,flower.id)
+    assert.equal(published.canPublish,false)
+    assert.equal(state.versions.find(version=>version.producer==='motion')!.message,message)
+    assert.equal(state.complete,false)
+  }
+})
+
+test('unknown legacy publication outcomes retain the original reconciliation identity beside motion metadata', t => {
+  const h = fixture(t,'motion_backfill'), video = h.video('motion')
+  h.packageVideo(video.id)
+  const upload = h.submission(null,{state:'uncertain',legacyPath:path.join(h.root,video.videoUrl.replace('/static/','')),
+    result:{saved:false,submitted:false}})
+  const original = h.read()
+  h.motion({script:h.source.rewrittenScript,message:'新画面进度',plan:{unused:'x'.repeat(128*1024)}})
+  assert.deepEqual(h.read(),original)
+  const version = original.versions[0]!
+  assert.equal(version.state,'uncertain')
+  assert.equal(version.jobId,String(upload))
+  assert.equal(version.videoId,video.id)
+  assert.equal(version.action,'reconcile')
+  assert.equal(version.canPublish,false)
+})
+
+test('read-only production polling does not parse unused large motion plans in JavaScript', t => {
+  const h = fixture(t,null)
+  h.motion({script:h.source.rewrittenScript,factory:{scriptHash:h.digest},message:'正在准备画面',
+    candidates:{unused:'x'.repeat(1024*1024)},plan:{unused:'y'.repeat(1024*1024)}})
+  const parse = JSON.parse, sizes: number[] = []
+  t.mock.method(JSON,'parse',(text:string,reviver?:Parameters<typeof JSON.parse>[1])=>{
+    sizes.push(Buffer.byteLength(text));return parse(text,reviver)
+  })
+  h.database.pragma('query_only=ON')
+  assert.equal(h.read().versions[0]!.message,'正在准备画面')
+  assert.ok(sizes.length>0)
+  assert.ok(Math.max(...sizes)<4096,`JavaScript parsed ${Math.max(...sizes)} bytes from a motion snapshot`)
+})
 
 test('coordinator flags and Huasheng assets do not establish local delivery or workflow completion', t => {
   const h = fixture(t)
