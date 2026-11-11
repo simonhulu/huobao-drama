@@ -100,8 +100,18 @@ export async function createHuashengProjectApiClient(input: HuashengBrowserInput
   const sameSession = async () => {
     let current
     try { current = await (options.productionSession || readHuashengProductionSession)({ ...input, projectUrl: input.projectUrl || `${ORIGIN}/` }) }
-    catch { throw new HuashengApiError('login_required', '花生账号登录态无法核验，接口请求未发送', false,
-      undefined, false, true) }
+    catch (error) {
+      input.signal.throwIfAborted()
+      const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+      const login = code === 'login_required'
+      const temporary = !login && (code === 'retryable' || (error as { retryable?: unknown } | null)?.retryable === true)
+      const failure = new HuashengApiError(login ? 'login_required' : 'browser_unavailable', login
+        ? '花生账号登录态已失效，接口请求未发送'
+        : '花生会话核验暂时不可用，接口请求未发送，原任务和配音设置已保留', false, undefined, false, true)
+      if (temporary) failure.retryable = true
+      Object.defineProperty(failure, 'cause', { value: error, configurable: true })
+      throw failure
+    }
     if (current.cookie !== session.cookie || current.userAgent !== session.userAgent) {
       throw new HuashengApiError('login_required', '花生账号在执行期间变化，接口请求未发送', false,
         undefined, false, true)

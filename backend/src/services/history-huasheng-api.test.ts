@@ -152,6 +152,76 @@ test('a temporary API session failure stays retryable when an explicit voice pre
   }), { code: 'browser_unavailable', retryable: true })
 })
 
+test('session recheck retains a temporary failure and sends a create only after successful revalidation', async t => {
+  const input = { ...fixture().input(), voiceId: 1595661, voiceType: 1 }
+  const session = { cookie: 'fixture-cookie', userAgent: 'fixture-agent', csrf: 'fixture-csrf', ra: 'fixture-ra', bs: 'wbh', fv: '317253' }
+  const unavailable = Object.assign(new Error('temporary CDP read failure'), { code: 'retryable' })
+  let rechecks = 0, mutations = 0
+  t.mock.method(globalThis, 'fetch', async (_value: unknown, init?: RequestInit) => {
+    if (init?.method === 'POST') { mutations++; return Response.json({ code: 0, data: { pid } }) }
+    return Response.json({ voices: [{ id: '1595661', voice_type: '2', state: '0' }] })
+  })
+  const client = await createHuashengProjectApiClient(input, {
+    session: async () => session,
+    productionSession: async () => { if (++rechecks === 1) throw unavailable; return session },
+  })
+  await client.prepareCreate(script)
+  await assert.rejects(client.create(script), error => {
+    assert.ok(error instanceof HuashengApiError)
+    assert.equal(error.code, 'browser_unavailable')
+    assert.equal(error.retryable, true)
+    assert.equal(error.actionNotStarted, true)
+    assert.equal(error.fallbackSafe, false)
+    assert.equal(error.cause, unavailable)
+    return true
+  })
+  assert.equal(mutations, 0)
+  assert.deepEqual(await client.create(script), { pid })
+  assert.equal(mutations, 1)
+})
+
+test('session recheck never retries expired credentials or a changed account identity', async t => {
+  const input = { ...fixture().input(), voiceId: 1595661, voiceType: 1 }
+  const session = { cookie: 'fixture-cookie', userAgent: 'fixture-agent', csrf: 'fixture-csrf', ra: 'fixture-ra', bs: 'wbh', fv: '317253' }
+  t.mock.method(globalThis, 'fetch', async (_value: unknown, init?: RequestInit) => {
+    assert.equal(init?.method, 'GET', 'no mutation may follow an unverified identity')
+    return Response.json({ voices: [{ id: '1595661', voice_type: '2', state: '0' }] })
+  })
+  for (const changed of [false, true]) {
+    const client = await createHuashengProjectApiClient(input, {
+      session: async () => session,
+      productionSession: async () => {
+        if (changed) return { ...session, cookie: 'different-account' }
+        throw Object.assign(new Error('login expired'), { code: 'login_required' })
+      },
+    })
+    await client.prepareCreate(script)
+    await assert.rejects(client.create(script), error => {
+      assert.ok(error instanceof HuashengApiError)
+      assert.equal(error.code, 'login_required')
+      assert.notEqual(error.retryable, true)
+      assert.equal(error.actionNotStarted, true)
+      return true
+    })
+  }
+})
+
+test('session recheck preserves cancellation rather than reporting a login failure', async t => {
+  const controller = new AbortController(), reason = new Error('stop original job')
+  const input = { ...fixture().input(), signal: controller.signal, voiceId: 1595661, voiceType: 1 }
+  const session = { cookie: 'fixture-cookie', userAgent: 'fixture-agent', csrf: 'fixture-csrf', ra: 'fixture-ra', bs: 'wbh', fv: '317253' }
+  t.mock.method(globalThis, 'fetch', async (_value: unknown, init?: RequestInit) => {
+    assert.equal(init?.method, 'GET')
+    return Response.json({ voices: [{ id: '1595661', voice_type: '2', state: '0' }] })
+  })
+  const client = await createHuashengProjectApiClient(input, {
+    session: async () => session,
+    productionSession: async () => { controller.abort(reason); throw reason },
+  })
+  await client.prepareCreate(script)
+  await assert.rejects(client.create(script), error => error === reason)
+})
+
 test('API creates once, waits for each question, verifies zero cost, and confirms once', async () => {
   const run = fixture()
   assert.deepEqual(await run.drive(), { projectUrl })
