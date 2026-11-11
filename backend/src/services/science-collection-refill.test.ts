@@ -10,7 +10,8 @@ import {ScienceCollectionService, type ScienceCollectionOptions} from './science
 import {ScienceWorkflowError, type ScienceJob} from './science-workflow.js'
 
 const channel = 'https://www.youtube.com/@ScienceRefill/videos'
-const timestamp = '2026-11-12T00:00:00.000Z'
+const timestamp = new Date(Date.now() - 60_000).toISOString()
+const later = (milliseconds: number) => new Date(Date.parse(timestamp) + milliseconds).toISOString()
 function fixture(t: test.TestContext, config: {empty?: boolean; enabled?: boolean; available?: number} = {}) {
   const previous = process.env.SCIENCE_COLLECTION_REFILL_ENABLED
   if (config.enabled !== false) process.env.SCIENCE_COLLECTION_REFILL_ENABLED = '1'
@@ -92,6 +93,10 @@ function fixture(t: test.TestContext, config: {empty?: boolean; enabled?: boolea
     return {id, run, filename, jobs: [...jobs.values()].filter(job => job.collectionId === id)}
   }
   return {root, service, jobs, calls, visits, seed, options,
+    authorize(fields: Record<string, any> = {}) {
+      return seed(0, {status: 'completed', processing: {status: 'completed', message: 'Finished'},
+        createdAt: later(1000), updatedAt: later(1000), ...fields})
+    },
     advance(ms: number) { now += ms }, block(message?: string) { validationError = message },
     restart() { const current = new ScienceCollectionService(options); services.push(current); return current },
     intents() { const directory = path.join(root, 'refill'); return fs.existsSync(directory)
@@ -342,6 +347,113 @@ test('explicit batch stop and manually paused items pause refill after restart',
   h.seed(1, {}, {status: 'paused', message: '已手动暂停此任务'})
   restarted.runAutomaticRecovery(); await h.collected()
   assert.equal(h.visits.length, 0); assert.equal(h.calls.length, 0)
+})
+
+test('a later manual start permits new refill without changing or executing an older stopped batch', async t => {
+  const h = fixture(t)
+  const old = h.seed(1, {status: 'stopped', stopRequested: true, collectionStopRequested: true,
+    processing: {status: 'stopped', message: 'User stopped'}})
+  const before = fs.readFileSync(old.filename, 'utf8'), oldJob = structuredClone(old.jobs[0])
+  h.authorize()
+  h.restart().runAutomaticRecovery(); await h.collected()
+  assert.equal(h.visits.length, 1); assert.equal(h.jobs.size, 9)
+  assert.equal(h.calls.includes(old.jobs[0]!.id), false)
+  assert.equal(fs.readFileSync(old.filename, 'utf8'), before)
+  assert.deepEqual(old.jobs[0], oldJob)
+  assert.equal(h.intents()[0].request.targetCount, 8)
+})
+
+for (const stop of ['processing', 'collection', 'status'] as const) {
+  for (const updatedAt of [later(1000), later(2000), 'invalid']) {
+    test(`${stop} stop at ${updatedAt} still blocks refill after a later manual start and restart`, t => {
+      const h = fixture(t)
+      const fields = stop === 'processing' ? {stopRequested: true}
+        : stop === 'collection' ? {collectionStopRequested: true}
+          : {processing: {status: 'stopped', message: 'Stopped'}}
+      const old = h.seed(1, {status: 'stopped', processing: {status: 'needs_attention', message: 'Awaiting explicit action'}, ...fields, updatedAt})
+      const before = fs.readFileSync(old.filename, 'utf8')
+      h.authorize()
+      h.restart().runAutomaticRecovery()
+      assert.equal(h.visits.length, 0); assert.equal(h.calls.length, 0)
+      assert.equal(fs.readFileSync(old.filename, 'utf8'), before)
+    })
+  }
+}
+
+for (const fields of [
+  {requestId: `refill-${randomUUID()}`},
+  {createdAt: 'invalid'},
+  {requestId: ''},
+  {huashengAccountName: 'hs-other'},
+  {baijiahaoAccountName: 'bj-other'},
+  {mode: 'drafts'},
+]) test(`automatic, invalid, or unrelated start ${JSON.stringify(fields)} cannot override a stop`, t => {
+  const h = fixture(t)
+  h.seed(1, {status: 'stopped', stopRequested: true, processing: {status: 'stopped', message: 'Stopped'}, updatedAt: later(500)})
+  h.authorize(fields)
+  h.restart().runAutomaticRecovery()
+  assert.equal(h.visits.length, 0); assert.equal(h.calls.length, 0)
+  assert.equal(h.intents().length, 0)
+})
+
+test('old manual pauses stop suppressing refill but never become executable after a newer manual start', async t => {
+  const h = fixture(t)
+  const old = h.seed(1, {}, {status: 'paused', automaticRecoveryAllowed: false,
+    message: '服务执行已中断，用户已暂停'})
+  const before = fs.readFileSync(old.filename, 'utf8'), oldJob = structuredClone(old.jobs[0])
+  h.authorize()
+  h.restart().runAutomaticRecovery(); await h.collected()
+  assert.equal(h.visits.length, 1); assert.equal(h.jobs.size, 9)
+  assert.equal(h.calls.includes(old.jobs[0]!.id), false)
+  assert.equal(fs.readFileSync(old.filename, 'utf8'), before)
+  assert.deepEqual(old.jobs[0], oldJob)
+})
+
+for (const updatedAt of [later(1000), later(2000), 'invalid']) test(`manual pause at ${updatedAt} still suppresses refill after restart`, t => {
+  const h = fixture(t)
+  h.seed(1, {}, {status: 'paused', automaticRecoveryAllowed: false, message: '已手动暂停', updatedAt})
+  h.authorize()
+  h.restart().runAutomaticRecovery()
+  assert.equal(h.visits.length, 0); assert.equal(h.calls.length, 0)
+  assert.equal(h.intents().length, 0)
+})
+
+for (const stage of ['collection', 'processing'] as const) test(`older ${stage} blockers do not suppress new refill authorized later`, async t => {
+  const h = fixture(t)
+  const old = h.seed(1, {status: 'needs_attention', [stage]: {status: 'needs_attention', message: '花生账号额度不足'},
+    ...(stage === 'collection' ? {processing: {status: 'needs_attention', message: 'Blocked'}} : {})},
+    {status: 'needs_attention', message: '花生账号额度不足'})
+  const before = fs.readFileSync(old.filename, 'utf8'), oldJob = structuredClone(old.jobs[0])
+  h.authorize()
+  h.restart().runAutomaticRecovery(); await h.collected()
+  assert.equal(h.visits.length, 1); assert.equal(h.calls.includes(old.jobs[0]!.id), false)
+  assert.equal(fs.readFileSync(old.filename, 'utf8'), before)
+  assert.deepEqual(old.jobs[0], oldJob)
+})
+
+for (const stage of ['collection', 'processing'] as const) {
+  for (const updatedAt of [later(1000), later(2000), 'invalid']) {
+    test(`${stage} blocker at ${updatedAt} stays authoritative after an earlier manual start`, t => {
+      const h = fixture(t)
+      h.seed(1, {status: 'needs_attention', [stage]: {status: 'needs_attention', message: '花生账号额度不足'},
+        ...(stage === 'collection' ? {processing: {status: 'needs_attention', message: 'Blocked'}} : {}), updatedAt},
+        {status: 'needs_attention', message: '花生账号额度不足'})
+      h.authorize()
+      h.restart().runAutomaticRecovery()
+      assert.equal(h.visits.length, 0); assert.equal(h.calls.length, 0)
+    })
+  }
+}
+
+test('a successful later job can still clear a blocker newer than manual authorization', async t => {
+  const h = fixture(t)
+  const old = h.seed(1, {status: 'needs_attention', processing: {status: 'needs_attention', message: '花生账号额度不足'},
+    updatedAt: later(2000)}, {status: 'needs_attention', message: '花生账号额度不足'})
+  h.authorize()
+  h.seed(1, {status: 'completed', processing: {status: 'completed', message: 'Done'}},
+    {status: 'ready', videoUrl: '/assets/new-success.mp4', updatedAt: later(3000)})
+  h.restart().runAutomaticRecovery(); await h.collected()
+  assert.equal(h.visits.length, 1); assert.equal(h.calls.includes(old.jobs[0]!.id), false)
 })
 
 for (const outcome of ['completed', 'deleted'] as const) test(`explicit processing resume clears stop after every item became ${outcome} in the background`, async t => {

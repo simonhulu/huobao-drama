@@ -824,20 +824,32 @@ export class ScienceCollectionService {
   private refillPaused(runs: StoredRun[], settings: ScienceCollectionSettings, jobsByRun: Map<string, ScienceJob[]>) {
     const relevant = runs.filter(run => run.mode === settings.mode && run.huashengAccountName === settings.huashengAccountName
       && run.baijiahaoAccountName === settings.baijiahaoAccountName)
-    let successfulAt = -Infinity
-    for (const run of relevant) for (const job of jobsByRun.get(run.id)!) {
-      if (achieved(job, run)) successfulAt = Math.max(successfulAt, Date.parse(job.updatedAt) || 0)
+    let authorizedAt = -Infinity, successfulAt = -Infinity
+    for (const run of relevant) {
+      const createdAt = Date.parse(run.createdAt)
+      if (scienceCollectionStartSchema.shape.requestId.safeParse(run.requestId).success
+        && !run.requestId.startsWith('refill-') && Number.isFinite(createdAt)) authorizedAt = Math.max(authorizedAt, createdAt)
+      for (const job of jobsByRun.get(run.id)!) {
+        const updatedAt = Date.parse(job.updatedAt)
+        if (achieved(job, run) && Number.isFinite(updatedAt)) successfulAt = Math.max(successfulAt, updatedAt)
+      }
     }
+    // A later manual start authorizes new batches without clearing earlier stops.
+    const predatesAuthorization = (at: string) => Number.isFinite(Date.parse(at)) && Date.parse(at) < authorizedAt
     return relevant.some(run => {
-      if (run.stopRequested || run.collectionStopRequested || run.processing?.status === 'stopped' || run.collection?.status === 'stopped') return true
+      if ((run.stopRequested || run.collectionStopRequested || run.processing?.status === 'stopped' || run.collection?.status === 'stopped')
+        && !predatesAuthorization(run.updatedAt)) return true
       const jobs = jobsByRun.get(run.id)!.filter(job => !job.deletedAt)
       if (jobs.some(job => job.status === 'paused' && !achieved(job, run) && !awaitingWorkflow(job)
+        && !predatesAuthorization(job.updatedAt)
         && (job.automaticRecoveryAllowed === false || /手动|人工|用户/.test(job.message)
           || !/(?:执行|服务|本机).*中断/.test(`${job.message} ${run.items.find(item => item.jobId === job.id)?.message} ${run.message}`)))) return true
+      const updatedAt = Date.parse(run.updatedAt)
+      const unresolved = !Number.isFinite(updatedAt) || updatedAt >= Math.max(authorizedAt, successfulAt)
       if (run.processing?.status === 'needs_attention' && batchBlocker(run.processing.message)
-        && Date.parse(run.updatedAt) >= successfulAt && jobs.some(job => !achieved(job, run))) return true
+        && unresolved && jobs.some(job => !achieved(job, run))) return true
       return run.collection?.status === 'needs_attention' && batchBlocker(run.collection.message)
-        && Date.parse(run.updatedAt) >= successfulAt
+        && unresolved
     })
   }
   private refill() {
