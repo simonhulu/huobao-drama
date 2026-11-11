@@ -55,7 +55,8 @@ export function ensureHistoryStatusSchema(db: Database.Database) {
 /** Explicit maintenance only: index construction may scan wide historical records. */
 export function ensureHistoryStatusReadIndexes(db: Database.Database) {
   const indexes=[
-    {table:'history_script_sources',name:'history_script_sources_status_cover',fields:['deleted_at','id','title'],descending:'id'},
+    {table:'history_script_sources',name:'history_script_sources_status_cover',fields:['deleted_at','id','title'],descending:['id']},
+    {table:'history_script_sources',name:'history_script_sources_list_order',fields:['deleted_at','updated_at','id'],descending:['updated_at','id']},
     {table:'history_motion_productions',name:'history_motion_productions_status_cover',fields:['script_id','updated_at','id','status']},
     {table:'history_huasheng_jobs',name:'history_huasheng_jobs_status_cover',fields:['source_id','id','script_sha256','status',
       'production_status','production_message','message','error','updated_at']},
@@ -66,7 +67,7 @@ export function ensureHistoryStatusReadIndexes(db: Database.Database) {
     const available=columns(db,index.table)
     if(index.fields.some(field=>!available.has(field))) {skipped.push(index.name);continue}
     if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?").get(index.name)) {existing.push(index.name);continue}
-    const fields=index.fields.map(field=>field===index.descending?`${field} DESC`:field).join(',')
+    const fields=index.fields.map(field=>index.descending?.includes(field)?`${field} DESC`:field).join(',')
     db.exec(`CREATE INDEX IF NOT EXISTS ${index.name} ON ${index.table}(${fields})`)
     created.push(index.name)
   }
