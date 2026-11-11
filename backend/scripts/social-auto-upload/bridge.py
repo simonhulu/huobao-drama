@@ -37,6 +37,7 @@ HOMES = {
 }
 PLATFORM_CHECK_TIMEOUT = 45
 HISTORY_PLATFORM_TIMEOUT = 62
+HISTORY_SYNC_TIMEOUT = 120
 EDITORS = {
     "baijiahao-video": "https://baijiahao.baidu.com/builder/rc/edit?type=videoV2&is_from_cms=1",
     "baijiahao-article": "https://baijiahao.baidu.com/builder/rc/edit?type=news",
@@ -569,7 +570,7 @@ async def sync_history(config, platform):
         playwright = await asyncio.wait_for(async_playwright().start(), timeout=8)
         return await asyncio.wait_for(history_sessions.sync_platform(
             playwright, config, platform, connect_visible=partial(connect_platform_browser, config=config, cleanup_lock_held=True), login_state=login_state),
-            timeout=HISTORY_PLATFORM_TIMEOUT)
+            timeout=HISTORY_SYNC_TIMEOUT)
     except TimeoutError:
         raise RuntimeError("历史后台登录同步超时，旧登录未替换；请重试同步") from None
     except (history_sessions.HistorySessionError, ValueError):
@@ -4176,6 +4177,21 @@ async def upload(request, action, *, cleanup_browser=None):
             layout, fields = helpers._metadata_fields(await page.evaluate(helpers._READ_METADATA))
             metadata = {**state.get("details", {}).get("metadata", {}), "layout": layout}
             expected_description = video_description(payload, state)
+            failure = state.get("error")
+            initial_description = fields.get("description", {}).get("value")
+            if (layout == "videoV2" and state.get("protocolVersion") == 3
+                    and not state.get("details", {}).get("metadata") and not state.get("result")
+                    and type(state.get("fileSelectionStartedAt")) in (int, float) and state["fileSelectionStartedAt"] > 0
+                    and state.get("saveAttemptedAt") is None and state.get("publishAttemptedAt") is None
+                    and isinstance(failure, str) and failure.startswith("Locator.click:")
+                    and "cheetah-popover-inner" in failure and "intercepts pointer events" in failure
+                    and set(fields) == {"description"} and initial_description == Path(payload["videoPath"]).stem):
+                # Only the untouched platform-generated filename may be replaced
+                # after the original document and video blob were verified above.
+                metadata = await helpers.fill_metadata(page, payload["title"], expected_description)
+                state["metadataRecovery"] = {"previousDescription": initial_description, "originalError": failure,
+                                             "targetId": target, "recoveredAt": time.time()}
+                layout, fields = helpers._metadata_fields(await page.evaluate(helpers._READ_METADATA))
             if layout == "videoV2":
                 metadata["title"] = {"status": "source_only", "source_value": payload["title"]}
             for kind, field in fields.items():

@@ -127,6 +127,26 @@ async def check_background_login(browser, platform, login_state):
     page = None
     try:
         async with asyncio.timeout(BACKGROUND_CHECK_TIMEOUT):
+            if platform == "baijiahao":
+                response = None
+                try:
+                    response = await asyncio.wait_for(browser.contexts[0].request.get(
+                        "https://baijiahao.baidu.com/pcui/article/lists?currentPage=1&pageSize=10&collection=",
+                        timeout=12000, max_redirects=0), timeout=12)
+                    data = json.loads(await asyncio.wait_for(response.text(), timeout=3)) if response.status == 200 else None
+                    if (isinstance(data, dict) and type(data.get("errno")) is int and data["errno"] == 0
+                            and isinstance(data.get("data"), dict) and isinstance(data["data"].get("list"), list)
+                            and isinstance(data["data"].get("page"), dict)
+                            and type(data["data"]["page"].get("currentPage")) is int and data["data"]["page"]["currentPage"] == 1):
+                        return platform_state(platform, ready=True, message="历史百家号账号已登录，后台连接已就绪")
+                except Exception:
+                    pass  # Unconfirmed API responses retain the visible login and challenge checks.
+                finally:
+                    if response is not None:
+                        try:
+                            await asyncio.wait_for(response.dispose(), timeout=2)
+                        except Exception:
+                            pass
             page = await browser.contexts[0].new_page()
             await page.goto(HOMES[platform], wait_until="commit", timeout=12000)
             # Home apps may remain blank for 10+ seconds after HTTP commit.

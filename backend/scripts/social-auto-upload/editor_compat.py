@@ -190,7 +190,24 @@ class BaijiahaoEditor:
         }''')
         if maximum is not None and len(description.encode('utf-16-le')) // 2 > maximum:
             raise ValueError(f'Saved description exceeds the editor limit ({maximum}); will not truncate')
-        await control.click()
+        # The smart-copy feature tour overlaps Lexical and hides its acknowledgement.
+        tour = page.locator('[role="tooltip"].cheetah-popover-inner').filter(
+            has_text='新增智能文案，上传视频，AI为您生成优质文案，快来试试吧！').filter(visible=True)
+        keyboard_focus = False
+        if await tour.count() == 1:
+            close = tour.locator('.cheetah-popconfirm-message-icon .l-icon-BjhBasicGuanbi').filter(visible=True)
+            if await close.count() == 1:
+                await close.click(timeout=3000)
+                await tour.wait_for(state='hidden', timeout=3000)
+            elif await page.locator('[role="dialog"]:visible,[role="tooltip"]:visible').count() == 1:
+                # Some versions render both dismissal controls at zero size.
+                keyboard_focus = True
+        if keyboard_focus:
+            await control.focus()
+            if not await control.evaluate('element => document.activeElement === element'):
+                raise RuntimeError('Video description did not receive keyboard focus; saved text was not changed')
+        else:
+            await control.click()
         await control.press('ControlOrMeta+A')
         await page.keyboard.press('Backspace')
         if description:

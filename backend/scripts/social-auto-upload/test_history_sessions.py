@@ -193,6 +193,49 @@ class HistorySessionTest(unittest.IsolatedAsyncioTestCase):
         self.connect_visible.assert_not_awaited()
         self.assert_visible_untouched()
 
+    async def test_authenticated_baijiahao_list_avoids_loading_a_new_home_page(self):
+        self.store()
+        response = SimpleNamespace(status=200, text=AsyncMock(return_value=json.dumps(
+            {"errno": 0, "data": {"list": [], "page": {"currentPage": 1}}})), dispose=AsyncMock())
+        self.context.request = SimpleNamespace(get=AsyncMock(return_value=response))
+        result = await self.inspect()
+        self.assertTrue(result["ready"])
+        self.context.request.get.assert_awaited_once_with(
+            "https://baijiahao.baidu.com/pcui/article/lists?currentPage=1&pageSize=10&collection=",
+            timeout=12000, max_redirects=0)
+        response.dispose.assert_awaited_once()
+        self.context.new_page.assert_not_awaited()
+        self.login.assert_not_awaited()
+        self.assert_visible_untouched()
+
+    async def test_unconfirmed_list_responses_keep_the_existing_login_probe(self):
+        self.store()
+        for data in ({"errno": 0}, {"errno": False, "data": {"list": [], "page": {"currentPage": 1}}},
+                     {"errno": 0, "data": {"list": [], "page": {"currentPage": True}}},
+                     {"errno": 0, "data": {"list": [], "page": {"currentPage": 2}}}, "not-json"):
+            with self.subTest(data=data):
+                response = SimpleNamespace(status=200,
+                    text=AsyncMock(return_value=data if isinstance(data, str) else json.dumps(data)), dispose=AsyncMock())
+                self.context.request = SimpleNamespace(get=AsyncMock(return_value=response))
+                self.context.new_page.reset_mock()
+                result = await self.inspect()
+                self.assertTrue(result["ready"])
+                self.context.new_page.assert_awaited_once()
+                response.dispose.assert_awaited_once()
+        self.assert_visible_untouched()
+
+    async def test_list_timeout_stays_within_the_existing_background_deadline(self):
+        before = self.store()
+        async def hang(*args, **kwargs):
+            await asyncio.Event().wait()
+        self.context.request = SimpleNamespace(get=AsyncMock(side_effect=hang))
+        with patch.object(self.sessions, "BACKGROUND_CHECK_TIMEOUT", 0.01):
+            result = await asyncio.wait_for(self.inspect(), 0.5)
+        self.assertEqual(result["issue"], "connection_failed")
+        self.assertEqual(self.file().read_bytes(), before)
+        self.context.new_page.assert_not_awaited()
+        self.assert_visible_untouched()
+
     async def test_background_connection_error_preserves_issue_and_active_credentials(self):
         before = self.store()
         self.named.side_effect = account_browser.AccountBrowserConnectionError('后台浏览器连接超时，请重试连接')
@@ -528,10 +571,21 @@ class HistoryRuntimeTest(unittest.IsolatedAsyncioTestCase):
         async def hang(*args, **kwargs):
             await asyncio.Event().wait()
         with patch.object(bridge, "load_engine", return_value=engine), \
-                patch.object(bridge, "HISTORY_PLATFORM_TIMEOUT", 0.01), \
+                patch.object(bridge, "HISTORY_SYNC_TIMEOUT", 0.01), \
                 patch.object(bridge.history_sessions, "sync_platform", side_effect=hang):
             with self.assertRaisesRegex(RuntimeError, "超时.*旧登录未替换"):
                 await asyncio.wait_for(bridge.sync_history({}, "baijiahao"), 0.5)
+
+    async def test_explicit_sync_can_finish_after_the_passive_inspection_budget(self):
+        result = {"synced": True, "platform": "baijiahao", "message": "已验证"}
+        async def sync(*args, **kwargs):
+            await asyncio.sleep(0.02)
+            return result
+        with patch.object(bridge, "load_engine", return_value=self.engine()), \
+                patch.object(bridge, "HISTORY_PLATFORM_TIMEOUT", 0.01), \
+                patch.object(bridge, "HISTORY_SYNC_TIMEOUT", 0.1), \
+                patch.object(bridge.history_sessions, "sync_platform", side_effect=sync):
+            self.assertEqual(await bridge.sync_history({}, "baijiahao"), result)
 
     async def test_cli_dispatches_new_actions_and_keeps_wire_contract(self):
         for action, function, request, result in (

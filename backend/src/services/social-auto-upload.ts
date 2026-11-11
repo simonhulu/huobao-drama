@@ -212,7 +212,7 @@ export async function syncHistorySocialUploadLogin(platform: 'baijiahao' | 'tenc
   // repopulate the cache with a result from the old session after synchronization.
   await historyInspecting
   try {
-    const result = await runBridge<{ synced: true; platform: 'baijiahao' | 'tencent'; message: string }>('sync-history', { platform }, { timeoutMs: 75_000 })
+    const result = await runBridge<{ synced: true; platform: 'baijiahao' | 'tencent'; message: string }>('sync-history', { platform }, { timeoutMs: 150_000 })
     if (result?.synced !== true || result.platform !== platform || typeof result.message !== 'string') throw new Error('后台登录同步结果未确认，请重新检查')
     return result
   } finally { historyRuntimeCache = null }
