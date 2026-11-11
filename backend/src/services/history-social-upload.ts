@@ -11,7 +11,11 @@ import type { SocialTarget, SocialUploadPayload, SocialUploadResult, SocialUploa
 import { LEGACY_HISTORY_SOCIAL_TARGETS } from './history-social-targets.js'
 import { currentHistoryVideoDeliveries, legacyHistoryVideoPublication, type HistoryVideoProducer } from './history-video-deliveries.js'
 import { getHistoryVideoPackagingRow } from './history-video-packaging.js'
-import { getHistoryProductionState, getHistoryProductionStates, getHistoryPublicationRevision, isHistorySubmissionReceipt, type HistoryProductionSource } from './history-production-state.js'
+import { getHistoryProductionState, getHistoryPublicationRevision, isHistorySubmissionReceipt } from './history-production-state.js'
+import { historyStatusReadsEnabled } from './history-status-storage.js'
+import {readHistorySocialCandidates} from './history-social-candidates.js'
+import {HistorySocialCandidateReader} from './history-social-candidates-client.js'
+import { historyAutomationSourceIds, historyExecutionScope, type HistoryExecutionScope } from './history-video-publication-scope.js'
 
 export type { SocialTarget, SocialUploadPayload, SocialUploadResult } from './social-auto-upload.js'
 export { HISTORY_SOCIAL_TARGETS } from './history-social-targets.js'
@@ -77,6 +81,10 @@ export interface HistorySocialUploadOptions {
   getArticle?: (id: number) => Pick<HistoryArticleResult, 'status' | 'stale' | 'article'> | Promise<Pick<HistoryArticleResult, 'status' | 'stale' | 'article'>>
   /** Single-task moderation tools must not recover unrelated jobs at construction. */
   recoverOnStartup?: boolean
+  /** Default scope for startup recovery and explicit drains; no global timer is needed. */
+  scope?: HistoryExecutionScope
+  /** Retry only failed runtime checks before any upload has been dispatched. */
+  automaticPreflightRetry?: boolean
   now?: () => number; pollMs?: number; heartbeatMs?: number; leaseMs?: number; onError?: (error: unknown) => void
 }
 interface StoredJob {
@@ -93,6 +101,14 @@ interface Prepared { item: HistorySocialPreflightItem; payload: SocialUploadPayl
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const textHash = (value: string) => createHash('sha256').update(value).digest('hex')
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 2000)
+const preflightRetryAction = 'preflight-runtime'
+const preflightRetryDelays = [30_000, 60_000, 120_000]
+function transientRuntimeBlockers(blockers: HistorySocialBlocker[]) {
+  return blockers.length > 0 && blockers.every(blocker => blocker.field === 'runtime'
+    && ['runtime_missing', 'runtime_check_pending'].includes(blocker.code)
+    && !/(?:login[_ ]required|not logged|verification[_ ]required|captcha|未登录|登录(?:失效|过期)|请.{0,12}登录|验证码|扫码|二次验证|(?:账号|身份).{0,12}不匹配)/i.test(blocker.message)
+    && /(?:\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|connection_failed|timeout)\b|\btimed?\s+out\b|connection\s+(?:refused|reset|closed|failed)|(?:连接|检查|响应|请求).{0,12}超时|超时.{0,20}(?:连接|检查)|连接(?:失败|拒绝|重置|中断))/i.test(blocker.message))
+}
 const articleCoverManifestSchema = z.object({
   version: z.literal(1),
   images: z.array(z.object({ url: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/) })).length(2),
@@ -173,8 +189,10 @@ function publicJob(row: StoredJob): HistorySocialUploadJob {
     engine: row.engine, result: row.result_json ? JSON.parse(row.result_json) : null, createdAt: row.created_at, updatedAt: row.updated_at,
     operation: row.operation, progress: row.progress_json ? JSON.parse(row.progress_json) : null,
     publicationAttempted: publicationAttempted(row),
-    // Retain the response shape for older clients; automatic recovery is disabled.
-    recovery: { attempts: 0, maxAttempts: 0, nextAttemptAt: null, action: null } }
+    recovery: row.recovery_action === preflightRetryAction
+      ? {attempts: row.recovery_attempts, maxAttempts: preflightRetryDelays.length,
+        nextAttemptAt: row.next_attempt_at === null ? null : new Date(row.next_attempt_at).toISOString(), action: row.recovery_action}
+      : { attempts: 0, maxAttempts: 0, nextAttemptAt: null, action: null } }
 }
 
 export class HistorySocialUploadService {
@@ -183,6 +201,7 @@ export class HistorySocialUploadService {
   private readonly root: string
   private timer?: ReturnType<typeof setInterval>
   private draining: Promise<void> | null = null
+  private drainingScope: string | null = null
   private publicationChecks: Promise<void> | null = null
   private readonly activePublicationRefreshes = new Set<Promise<HistorySocialUploadJob>>()
   private nextPublicationCheckAt = 0
@@ -190,8 +209,10 @@ export class HistorySocialUploadService {
   private runtimeCache?: { at: number; value: SocialUploadRuntime }
   private runtimePending?: Promise<SocialUploadRuntime>
   private syncPending?: Promise<{ synced: true; platform: 'baijiahao' | 'tencent'; message: string }>
+  private candidateReader?:HistorySocialCandidateReader
 
   constructor(private readonly options: HistorySocialUploadOptions = {}) {
+    historyExecutionScope(options.scope)
     const filename = options.databasePath || process.env.DB_PATH || fileURLToPath(new URL('../../../data/huobao_drama.db', import.meta.url))
     if (!options.database && filename !== ':memory:') fs.mkdirSync(path.dirname(path.resolve(filename)), { recursive: true })
     this.database = options.database ?? new Database(filename, { timeout: 5000 })
@@ -199,7 +220,7 @@ export class HistorySocialUploadService {
     this.database.pragma('synchronous = FULL')
     this.root = path.resolve(options.root || defaultRoot)
     ensureHistorySocialUploadSchema(this.database)
-    if (options.recoverOnStartup !== false) this.recoverInterrupted()
+    if (options.recoverOnStartup !== false) this.recoverInterrupted(options.scope)
   }
   private now() { return (this.options.now ?? Date.now)() }
   private timestamp() { return new Date(this.now()).toISOString() }
@@ -260,47 +281,22 @@ export class HistorySocialUploadService {
     if (!source || source.deletedAt) throw new HistorySocialUploadError('稿件不存在或已删除', 404)
     return getHistoryProductionState(this.database, source, { root: this.root })
   }
-  candidates(sourceIds?: number[]) {
+  private validateCandidateIds(sourceIds?:number[]) {
     if (sourceIds !== undefined && (!Array.isArray(sourceIds) || !sourceIds.length || sourceIds.length > 100
       || sourceIds.some(id => !Number.isSafeInteger(id) || id < 1))) {
       throw new HistorySocialUploadError('请提供1至100个有效稿件编号', 400)
     }
-    const selectedIds = sourceIds === undefined ? undefined : [...new Set(sourceIds)]
-    const tables = new Set((this.database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row => row.name))
-    if (!tables.has('history_script_sources')) return []
-    const associations = [
-      ['history_dual_production', 'source_id', ''],
-      ['history_video_deliveries', 'script_id', ''],
-      ['history_huasheng_jobs', 'source_id', ''],
-      ['history_motion_productions', 'script_id', ''],
-      ['history_script_deliveries', 'script_id', "AND length(trim(a.video_path))>0"],
-    ].filter(([table]) => tables.has(table!))
-      .map(([table, owner, condition]) => `EXISTS (SELECT 1 FROM ${table} a WHERE a.${owner}=s.id ${condition})`)
-    if (!associations.length) return []
-    const columns = new Set((this.database.pragma('table_info(history_script_sources)') as Array<{name:string}>).map(column => column.name))
-    const selectedColumns = ['id', 'title', 'rewritten_script', 'deleted_at', 'platform', 'source_video_id', 'source_url',
-      'raw_transcript', 'corrected_transcript', 'media_json', 'asr_json', 'review_json'].filter(column => columns.has(column))
-    const rows = this.database.prepare(`SELECT ${selectedColumns.map(column => `s.${column}`).join(',')} FROM history_script_sources s
-      WHERE ${columns.has('deleted_at') ? 's.deleted_at IS NULL AND' : ''}
-      ${selectedIds ? `s.id IN (${selectedIds.map(() => '?').join(',')}) AND` : ''}
-      (${associations.join(' OR ')}) ORDER BY s.id DESC`).all(...(selectedIds ?? [])) as Array<Record<string, any>>
-    const sources: HistoryProductionSource[] = rows.map(row => ({id: row.id, title: row.title, rewrittenScript: row.rewritten_script || null,
-      deletedAt: row.deleted_at,
-      ...(columns.has('media_json') && columns.has('review_json') ? {provenance: {
-        platform: row.platform, sourceVideoId: row.source_video_id, sourceUrl: row.source_url,
-        rawTranscript: row.raw_transcript, correctedTranscript: row.corrected_transcript, rewrittenScript: row.rewritten_script,
-        mediaJson: row.media_json, asrJson: row.asr_json, reviewJson: row.review_json,
-      }} : {}),
-    }))
-    const states = getHistoryProductionStates(this.database, sources, {root: this.root})
-    return states.filter(state => state.versions.length > 0).map(state => {
-      const uploads: HistorySocialUploads = {}
-      if (state.complete) uploads['baijiahao-video'] = {
-        status: state.versions.every(version => version.state === 'published') ? 'published' : 'submitted',
-        confirmedAt: state.versions.map(version => version.confirmedAt!).sort().at(-1)!, confirmation: 'platform',
-      }
-      return {scriptId: state.scriptId, title: sources.find(source => source.id === state.scriptId)!.title, uploads, versions: state.versions}
-    })
+  }
+  candidates(sourceIds?: number[]) {
+    this.validateCandidateIds(sourceIds)
+    return readHistorySocialCandidates(this.database,this.root,sourceIds,historyStatusReadsEnabled())
+  }
+  async candidatesAsync(sourceIds?:number[]) {
+    this.validateCandidateIds(sourceIds)
+    if(!historyStatusReadsEnabled() || !this.database.name || this.database.name===':memory:')return this.candidates(sourceIds)
+    this.candidateReader ??= new HistorySocialCandidateReader({databasePath:path.resolve(this.database.name),root:this.root})
+    try {return await this.candidateReader.read(sourceIds)}
+    catch {throw new HistorySocialUploadError('状态读取暂时不可用，请稍后重试',503)}
   }
   uploads(sourceId: number): HistorySocialUploads {
     const uploads: HistorySocialUploads = {}
@@ -615,6 +611,7 @@ export class HistorySocialUploadService {
         }
         const reused = !!row
         const requeue = row && ['blocked', 'failed'].includes(row.status) && !row.upload_dispatched && !row.result_json && row.operation !== 'close-failed' && item.ready
+          && !(options.automatic && row.recovery_action === preflightRetryAction)
         if (!row || requeue) {
           const revision = parsed.mode === 'publish' && item.videoId != null
             ? getHistoryPublicationRevision(this.database, item.sourceId, item.videoId, { root: this.root }) : null
@@ -633,6 +630,7 @@ export class HistorySocialUploadService {
               publicationMode, item.videoId ?? null, item.videoProducer || 'legacy')
           row = this.stored(Number(inserted.lastInsertRowid))!
           this.database.prepare('UPDATE history_social_upload_jobs SET payload_json=? WHERE id=?').run(JSON.stringify({ ...payload, jobId: String(row.id) }), row.id)
+          if (!item.ready) this.schedulePreflightRetry(row, item.blockers, null)
         }
         this.database.prepare('INSERT INTO history_social_upload_request_jobs VALUES(?,?,?)').run(requestId, row.id, Number(reused))
       }
@@ -690,16 +688,17 @@ export class HistorySocialUploadService {
     }
     return { jobs, skipped, queue: this.queueState() }
   }
-  recoverInterrupted() {
+  recoverInterrupted(allowlist: HistoryExecutionScope | undefined = this.options.scope) {
+    const scope=historyExecutionScope(allowlist)
     // Synchronous migration makes legacy outcomes coherent immediately. The worker
     // later closes failed pages / reads local saved receipts, never resumes writes.
     this.database.transaction(() => {
-      const rows = this.database.prepare(`SELECT * FROM history_social_upload_jobs WHERE status='running'
+      const rows = this.database.prepare(`SELECT * FROM history_social_upload_jobs WHERE (status='running'
         OR status IN ('blocked','uncertain') OR (mode='draft' AND status='awaiting_confirmation')
         OR (status IN ('queued','failed') AND recovery_action IS NOT NULL)
         OR (status='failed' AND operation IN ('upload','confirm','resume','reconcile','recover'))
         OR (publication_mode='publish' AND status='failed' AND result_json IS NOT NULL)
-        OR (status='queued' AND (upload_dispatched=1 OR result_json IS NOT NULL) AND COALESCE(operation,'')<>'retry')`).all() as StoredJob[]
+        OR (status='queued' AND (upload_dispatched=1 OR result_json IS NOT NULL) AND COALESCE(operation,'')<>'retry')) ${scope.clause}`).all(...scope.values) as StoredJob[]
       for (const job of rows) {
         if (job.status === 'running') {
           let dead = false
@@ -708,6 +707,16 @@ export class HistorySocialUploadService {
           }
           // An expired lease cannot take execution away from a live local writer.
           if (!dead && job.lease_until && job.lease_until > this.now()) continue
+        }
+        if (this.options.automaticPreflightRetry && job.recovery_action === preflightRetryAction
+          && !job.upload_dispatched && !job.result_json && job.operation !== 'recover'
+          && ['queued', 'running', 'failed'].includes(job.status)) {
+          if (job.status === 'running') {
+            const blockers = JSON.parse(job.blockers_json) as HistorySocialBlocker[]
+            if (!this.schedulePreflightRetry(job, blockers, job.owner)) this.fail(job, job.error || '上传前检查重试已中断', blockers, job.owner)
+          }
+          // Queued delays and exhausted retries survive constructor and drain recovery.
+          continue
         }
         if (job.publication_mode === 'publish') {
           const completed = this.localSavedResult(job)
@@ -759,14 +768,17 @@ export class HistorySocialUploadService {
       }
     }).immediate()
   }
-  private claim() {
+  private claim(allowlist?: HistoryExecutionScope) {
+    const scope=historyExecutionScope(allowlist)
     return this.database.transaction(() => {
       if (this.database.prepare("SELECT 1 FROM history_social_upload_jobs WHERE status='running' LIMIT 1").get()) return undefined
       if (this.database.prepare('SELECT 1 FROM history_social_publication_checks WHERE owner IS NOT NULL AND lease_until>? LIMIT 1').get(this.now())) return undefined
       const job = this.database.prepare(`SELECT * FROM history_social_upload_jobs
-        WHERE (status='queued' AND (COALESCE(operation,'')<>'packaging' OR next_attempt_at IS NULL OR next_attempt_at<=?))
-          OR (status='failed' AND operation='close-failed')
-        ORDER BY CASE WHEN status='failed' THEN 0 ELSE 1 END,id LIMIT 1`).get(this.now()) as StoredJob | undefined
+        WHERE ((status='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+          AND (COALESCE(recovery_action,'')<>? OR ?=1))
+          OR (status='failed' AND operation='close-failed')) ${scope.clause}
+        ORDER BY CASE WHEN status='failed' THEN 0 ELSE 1 END,id LIMIT 1`).get(this.now(), preflightRetryAction,
+          Number(!!this.options.automaticPreflightRetry), ...scope.values) as StoredJob | undefined
       if (!job) return undefined
       const operation = job.operation === 'close-failed' ? 'close-failed' : job.operation === 'retry' ? 'retry'
         : job.operation === 'recover' ? 'recover' : job.operation === 'packaging' ? 'packaging' : 'upload'
@@ -821,13 +833,34 @@ export class HistorySocialUploadService {
   private completedMessage(job: StoredJob, result: SocialUploadResult) {
     return job.publication_mode === 'publish' ? (result.published ? '已发表到百家号' : '已提交百家号，等待审核') : '已上传到草稿箱，未发布'
   }
-  private fail(job: StoredJob, error: unknown, blockers: HistorySocialBlocker[] = []) {
+  private schedulePreflightRetry(job: StoredJob, blockers: HistorySocialBlocker[], owner: string | null = this.owner) {
+    if (!this.options.automaticPreflightRetry || job.mode === 'stage' || !transientRuntimeBlockers(blockers)) return false
+    const current = this.stored(job.id)
+    if (!current || current.status !== job.status || !['running', 'failed'].includes(current.status) || current.owner !== owner
+      || current.upload_dispatched || current.result_json || current.operation === 'recover'
+      || current.recovery_attempts >= preflightRetryDelays.length
+      || current.status === 'failed' && (current.recovery_action !== null || current.recovery_attempts !== 0)) return false
+    const reason = blockers.map(blocker => blocker.message).join('；'), attempts = current.recovery_attempts + 1
+    const nextAttemptAt = this.now() + preflightRetryDelays[attempts - 1]!
+    return this.database.prepare(`UPDATE history_social_upload_jobs SET status='queued',operation='upload',
+      recovery_action=?,recovery_attempts=?,next_attempt_at=?,error=?,message=?,blockers_json=?,
+      owner=NULL,host=NULL,pid=NULL,lease_until=NULL,progress_json=?,updated_at=?
+      WHERE id=? AND status=? AND owner IS ? AND upload_dispatched=0 AND result_json IS NULL
+        AND COALESCE(operation,'')<>'recover' AND recovery_attempts=?`)
+      .run(preflightRetryAction, attempts, nextAttemptAt, reason,
+        `上传前连接暂不可用，将于 ${new Date(nextAttemptAt).toISOString()} 重试检查（${attempts}/${preflightRetryDelays.length}）`,
+        JSON.stringify(blockers), JSON.stringify({step: 'preflight-retry', message: reason}), this.timestamp(), current.id,
+        current.status, owner, current.recovery_attempts).changes > 0
+  }
+  private fail(job: StoredJob, error: unknown, blockers: HistorySocialBlocker[] = [], owner: string | null = this.owner) {
     const reason = errorText(error)
+    const retainRetry = job.recovery_action === preflightRetryAction
     this.database.prepare(`UPDATE history_social_upload_jobs SET status='failed',error=?,message=?,blockers_json=?,
-      operation=NULL,recovery_action=NULL,recovery_attempts=0,next_attempt_at=NULL,owner=NULL,host=NULL,pid=NULL,
-      lease_until=NULL,progress_json=?,updated_at=? WHERE id=? AND owner=? AND status='running'`)
+      operation=NULL,recovery_action=?,recovery_attempts=?,next_attempt_at=NULL,owner=NULL,host=NULL,pid=NULL,
+      lease_until=NULL,progress_json=?,updated_at=? WHERE id=? AND owner IS ? AND status='running'`)
       .run(reason, `上传失败，请点击“重新上传”从头上传：${reason}`, JSON.stringify(blockers),
-        JSON.stringify({ step: 'failed', message: reason }), this.timestamp(), job.id, this.owner)
+        retainRetry ? preflightRetryAction : null, retainRetry ? job.recovery_attempts : 0,
+        JSON.stringify({ step: 'failed', message: reason }), this.timestamp(), job.id, owner)
   }
   private complete(job: StoredJob, result: SocialUploadResult, confirmed = false) {
     this.assertOwned(job)
@@ -919,6 +952,7 @@ export class HistorySocialUploadService {
       return true
     }
     const blockers = prepared.item.blockers.length ? prepared.item.blockers : [{ code: 'snapshot_changed', field: 'snapshot', message: '稿件、文案或素材已变化，请重试使用当前素材上传' }]
+    if (prepared.item.fingerprint === job.fingerprint && this.schedulePreflightRetry(job, blockers)) return false
     this.fail(job, blockers.map(issue => issue.message).join('；'), blockers)
     return false
   }
@@ -966,7 +1000,12 @@ export class HistorySocialUploadService {
   }
   private markDispatched(job: StoredJob) {
     this.assertOwned(job)
-    this.database.prepare("UPDATE history_social_upload_jobs SET upload_dispatched=1 WHERE id=? AND owner=? AND status='running'").run(job.id, this.owner)
+    this.database.prepare(`UPDATE history_social_upload_jobs SET upload_dispatched=1,recovery_action=NULL,recovery_attempts=0,
+      next_attempt_at=NULL WHERE id=? AND owner=? AND status='running'`).run(job.id, this.owner)
+    job.upload_dispatched = 1
+    job.recovery_action = null
+    job.recovery_attempts = 0
+    job.next_attempt_at = null
   }
   private async prepareRetry(job: StoredJob, runtime: HistorySocialRuntime) {
     if (job.publication_mode !== 'publish' && job.video_id == null && this.uploads(job.source_id)[job.target]) {
@@ -1000,6 +1039,7 @@ export class HistorySocialUploadService {
     if (prepared.item.ready) prepared = await this.prepare(job.source_id, job.target, effectiveMode(job), await this.runtimeForMode(effectiveMode(job), true), false, job.video_id ?? null)
     this.assertOwned(job)
     if (!prepared.item.ready) {
+      if (prepared.item.fingerprint === job.fingerprint && this.schedulePreflightRetry(job, prepared.item.blockers)) return null
       this.fail(job, prepared.item.blockers.map(issue => issue.message).join('；'), prepared.item.blockers)
       return null
     }
@@ -1092,14 +1132,18 @@ export class HistorySocialUploadService {
     const published = await runtime.confirmSocialUpload(payload, staged, progress)
     this.complete(job, published, true)
   }
-  runPending(): Promise<void> {
-    if (this.draining) return this.draining
+  runPending(allowlist: HistoryExecutionScope | undefined = this.options.scope): Promise<void> {
+    const scope=historyExecutionScope(allowlist)
+    if (this.draining) return this.drainingScope===scope.key ? this.draining : Promise.reject(Error('An upload drain with another allowlist is already running'))
     if (this.stopping || this.syncPending) return Promise.resolve()
+    const selected:HistoryExecutionScope|undefined=scope.scoped ? JSON.parse(scope.key) : undefined
+    this.drainingScope=scope.key
     this.draining = (async () => {
-      this.recoverInterrupted()
-      while (!this.stopping && !this.syncPending) { const job = this.claim(); if (!job) break; await this.run(job) }
-      if (!this.stopping && !this.syncPending) await this.runPublicationChecks()
-    })().finally(() => { this.draining = null })
+      this.recoverInterrupted(selected)
+      while (!this.stopping && !this.syncPending) { const job = this.claim(selected); if (!job) break; await this.run(job) }
+      // A bounded drain does not register or inspect unrelated old submissions.
+      if (!scope.scoped && !this.stopping && !this.syncPending) await this.runPublicationChecks()
+    })().finally(() => { this.draining = null; this.drainingScope=null })
     return this.draining
   }
   async confirm(id: string | number) {
@@ -1261,12 +1305,19 @@ export class HistorySocialUploadService {
     await this.publicationChecks
     await Promise.allSettled(this.activePublicationRefreshes)
   }
-  async close() { await this.stop(); if (!this.options.database) this.database.close() }
+  async close() { await this.stop(); await this.candidateReader?.close(); if (!this.options.database) this.database.close() }
 }
 
 let service: HistorySocialUploadService | undefined
-export function getHistorySocialUploadService() { return service ??= new HistorySocialUploadService({ onError: error => console.error('[history-social-upload]', errorText(error)) }) }
+export function getHistorySocialUploadService() {
+  if(service)return service
+  const sourceIds=process.env.HISTORY_SOCIAL_UPLOAD_AUTOMATION_ENABLED==='1' ? historyAutomationSourceIds() : undefined
+  return service=new HistorySocialUploadService({scope:sourceIds===undefined ? undefined : {sourceIds},
+    automaticPreflightRetry:process.env.HISTORY_SOCIAL_UPLOAD_AUTOMATION_ENABLED==='1',
+    onError:error=>console.error('[history-social-upload]',errorText(error))})
+}
 export function startHistorySocialUploadWorker(): { stop(): Promise<void> } {
-  if (process.env.HISTORY_SOCIAL_UPLOAD_WORKER_DISABLED === '1' || process.env.TASK_WORKER_DISABLED === '1') return { stop: async () => {} }
+  const independent=process.env.HISTORY_SOCIAL_UPLOAD_AUTOMATION_ENABLED==='1'
+  if (!independent && (process.env.HISTORY_SOCIAL_UPLOAD_WORKER_DISABLED === '1' || process.env.TASK_WORKER_DISABLED === '1')) return { stop: async () => {} }
   const worker = getHistorySocialUploadService(); worker.start(); return worker
 }

@@ -3,7 +3,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import {createRequire} from 'node:module'
+import {pathToFileURL} from 'node:url'
+import Database from 'better-sqlite3'
 import {createHistoryMotionProduction, materialSearchSchema, motionMapPlanSchema, motionPlanSchema, motionSelectionSchema, hashText, textContent,
+  runMotionMaterialSearchWorker, resolveMotionSearchTimeoutMs,
   type MotionShot, type MotionSelection} from './history-motion-production.js'
 import {alignMotionShots, canReuseMotionAudio, createMotionRunner, hasExactMotionShotTiming, measureMotionShotEnds, splitMotionNarration, retimeMotionMap} from './history-motion-pipeline.js'
 import {getMotionMapPack} from './history-motion-maps.js'
@@ -20,14 +24,14 @@ test('a Qin or Zhao mention alone does not authorize the Changping map',()=>{
     assert.throws(()=>getMotionMapPack('changping-context',script),/不匹配/)
 })
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, options: {searchWorkerPath?:URL}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'history-motion-service-'))
   const materialRoot=path.join(root,'materials')
   fs.mkdirSync(materialRoot)
   const calls: any[]=[]
   let rows: any[]=[]
   const library={search(input: any){calls.push(input);return rows}}
-  const service=createHistoryMotionProduction({databasePath:path.join(root,'jobs.db'),materialRoot,root:path.join(root,'outputs'),library})
+  const service=createHistoryMotionProduction({databasePath:path.join(root,'jobs.db'),materialRoot,root:path.join(root,'outputs'),library,...options})
   function row(id: string, patch: Record<string,unknown>={}) {
     const localPath=path.join(materialRoot,`${id}.mp4`)
     fs.writeFileSync(localPath,`clip-${id}`)
@@ -41,6 +45,147 @@ function fixture(t: TestContext) {
 const search=materialSearchSchema.parse({query:'红军 瑞金'})
 const shot=(patch: Partial<MotionShot>={}): MotionShot=>({shotId:'s1',narration:'红军行进。',duration:2,search,titles:[],...patch})
 const selection=(patch: Partial<MotionSelection>={}): MotionSelection=>({assetId:'a',inPoint:0,outPoint:2,crop:'contain',confidence:.95,reason:'人物时代及远景标注匹配',shortfallPolicy:'reject',...patch})
+
+test('scoped recovery filters snapshots in SQL before parsing unrelated jobs',t=>{
+  const f=fixture(t)
+  const selected=f.service.createPlan(1,{scriptRevision:hashText('selected'),profile:'16:9',shots:[shot()]},'红军行进。','selected')
+  const outside=f.service.createPlan(2,{scriptRevision:hashText('outside'),profile:'16:9',shots:[shot()]},'红军行进。','outside')
+  selected.status='queued';f.service.write(selected)
+  outside.status='queued';f.service.write(outside)
+  const database=new Database(path.join(f.root,'jobs.db'))
+  try {
+    database.prepare('UPDATE history_motion_productions SET snapshot=? WHERE id=?').run('invalid-outside-snapshot',outside.id)
+    assert.deepEqual(f.service.listRecoverable([1]).map(job=>job.id),[selected.id])
+    assert.deepEqual(f.service.listRecoverable([]),[])
+    assert.throws(()=>f.service.listRecoverable(),SyntaxError)
+    assert.throws(()=>f.service.listRecoverable([0]))
+  } finally {database.close()}
+})
+
+function slowSearchWorker(directory:string) {
+  const filename=path.join(directory,'slow-search.mjs'),require=createRequire(import.meta.url)
+  fs.writeFileSync(filename,`import Database from ${JSON.stringify(pathToFileURL(require.resolve('better-sqlite3')).href)};
+    process.once('message',({databasePath})=>{const db=new Database(databasePath,{readonly:true,fileMustExist:true});
+    process.send({type:'started'});db.prepare('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT SUM(x) FROM n').get();db.close();});`)
+  return pathToFileURL(filename)
+}
+
+test('material search budget defaults to five seconds and accepts only finite bounded overrides',()=>{
+  assert.equal(resolveMotionSearchTimeoutMs({}),5000)
+  for(const value of ['0','-1','NaN','Infinity','bad',''])assert.equal(resolveMotionSearchTimeoutMs({HISTORY_MOTION_SEARCH_TIMEOUT_MS:value}),5000)
+  assert.equal(resolveMotionSearchTimeoutMs({HISTORY_MOTION_SEARCH_TIMEOUT_MS:'1'}),100)
+  assert.equal(resolveMotionSearchTimeoutMs({HISTORY_MOTION_SEARCH_TIMEOUT_MS:'2000'}),2000)
+  assert.equal(resolveMotionSearchTimeoutMs({HISTORY_MOTION_SEARCH_TIMEOUT_MS:'999999'}),30000)
+})
+
+test('a real read-only SQL worker is killed on deadline while the main-thread heartbeat continues',async t=>{
+  const f=fixture(t),workerPath=slowSearchWorker(f.root)
+  let heartbeats=0
+  const interval=setInterval(()=>heartbeats++,10)
+  t.after(()=>clearInterval(interval))
+  const started=Date.now()
+  await assert.rejects(runMotionMaterialSearchWorker({databasePath:path.join(f.root,'jobs.db'),queries:[]},{timeoutMs:1000,workerPath}),error=>{
+    const failure=error as any
+    assert.equal(failure.code,'MATERIAL_SEARCH_TIMEOUT');assert.equal(failure.workerStarted,true)
+    assert.throws(()=>process.kill(failure.workerPid,0),/ESRCH/,'Deadline waits until the native SQL subprocess is dead')
+    return true
+  })
+  assert.ok(heartbeats>=10,`Expected a responsive event loop, observed ${heartbeats} heartbeats`)
+  assert.ok(Date.now()-started<4000,'Native SQL must not outlive the hard deadline')
+})
+
+test('worker read errors are isolated and never create a missing database',async t=>{
+  const f=fixture(t),missing=path.join(f.root,'missing','library.db')
+  await assert.rejects(runMotionMaterialSearchWorker({databasePath:missing,queries:[]},{timeoutMs:3000}),/open|exist|directory|database/i)
+  assert.equal(fs.existsSync(path.dirname(missing)),false)
+  assert.equal(f.service.create(1,'原稿','title',hashText('still responsive'),'16:9').status,'queued')
+})
+
+test('a crashed worker and explicit cancellation cannot leave a read process running',async t=>{
+  const f=fixture(t),crash=path.join(f.root,'crashed-worker.mjs')
+  fs.writeFileSync(crash,'process.exit(17)')
+  await assert.rejects(runMotionMaterialSearchWorker({databasePath:path.join(f.root,'jobs.db'),queries:[]},{timeoutMs:1000,workerPath:pathToFileURL(crash)}),/exited \(17\)/)
+  const controller=new AbortController()
+  const pending=runMotionMaterialSearchWorker({databasePath:path.join(f.root,'jobs.db'),queries:[]},{timeoutMs:5000,workerPath:slowSearchWorker(f.root),signal:controller.signal})
+  controller.abort()
+  await assert.rejects(pending,error=>{
+    const failure=error as any
+    assert.equal(failure.code,'MATERIAL_SEARCH_CANCELLED')
+    assert.throws(()=>process.kill(failure.workerPid,0),/ESRCH/)
+    return true
+  })
+})
+
+test('closing the production service cancels and reaps its in-flight material search',async t=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'motion-search-close-'))
+  t.after(()=>fs.rmSync(directory,{recursive:true,force:true}))
+  const f=fixture(t,{searchWorkerPath:slowSearchWorker(directory)})
+  const pending=f.service.searchAsync(search)
+  f.service.close()
+  await assert.rejects(pending,error=>{
+    const failure=error as any
+    assert.equal(failure.code,'MATERIAL_SEARCH_CANCELLED')
+    assert.throws(()=>process.kill(failure.workerPid,0),/ESRCH/)
+    return true
+  })
+})
+
+test('job summaries reflect other instances, local writes, missing jobs and rolled-back transactions',t=>{
+  const f=fixture(t),database=new Database(path.join(f.root,'jobs.db'))
+  const other=createHistoryMotionProduction({database,root:path.join(f.root,'outputs'),materialRoot:f.materialRoot,library:{search:()=>[]},now:()=> '2026-11-11T00:00:00.000Z'})
+  t.after(()=>{other.close();database.close()})
+  assert.equal(f.service.findSummary('new-job'),null)
+  const job=other.create(1,'红军行进。','标题',hashText('summary'),'16:9')
+  job.id='new-job';job.status='rendering';job.stage='render';job.message='正在渲染'
+  job.requested.shots=[shot()];job.plan={visuals:{s1:{}},deliveryAssociation:{videoUrl:'/static/first.mp4'}}
+  other.write(job)
+  const expected={id:'new-job',status:'rendering',stage:'render',message:'正在渲染',updatedAt:'2026-11-11T00:00:00.000Z',videoUrl:'/static/first.mp4',shotCount:1,readyShotCount:1}
+  assert.deepEqual(f.service.findSummary(job.id),expected)
+  const returned=f.service.findSummary(job.id)!
+  returned.status='completed';returned.videoUrl='/static/polluted.mp4'
+  assert.deepEqual(f.service.findSummary(job.id),expected,'Callers cannot mutate subsequent summaries')
+  job.status='failed';job.message='等待重试';job.plan=null;other.write(job)
+  assert.equal(f.service.findSummary(job.id)?.status,'failed','Another connection can update within the same timestamp')
+  assert.equal(f.service.findSummary(job.id)?.readyShotCount,0)
+  assert.equal(other.findSummary(job.id)?.status,'failed')
+  job.status='queued';other.write(job)
+  assert.equal(other.findSummary(job.id)?.status,'queued','Writes on the same connection invalidate summaries')
+  assert.throws(()=>database.transaction(()=>{
+    job.status='completed';other.write(job)
+    assert.equal(other.findSummary(job.id)?.status,'completed','A transaction sees its own write')
+    throw Error('rollback summary')
+  })(),/rollback summary/)
+  assert.equal(other.findSummary(job.id)?.status,'queued','Rolled-back state must not escape the transaction')
+  assert.equal(f.service.findSummary(job.id)?.status,'queued')
+  database.prepare('DELETE FROM history_motion_productions WHERE id=?').run(job.id)
+  assert.equal(other.findSummary(job.id),null)
+  assert.equal(f.service.findSummary(job.id),null,'Deleted rows invalidate cached summaries in other connections')
+  job.status='completed';other.write(job)
+  assert.equal(f.service.findSummary(job.id)?.status,'completed','A cached missing row becomes visible after insertion')
+  assert.equal(other.findSummary(job.id)?.status,'completed')
+})
+
+test('persistent summary polling skips snapshots and marks cross-connection raw writes pending repair',t=>{
+  const f=fixture(t),statements:string[]=[],database=new Database(path.join(f.root,'jobs.db'),{verbose:sql=>statements.push(String(sql))})
+  const service=createHistoryMotionProduction({database,root:path.join(f.root,'outputs'),materialRoot:f.materialRoot,library:{search:()=>[]}})
+  const previous=process.env.HISTORY_STATUS_READS
+  process.env.HISTORY_STATUS_READS='1'
+  t.after(()=>{if(previous===undefined)delete process.env.HISTORY_STATUS_READS;else process.env.HISTORY_STATUS_READS=previous;service.close();database.close()})
+  const job=service.create(1,'Current script','Title',hashText('current'),'16:9')
+  job.plan={unused:'x'.repeat(1024*1024)};service.write(job)
+  statements.length=0
+  assert.equal(service.findSummary(job.id)?.statusFresh,true)
+  assert.ok(statements.length>0)
+  assert.ok(statements.every(sql=>!sql.includes('snapshot')&&!sql.includes('json_extract')))
+  const raw=new Database(path.join(f.root,'jobs.db'));t.after(()=>raw.close())
+  raw.prepare('UPDATE history_motion_productions SET snapshot=? WHERE id=?').run(JSON.stringify({...job,message:'External change'}),job.id)
+  assert.equal(service.findSummary(job.id)?.statusFresh,false)
+  assert.equal(service.findSummary(job.id)?.stage,'status_sync')
+  assert.equal(service.findSummary(job.id)?.videoUrl,null)
+  raw.prepare('DELETE FROM history_motion_status WHERE job_id=?').run(job.id)
+  assert.equal(service.findSummary(job.id)?.id,job.id,'A missing summary does not turn the original job into a missing job')
+  assert.equal(service.findSummary(job.id)?.statusFresh,false)
+})
 
 test('search performs bounded keyword queries and returns only downloaded top-three local candidates',t=>{
   const f=fixture(t)
@@ -165,6 +310,22 @@ test('registered fallback copies cannot escape the material root or reuse an alr
   }),[])
 })
 
+test('real asynchronous material search matches sync ranking, registered copies and exclusions without database writes',async t=>{
+  const f=duplicateFileFixture(t),first=f.register(1,path.join(f.materialRoot,'missing.mp4'))
+  f.register(2,path.join(f.materialRoot,'readable.mp4'),{duration:4,width:1280,height:720})
+  fs.unlinkSync(first.filename)
+  const databasePath=path.join(f.root,'library.sqlite')
+  const service=createHistoryMotionProduction({databasePath,materialRoot:f.materialRoot,root:path.join(f.root,'async-outputs')})
+  t.after(()=>service.close())
+  const parsed=materialSearchSchema.parse({query:'城墙 守军',shotSize:'wide',durationMax:5})
+  const expected=service.search(parsed)
+  assert.equal(expected.length,1)
+  const before=[databasePath,databasePath+'-wal'].map(filename=>fs.existsSync(filename)?hashText(fs.readFileSync(filename).toString('base64')):null)
+  assert.deepEqual(await service.searchAsync(parsed),expected)
+  assert.deepEqual(await service.searchAsync(parsed,{usedAssets:new Set([`video-id:${f.assetId}`])}),[])
+  assert.deepEqual([databasePath,databasePath+'-wal'].map(filename=>fs.existsSync(filename)?hashText(fs.readFileSync(filename).toString('base64')):null),before)
+})
+
 test('selection requires a returned candidate and valid whole frames without a confidence gate',t=>{
   const f=fixture(t);f.setRows([f.row('a')]);const candidates=f.service.search(search)
   assert.throws(()=>f.service.validateSelection(shot(),candidates,selection({assetId:'invented'})),/候选/)
@@ -284,6 +445,22 @@ function pipeline(f: ReturnType<typeof fixture>, options:Record<string,any>={}) 
   return {runner,modelInputs,plans,counts:()=>({audioCalls,renderCalls,modelCalls,imageCalls,deliverCalls})}
 }
 
+test('pipeline awaits the isolated search budget and records fallback before preparing an image',async t=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'motion-search-budget-'))
+  t.after(()=>fs.rmSync(directory,{recursive:true,force:true}))
+  const f=fixture(t,{searchWorkerPath:slowSearchWorker(directory)}),previous=process.env.HISTORY_MOTION_SEARCH_TIMEOUT_MS
+  process.env.HISTORY_MOTION_SEARCH_TIMEOUT_MS='1000'
+  t.after(()=>{if(previous===undefined)delete process.env.HISTORY_MOTION_SEARCH_TIMEOUT_MS;else process.env.HISTORY_MOTION_SEARCH_TIMEOUT_MS=previous})
+  f.service.search=()=>assert.fail('The runner must never call synchronous material search')
+  const p=pipeline(f),job=f.service.create(1,'红军行进。','title',hashText('async fallback'),'16:9')
+  p.runner.schedule(job.id);await p.runner.idle()
+  const saved=f.service.find(job.id)!
+  assert.equal(saved.status,'completed',saved.error||'')
+  assert.deepEqual(saved.candidates[Object.keys(saved.candidates)[0]!],[])
+  assert.ok(saved.plan?.fallbacks.some((entry:any)=>entry.stage==='search'&&/1000 ms read budget/.test(entry.reason)))
+  assert.equal(p.counts().imageCalls,1);assert.equal(p.counts().renderCalls,1)
+})
+
 test('the first candidate renders and associates automatically without a selection model or human approval',async t=>{
   const f=fixture(t);f.setRows([f.row('a'),f.row('b')]);const p=pipeline(f)
   const job=f.service.create(1,'红军行进。','title','a'.repeat(64),'16:9')
@@ -366,14 +543,14 @@ test('a temporary upstream failure retries from its checkpoint and does not stop
 test('a native narration timeout backs off on the same job while another job completes',async t=>{
   t.mock.timers.enable({apis:['setTimeout']})
   const f=fixture(t);f.setRows([f.row('a')])
+  const create=(id:number)=>f.service.createPlan(id,{scriptRevision:hashText(String(id)),profile:'16:9',shots:[shot()]},'红军行进。','title')
+  const first=create(1),second=create(2)
   let timedOut=false
   const p=pipeline(f,{audio:async(_script:string,directory:string)=>{
-    if(!timedOut){timedOut=true;throw new DOMException('The operation was aborted due to timeout','TimeoutError')}
+    if(path.basename(directory)===first.id && !timedOut){timedOut=true;throw new DOMException('The operation was aborted due to timeout','TimeoutError')}
     const audioPath=path.join(directory,'voice.m4a');fs.writeFileSync(audioPath,'audio')
     return {audioPath,duration:2}
   }})
-  const create=(id:number)=>f.service.createPlan(id,{scriptRevision:hashText(String(id)),profile:'16:9',shots:[shot()]},'红军行进。','title')
-  const first=create(1),second=create(2)
   p.runner.schedule(first.id);p.runner.schedule(second.id);await p.runner.idle()
   const waiting=f.service.find(first.id)!
   assert.equal(waiting.status,'queued')

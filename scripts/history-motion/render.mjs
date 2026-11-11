@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import {release} from 'node:os';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
@@ -592,12 +593,17 @@ export async function renderHistoryMotion({plan:planFilename,output,concurrency=
           performance.frameRenderingMs=result.captureMs;performance.encodingAndMuxingMs=result.encodingMs;
           performance.timingNotes='Static images use the unchanged composition for exact caption and transition states; FFmpeg repeats unchanged frames. frameRenderingMs measures unique frame capture; encodingAndMuxingMs measures the following hardware encoding and muxing stage.';
         } else {
+        const requestedConcurrency=Math.max(1,Math.min(4,Math.floor(Number(concurrency))||2));
+        // Parallel Chrome tabs can stall at the first animation frame on Intel Monterey.
+        const renderConcurrency=process.platform==='darwin' && process.arch==='x64' && release().startsWith('21.') ? 1 : requestedConcurrency;
+        performance.renderRoute.concurrency=renderConcurrency;
+        if(renderConcurrency!==requestedConcurrency)console.log('Intel macOS 12: using one Remotion render tab');
         await renderMedia({serveUrl,composition,inputProps:frozen.props,browserExecutable,outputLocation:partial,cancelSignal,
           ...motionHardwareRenderOptions(encoding),
           gopSize:150,pixelFormat:'yuv420p',colorSpace:'bt709',audioCodec:'aac',audioBitrate:encoding.audioBitrate,enforceAudioTrack:true,
           // The composition is opaque. JPEG intermediates avoid PNG compression on
           // every frame while the delivery remains full-resolution H.264/AAC.
-          imageFormat:'jpeg',jpegQuality:92,concurrency:Math.max(1,Math.min(4,Math.floor(Number(concurrency))||2)),
+          imageFormat:'jpeg',jpegQuality:92,concurrency:renderConcurrency,
           offthreadVideoCacheSizeInBytes:512*1024*1024,timeoutInMilliseconds:90000,
           onProgress:event=>{
             const now=Date.now(),percent=Math.floor(event.progress*100);

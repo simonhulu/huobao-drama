@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import {createHistoryMotionProduction,hashText,motionPlanSchema} from './history-motion-production.js'
+import {createHistoryMotionProduction,hashText,isTransientMotionError,motionPlanSchema} from './history-motion-production.js'
 import {createMotionRunner,motionRenderExitError,type MotionPipelineDependencies} from './history-motion-pipeline.js'
 
 const dbRoot=fs.mkdtempSync(path.join(os.tmpdir(),'motion-speed-db-'))
@@ -26,6 +26,22 @@ test('render disk failures retain the actionable reason across the child-process
     fs.writeFileSync(filename,content)
     assert.match(motionRenderExitError(output,1).message,/退出 1/)
   }
+})
+
+test('Remotion frame timeouts remain retryable without treating invalid media as transient',t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'render-frame-timeout-')),output=path.join(root,'movie.mp4')
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}))
+  fs.mkdirSync(output+'.render')
+  const filename=path.join(output+'.render','failure.json')
+  fs.writeFileSync(filename,JSON.stringify({status:'failed',error:'Timeout (90000ms) exceeded rendering the component at frame 1572.\n    at seek-to-frame.js:86:28'}))
+  const timeout=motionRenderExitError(output,1) as Error & {code:string}
+  assert.equal(timeout.code,'MOTION_RENDER_TIMEOUT')
+  assert.equal(isTransientMotionError(timeout),true)
+  assert.match(timeout.message,/frame 1572/)
+  fs.writeFileSync(filename,JSON.stringify({status:'failed',error:'Invalid video input\n    at decode.js:1:2'}))
+  const invalid=motionRenderExitError(output,1)
+  assert.match(invalid.message,/Invalid video input/)
+  assert.equal(isTransientMotionError(invalid),false)
 })
 
 function signal() {
@@ -65,6 +81,37 @@ function fixture(t:TestContext) {
   t.after(()=>{service.close();fs.rmSync(root,{recursive:true,force:true})})
   return {service,create,image,overrides,candidate,setRows:(value:any[])=>{rows=value},renderCalls:()=>renderCalls}
 }
+
+test('a frame timeout releases the render lane and reuses the same narration and images on retry',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']})
+  const f=fixture(t),first=f.create(1,1),second=f.create(2,1),audioCalls:string[]=[],imageCalls:string[]=[]
+  let failed=false
+  const runner=createMotionRunner(f.service,{...f.overrides,
+    audio:async(script,directory)=>{audioCalls.push(directory);return f.overrides.audio!(script,directory)},
+    generateImage:async input=>{imageCalls.push(input.directory);return f.image(input)},
+    render:async(plan,directory)=>{
+      if(directory===path.join(f.service.root,first.id) && !failed) {
+        failed=true
+        const output=path.join(directory,'failed.mp4')
+        fs.mkdirSync(output+'.render')
+        fs.writeFileSync(path.join(output+'.render','failure.json'),JSON.stringify({status:'failed',error:'Timeout (90000ms) exceeded rendering the component at frame 1572.'}))
+        throw motionRenderExitError(output,1)
+      }
+      return f.overrides.render!(plan,directory)
+    },
+  })
+  runner.schedule(first.id);runner.schedule(second.id);await runner.idle()
+  const waiting=f.service.find(first.id)!
+  assert.equal(waiting.status,'queued');assert.match(waiting.retry!.lastError,/frame 1572/)
+  assert.equal(f.service.find(second.id)?.status,'completed')
+  const retainedImage=waiting.plan!.visuals.s1.imagePath
+  t.mock.timers.tick(30000);await runner.idle()
+  assert.equal(f.service.find(first.id)?.status,'completed')
+  assert.equal(f.service.find(first.id)?.plan!.visuals.s1.imagePath,retainedImage)
+  assert.equal(audioCalls.length,2,'one narration per task, retained on retry')
+  assert.equal(imageCalls.length,2,'one image per task, retained on retry')
+  assert.equal(f.service.list(1).length,1,'the timed-out task is not cloned')
+})
 
 test('one job prepares two independent images before either result arrives',async t=>{
   const f=fixture(t),job=f.create(1,3),entered=signal(),gate=signal(),calls:string[]=[]

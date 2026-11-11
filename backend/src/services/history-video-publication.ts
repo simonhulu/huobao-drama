@@ -5,6 +5,7 @@ import { ensureHistoryDeliveryAutomation, isHistoryPackagingRejection } from './
 import type { HistorySocialUploadJob, HistorySocialUploadService } from './history-social-upload.js'
 import { getHistorySource, requireCurrentHistoryScript } from './history-script-library.js'
 import { getHistoryProductionState, getHistoryPublicationRevision, isHistorySubmissionReceipt } from './history-production-state.js'
+import { historyAutomationSourceIds, historyExecutionScope, type HistoryExecutionScope } from './history-video-publication-scope.js'
 
 type IntentStatus = 'pending' | 'queued' | 'completed' | 'failed' | 'needs_attention'
 interface Intent { id:number; source_id:number; script_sha256:string; video_id:number; producer:HistoryVideoProducer; status:IntentStatus; attempts:number; next_attempt_at:number; error:string|null }
@@ -17,7 +18,7 @@ export function requestHistoryVideoPublication(sourceId:number, scriptSha256:str
   return recordHistoryVideoPublication(sql,sourceId,scriptSha256,videoId,producer)
 }
 
-interface PublicationDependencies { social?: Pick<HistorySocialUploadService,'listJobs'|'enqueue'>; packaging?: typeof ensureHistoryDeliveryAutomation }
+interface PublicationDependencies { social?: Pick<HistorySocialUploadService,'listJobs'|'enqueue'>; packaging?: typeof ensureHistoryDeliveryAutomation; scope?: HistoryExecutionScope }
 interface PublicationRecoveryDependencies {
   social?: Pick<HistorySocialUploadService,'listJobs'|'retry'>
   packaging?: typeof ensureHistoryDeliveryAutomation
@@ -148,33 +149,34 @@ async function processIntent(intent:Intent, dependencies:PublicationDependencies
 }
 
 async function publicationPass(dependencies:PublicationDependencies) {
+  const scope=historyExecutionScope(dependencies.scope)
   ensureHistoryVideoPublicationSchema(sql)
   // A manually repaired material set can resume without another generation call.
   if(sql.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_video_packaging'").get()) {
     sql.prepare(`UPDATE history_video_publication_intents SET status='pending',error=NULL,next_attempt_at=0,updated_at=?
-      WHERE status='needs_attention' AND EXISTS (SELECT 1 FROM history_video_packaging p
+      WHERE status='needs_attention' ${scope.clause} AND EXISTS (SELECT 1 FROM history_video_packaging p
         WHERE p.video_id=history_video_publication_intents.video_id AND p.script_id=history_video_publication_intents.source_id
           AND p.script_sha256=history_video_publication_intents.script_sha256
           AND p.cover_script_sha256=history_video_publication_intents.script_sha256
           AND p.design_status='completed' AND p.cover_status='completed' AND length(trim(p.baijiahao_title))>0
           AND julianday(p.updated_at)>julianday(history_video_publication_intents.updated_at))`)
-      .run(new Date().toISOString())
+      .run(new Date().toISOString(),...scope.values)
   }
   // Adopt old explicitly refused packaging attempts once. This only schedules
   // inspection; the packaging service rechecks the current checkpoint before
   // it authorizes any generation, and existing upload jobs always win.
   const refused = sql.prepare(`SELECT * FROM history_video_publication_intents
-    WHERE status='needs_attention' AND attempts<? AND next_attempt_at>=0 AND next_attempt_at<=?
+    WHERE status='needs_attention' AND attempts<? AND next_attempt_at>=0 AND next_attempt_at<=? ${scope.clause}
       AND (error LIKE 'API error 429:%' OR error LIKE 'API error 503:%'
         OR error LIKE 'Text model request failed: 429 %' OR error LIKE 'Text model request failed: 503 %')
-    ORDER BY next_attempt_at,id LIMIT 20`).all(MAX_PACKAGING_RETRIES,Date.now()) as Intent[]
+    ORDER BY next_attempt_at,id LIMIT 20`).all(MAX_PACKAGING_RETRIES,Date.now(),...scope.values) as Intent[]
   for(const intent of refused) {
     const retryable=isHistoryPackagingRejection(intent.error || '')
     sql.prepare(`UPDATE history_video_publication_intents SET status=?,next_attempt_at=?,updated_at=?
       WHERE id=? AND status='needs_attention' AND error=?`).run(
       retryable?'pending':'needs_attention',retryable?0:-1,new Date().toISOString(),intent.id,intent.error)
   }
-  const rows = sql.prepare(`SELECT * FROM history_video_publication_intents WHERE status IN ('pending','queued','failed') AND next_attempt_at<=? ORDER BY next_attempt_at,id LIMIT 20`).all(Date.now()) as Intent[]
+  const rows = sql.prepare(`SELECT * FROM history_video_publication_intents WHERE status IN ('pending','queued','failed') AND next_attempt_at<=? ${scope.clause} ORDER BY next_attempt_at,id LIMIT 20`).all(Date.now(),...scope.values) as Intent[]
   for (const row of rows) {
     try {
       const result = await processIntent(row,dependencies)
@@ -197,15 +199,22 @@ async function publicationPass(dependencies:PublicationDependencies) {
   }
 }
 
-let running:Promise<void>|undefined
+let running:{key:string;promise:Promise<void>}|undefined
 export function runHistoryVideoPublicationPass(dependencies:PublicationDependencies={}) {
-  return running ||= publicationPass(dependencies).finally(()=>{running=undefined})
+  const key=historyExecutionScope(dependencies.scope).key
+  if(running) return running.key===key ? running.promise : Promise.reject(Error('A publication pass with another allowlist is already running'))
+  const promise=publicationPass(dependencies).finally(()=>{running=undefined})
+  running={key,promise}
+  return promise
 }
 let timer:ReturnType<typeof setInterval>|undefined
 export function startHistoryVideoPublicationWorker() {
-  if (timer || process.env.TASK_WORKER_DISABLED === '1') return { stop: async()=>{} }
+  const independent=process.env.HISTORY_PUBLICATION_AUTOMATION_ENABLED==='1'
+  if (timer || process.env.TASK_WORKER_DISABLED === '1' && !independent) return { stop: async()=>{} }
+  const sourceIds=independent ? historyAutomationSourceIds() : undefined
+  const scope=sourceIds===undefined ? undefined : {sourceIds}
   ensureHistoryVideoPublicationSchema(sql)
-  const tick=()=>void runHistoryVideoPublicationPass().catch(error=>console.error('[history-video-publication]',error instanceof Error ? error.message : String(error)))
+  const tick=()=>{if(!running)void runHistoryVideoPublicationPass({scope}).catch(error=>console.error('[history-video-publication]',error instanceof Error ? error.message : String(error)))}
   timer=setInterval(tick,5000); timer.unref(); tick()
-  return { stop: async()=>{if(timer)clearInterval(timer);timer=undefined;await running} }
+  return { stop: async()=>{if(timer)clearInterval(timer);timer=undefined;await running?.promise} }
 }

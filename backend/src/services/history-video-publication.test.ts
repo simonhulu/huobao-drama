@@ -59,6 +59,21 @@ function rebuiltVideo(video: ReturnType<typeof currentVideo>['video']) {
   return recordHistoryVideoDelivery(db.$client, { ...video, videoUrl, producerJobId: 'rebuilt-producer', sha256: hash('rebuilt edition video') })
 }
 
+test('an explicit publication allowlist leaves every other intent unchanged, including rejected packaging recovery', async () => {
+  const allowed=currentVideo(), outside=currentVideo()
+  db.$client.prepare("UPDATE history_video_publication_intents SET status='needs_attention',error='API error 503: rejected',next_attempt_at=0 WHERE video_id=?").run(outside.video.id)
+  const before=db.$client.prepare('SELECT * FROM history_video_publication_intents WHERE video_id=?').get(outside.video.id)
+  const enqueued:number[]=[]
+  await runHistoryVideoPublicationPass({scope:{sourceIds:[allowed.source.id],videoIds:[allowed.video.id]},
+    social:{listJobs:()=>[],enqueue:async input=>{enqueued.push(input.videoIds![0]!);return {} as any}},
+    packaging:async id=>{assert.equal(id,allowed.source.id);return {design:{status:'completed',message:'ready'},covers:{status:'completed',message:'ready'}}},
+  })
+  assert.deepEqual(enqueued,[allowed.video.id])
+  assert.deepEqual(db.$client.prepare('SELECT * FROM history_video_publication_intents WHERE video_id=?').get(outside.video.id),before)
+  await runHistoryVideoPublicationPass({scope:{sourceIds:[]},social:{listJobs:()=>assert.fail('empty scope must do nothing'),enqueue:async()=>assert.fail('empty scope must do nothing')}})
+  assert.deepEqual(db.$client.prepare('SELECT * FROM history_video_publication_intents WHERE video_id=?').get(outside.video.id),before)
+})
+
 test('registering another render after the original submission cannot authorize automatic publication of that revision', () => {
   const { source, video } = currentVideo()
   submittedOriginal(video)

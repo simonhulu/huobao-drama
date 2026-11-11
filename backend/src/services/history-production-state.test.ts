@@ -144,6 +144,93 @@ test('read-only production polling does not parse unused large motion plans in J
   assert.ok(Math.max(...sizes)<4096,`JavaScript parsed ${Math.max(...sizes)} bytes from a motion snapshot`)
 })
 
+test('summary polling retains production identity without reading original motion snapshots', async t => {
+  const { ensureHistoryStatusSchema, projectHistoryMotionStatus } = await import('./history-status-storage.js')
+  const h = fixture(t, null)
+  h.motion({script:h.source.rewrittenScript,factory:{scriptHash:'legacy-hash'},message:'正在准备画面',
+    candidates:{unused:'x'.repeat(1024*1024)}})
+  const expected = h.read()
+  ensureHistoryStatusSchema(h.database)
+  projectHistoryMotionStatus(h.database, 'motion-original')
+  const triggers = h.database.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='history_motion_productions'").all() as Array<{name:string}>
+  for (const trigger of triggers) h.database.exec(`DROP TRIGGER "${trigger.name}"`)
+  h.database.exec('ALTER TABLE history_motion_productions DROP COLUMN snapshot')
+  h.database.pragma('query_only=ON')
+  const actual = getHistoryProductionState(h.database, {...h.source,rewrittenScript:null,statusSummary:{
+    scriptSha256:h.digest,scriptTextSha256:h.digest,scriptType:'text',artifactState:'current',fresh:true,observedAt:'after',
+  }}, {root:h.root,summary:true})
+  assert.deepEqual(actual, expected)
+})
+
+test('outdated summary observations cannot authorize publication or hide trusted submitted receipts', async t => {
+  const { ensureHistoryStatusSchema, projectHistoryMotionStatus } = await import('./history-status-storage.js')
+  const h = fixture(t, 'motion_backfill'), video = h.video('motion')
+  h.packageVideo(video.id)
+  h.motion({script:h.source.rewrittenScript,message:'before'})
+  ensureHistoryStatusSchema(h.database)
+  projectHistoryMotionStatus(h.database, 'motion-original')
+  h.database.prepare("UPDATE history_motion_productions SET snapshot=? WHERE id='motion-original'")
+    .run(JSON.stringify({script:h.source.rewrittenScript,message:'after'}))
+  const source = {...h.source,rewrittenScript:null,statusSummary:{
+    scriptSha256:h.digest,scriptTextSha256:h.digest,scriptType:'text' as const,artifactState:'current' as const,
+    fresh:true,observedAt:'before',
+  }}
+  const pending = getHistoryProductionState(h.database, source, {root:h.root,summary:true})
+  assert.equal(pending.versions[0]!.canPublish, false)
+  assert.equal(pending.versions[0]!.action, 'none')
+  assert.match(pending.versions[0]!.message, /同步/)
+  h.submission(video.id)
+  assert.equal(getHistoryProductionState(h.database, source, {root:h.root,summary:true}).versions[0]!.state, 'submitted')
+})
+
+test('summary manuscript identity preserves missing, null, string and object distinctions', async t => {
+  const {ensureHistoryStatusSchema,projectHistoryMotionStatus} = await import('./history-status-storage.js')
+  const h = fixture(t, null), source = {...h.source,rewrittenScript:null}
+  for (const snapshot of [null,[],true,'text',{}, {factory:{}}, {script:'unrelated'}, {script:null},
+    {factory:{scriptHash:null}}, {script:{text:'not a manuscript string'}}]) {
+    h.motion(snapshot)
+    const expected = getHistoryProductionState(h.database, source, {root:h.root})
+    ensureHistoryStatusSchema(h.database)
+    projectHistoryMotionStatus(h.database, 'motion-original')
+    const actual = getHistoryProductionState(h.database, {...source,statusSummary:{
+      scriptSha256:null,scriptTextSha256:null,scriptType:'null',artifactState:'current',fresh:true,observedAt:'after',
+    }}, {root:h.root,summary:true})
+    assert.deepEqual(actual, expected, JSON.stringify(snapshot))
+  }
+})
+
+test('summary reduction preserves version-specific packaging, uncertainty and released submission facts', async t => {
+  const {ensureHistoryStatusSchema,projectHistoryMotionStatus} = await import('./history-status-storage.js')
+  for (const scenario of ['sibling-failure','uncertain-legacy','submitted-cleanup','blocked-revision','ready-revision']) {
+    await t.test(scenario, child => {
+      const h = fixture(child), flower = h.video('huasheng'), motion = h.video('motion')
+      h.packageVideo(flower.id); h.packageVideo(motion.id)
+      h.motion({script:h.source.rewrittenScript,message:'latest progress'})
+      if (scenario === 'sibling-failure') {
+        h.submission(flower.id)
+        h.database.prepare("UPDATE history_video_packaging SET cover_status='failed',error='封面失败' WHERE video_id=?").run(motion.id)
+      } else if (scenario === 'uncertain-legacy') {
+        h.submission(null,{state:'uncertain',legacyPath:path.join(h.root,motion.videoUrl.replace('/static/','')),result:{saved:false}})
+      } else if (scenario === 'submitted-cleanup') {
+        h.submission(motion.id)
+        fs.unlinkSync(path.join(h.root,motion.videoUrl.replace('/static/','')))
+      } else {
+        h.submission(motion.id,{state:scenario === 'blocked-revision' ? 'uncertain' : 'completed'})
+        const revision = recordHistoryVideoDelivery(h.database,{...motion,producerJobId:'revision',
+          videoUrl:h.material('revision.mp4'),sha256:hash('revision')})
+        h.packageVideo(revision.id)
+      }
+      const expected = h.read()
+      ensureHistoryStatusSchema(h.database)
+      projectHistoryMotionStatus(h.database,'motion-original')
+      const actual = getHistoryProductionState(h.database,{...h.source,rewrittenScript:null,statusSummary:{
+        scriptSha256:h.digest,scriptTextSha256:h.digest,scriptType:'text',artifactState:'current',fresh:true,observedAt:'after',
+      }},{root:h.root,summary:true})
+      assert.deepEqual(actual, expected)
+    })
+  }
+})
+
 test('coordinator flags and Huasheng assets do not establish local delivery or workflow completion', t => {
   const h = fixture(t)
   h.database.prepare("INSERT INTO history_huasheng_jobs VALUES(1,?,?,'submitted','completed','素材已就绪')").run(h.source.id,h.digest)

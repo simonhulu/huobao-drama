@@ -11,6 +11,7 @@ import {reviewMotionVisualCandidate} from './history-motion-visual-evidence.js'
 import {prepareMapPortraits} from './history-motion-map-portraits.js'
 import {createMotionImageQueue} from './history-motion-image-queue.js'
 import {assertMediaDiskSpace} from './storage-space.js'
+import {historyPresenterPolicyFromEnv,prepareHistoryPresenterIntro} from './history-presenter-intro.js'
 import {alignMotionShotEndTimes, buildMotionAlignedCaptions, coalesceUnmeasuredMotionCuts, type MotionBoundaryRepair, type MotionShotEndEvidence as MeasuredShotEnd, type WhisperSegmentEvidence} from './history-motion-audio-align.js'
 const exec = promisify(execFile)
 const projectRoot = fileURLToPath(new URL('../../../', import.meta.url))
@@ -32,6 +33,7 @@ export type MotionPipelineDependencies = {
   deliver: (job: MotionJob, output: {filename:string;sha256:string}) => Promise<Record<string,any>>
   measureAudio?: (audioPath:string, shots:MotionShot[], directory:string, duration:number, captionLength:number) => Promise<MotionAudioMeasurement | undefined>
   assertCurrent?: (job:MotionJob) => void
+  preparePresenter?: typeof prepareHistoryPresenterIntro
 }
 async function model(system: string, value: unknown) {
   const {callTextModel} = await import('./ai.js')
@@ -73,6 +75,12 @@ export async function generateMotionAudio(script: string,directory: string,reque
   return value
 }
 
+export function resolveMotionWhisperTimeoutMs(duration:number,env:NodeJS.ProcessEnv=process.env) {
+  const configured=Number(env.HISTORY_MOTION_WHISPER_TIMEOUT_MS)
+  if(Number.isFinite(configured) && configured>0)return Math.max(60_000,Math.min(6*60*60_000,Math.ceil(configured)))
+  const seconds=Number.isFinite(duration) && duration>0 ? duration : 0
+  return Math.min(2*60*60_000,Math.max(20*60_000,Math.ceil(seconds*8000)))
+}
 export async function measureMotionShotEnds(audioPath: string, shots: MotionShot[], directory: string, duration:number, captionLength=28): Promise<MotionAudioMeasurement | undefined> {
   if(shots.length<2)return undefined
   const cli=process.env.WHISPER_CLI || '/opt/homebrew/bin/whisper-cli'
@@ -86,7 +94,7 @@ export async function measureMotionShotEnds(audioPath: string, shots: MotionShot
       if(!fs.existsSync(cli))throw Error('本地 Whisper 程序不存在，请检查 WHISPER_CLI')
       if(!fs.existsSync(model))throw Error('本地 Whisper 模型不存在，请检查 WHISPER_MODEL')
       if(!fs.existsSync(wav))await exec('ffmpeg',['-v','error','-y','-i',audioPath,'-ar','16000','-ac','1',wav],{timeout:120000})
-      await exec(cli,['-m',model,'-l','zh','-ojf','-f',wav,'-of',output,'-np'],{timeout:1200000,maxBuffer:2*1024*1024})
+      await exec(cli,['-m',model,'-l','zh','-ojf','-f',wav,'-of',output,'-np'],{timeout:resolveMotionWhisperTimeoutMs(duration),maxBuffer:2*1024*1024})
     }
     const recognition=JSON.parse(fs.readFileSync(json,'utf8')) as {transcription?:WhisperSegmentEvidence[]}
     const repaired=coalesceUnmeasuredMotionCuts(shots,alignMotionShotEndTimes(shots,recognition),duration*1000)
@@ -111,6 +119,12 @@ export function motionRenderExitError(outputPath:string,code:number|null,expired
     if(failure.status==='failed' && failure.code==='MEDIA_DISK_FULL')return Object.assign(
       Error('磁盘可用空间低于保底值，渲染已停止；配音、分镜与已生成素材已保留，释放空间后可重试原任务'),
       {code:'MEDIA_DISK_FULL'})
+    if(failure.status==='failed' && typeof failure.error==='string') {
+      const timeout=failure.error.match(/Timeout \(\d+ms\) exceeded rendering the component at frame \d+/)
+      if(timeout)return Object.assign(Error(`渲染画面等待超时，将从已保存素材重试：${timeout[0]}`),{code:'MOTION_RENDER_TIMEOUT'})
+      const reason=failure.error.split('\n')[0].trim().slice(0,300)
+      if(reason)return Error(`渲染进程退出 ${code}：${reason}；详见任务渲染日志`)
+    }
   }catch{/* Missing or incomplete diagnostics retain the original exit status. */}
   return Error(`渲染进程退出 ${code}；详见任务渲染日志`)
 }
@@ -288,7 +302,7 @@ function normalizeDesign(unit:{shotId:string;narration:string;duration:number},v
   return motionShotSchema.parse(design)
 }
 export function createMotionRunner(service: HistoryMotionProduction, overrides: Partial<MotionPipelineDependencies> = {}) {
-  const deps={model,audio:generateMotionAudio,render,prepareMap,generateImage,probeVideo:probeMotionVideo,reviewVideo:reviewMotionVisualCandidate,prepareSound:prepareMotionSound,...overrides}
+  const deps={model,audio:generateMotionAudio,render,prepareMap,generateImage,probeVideo:probeMotionVideo,reviewVideo:reviewMotionVisualCandidate,prepareSound:prepareMotionSound,preparePresenter:prepareHistoryPresenterIntro,...overrides}
   const measureAudio=overrides.measureAudio || (!overrides.audio ? measureMotionShotEnds : undefined)
   const running=new Set<string>()
   const tasks=new Set<Promise<void>>(),pending:{id:string;mode:RunnerMode}[]=[],retries=new Map<string,ReturnType<typeof setTimeout>>()
@@ -477,6 +491,18 @@ export function createMotionRunner(service: HistoryMotionProduction, overrides: 
     if(!job.outputPath || !job.plan?.delivery) throw Error('已有成片但缺少交付验收记录')
     job.status='validating';job.stage='rendered';job.message='正在关联成片';service.write(job)
     try {
+      const policy=job.plan.historyPresenterPolicy
+      if(policy) {
+        const source=job.plan.historyPresenterSource
+        if(policy.version!==1 || policy.character!=='history' || policy.presenter!=='xiaoba' || !source?.outputPath || !source.report)throw Error('历史主播缺少原正文母片检查点，请恢复原任务')
+        deps.assertCurrent?.(job)
+        const prepared=await deps.preparePresenter({videoPath:source.outputPath,report:source.report,libraryPath:policy.libraryPath,directory:path.join(service.root,job.id,'presenter')},
+          {signal:AbortSignal.timeout(4*60*60_000),report:message=>{
+            job.message=message.replaceAll('科普','历史').replaceAll('固定片头','小疤片头');service.write(job)
+          }})
+        deps.assertCurrent?.(job)
+        job.outputPath=prepared.outputPath;job.plan.delivery=prepared.report;service.write(job)
+      }
       const {verifiedMotionOutput,associateMotionDelivery}=await import('./history-motion-delivery.js')
       const output=await verifiedMotionOutput(job,service.root)
       job.plan.deliveryAssociation=deps.deliver?await deps.deliver(job,output):await associateMotionDelivery(job,output)
@@ -498,7 +524,7 @@ export function createMotionRunner(service: HistoryMotionProduction, overrides: 
       deps.assertCurrent?.(job)
       await (await import('./storage-archive.js')).restoreTaskArchivedMedia('history-motion',job.id,projectRoot)
       const pendingVoice=job.plan?.narrationRequest?.voiceId && job.plan.audioSettings?.voiceId!==job.plan.narrationRequest.voiceId
-      if(!pendingVoice && (mode==='deliver' || job.outputPath && job.stage==='rendered')) {await deliverExisting(job);return}
+      if(!pendingVoice && (mode==='deliver' || job.outputPath && (job.stage==='rendered' || job.plan?.historyPresenterPolicy && job.plan?.historyPresenterSource))) {await deliverExisting(job);return}
       if(!job.requested.shots.length) {
         checkpoint('planning','planning','正在设计分镜与视觉表达')
         const units=job.factory?.seedShots || splitMotionNarration(job.script).map((n,i)=>({shotId:`shot-${i+1}`,narration:n,duration:Math.max(1,textContent(n).length/5)})),shots:MotionShot[]=[]
@@ -579,7 +605,7 @@ export function createMotionRunner(service: HistoryMotionProduction, overrides: 
         }
         if(cached){delete visuals[shot.shotId];delete shot.selection;service.write(job)}
         try {
-          job.candidates[shot.shotId]=service.search(shot.search,shot.selection?undefined:{usedAssets})
+          job.candidates[shot.shotId]=await service.searchAsync(shot.search,shot.selection?undefined:{usedAssets})
           if(job.candidates[shot.shotId].some(candidate=>candidate.searchFallback==='shot-size-unknown')) {
             const reason='没有匹配指定景别的未用素材，已补充景别未标注的候选；实际景别仍待画面核对'
             if(!falls.some(entry=>entry.shotId===shot.shotId && entry.stage==='search-fallback' && entry.reason===reason))falls.push({shotId:shot.shotId,stage:'search-fallback',reason})
@@ -624,8 +650,10 @@ export function createMotionRunner(service: HistoryMotionProduction, overrides: 
       }
       job.plan={...job.plan,shots:renderShots,durationInFrames:cursor,scriptRevision:job.scriptRevision,soundEffects,fallbacks:falls,usedAssets:[...usedAssets],uniqueSceneAssets:true,companionGraphicsOnly:true}
       fs.writeFileSync(path.join(directory,'decisions.json'),JSON.stringify({scriptRevision:job.scriptRevision,candidates:job.candidates,shots:renderShots,soundEffects,fallbacks:falls,imageRecoveries:job.plan.imageRecoveries,usedAssets:[...usedAssets]},null,2))
+      if(!Object.hasOwn(job.plan,'historyPresenterPolicy'))job.plan.historyPresenterPolicy=historyPresenterPolicyFromEnv() || null
       checkpoint('rendering','rendering','正在合成素材、地图、图片、动效与声音')
       const result=await deps.render(job.plan,directory)
+      if(job.plan.historyPresenterPolicy)job.plan.historyPresenterSource={outputPath:result.outputPath,report:result.report}
       job.outputPath=result.outputPath;job.plan.delivery=result.report;checkpoint('validating','validating','正在保存技术验收报告')
       job.stage='rendered';service.write(job)
       await deliverExisting(job)

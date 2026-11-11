@@ -124,6 +124,31 @@ test('an Episode edit arriving during condensation is never overwritten or sched
   assert.equal(f.production.list().length,0)
 })
 
+test('factory polling reads current job summaries without loading complete production snapshots',t=>{
+  const f=setup(t)
+  const factory=createHistoryFactory({production:{...f.production,find:()=>assert.fail('List polling must not load complete job snapshots')},storageRoot:f.storageRoot})
+  const job=f.production.create(-f.ep.id,f.script,'摘要测试',hashText('first version'),'16:9')
+  job.status='rendering';job.stage='render';job.message='正在渲染'
+  job.requested.shots=[{shotId:'one',narration:f.script,duration:2,search:{query:'红军',shotSize:'any',limit:20},titles:[]}]
+  job.plan={visuals:{one:{imagePath:'/private/image.png'}},deliveryAssociation:{videoUrl:'/static/current.mp4'},historyPresenterPolicy:{character:'history',presenter:'xiaoba'},unrelated:'x'.repeat(1024*1024)}
+  f.production.write(job)
+  db.update(schema.episodes).set({videoUrl:'/static/old.mp4',metadata:JSON.stringify({historyFactory:{jobId:job.id,sourceId:373}})}).where(eq(schema.episodes.id,f.ep.id)).run()
+  const first=factory.list().items.find(item=>item.episodeId===f.ep.id)!
+  assert.deepEqual({jobId:first.jobId,status:first.status,stage:first.stage,message:first.message,updatedAt:first.updatedAt,sourceId:first.sourceId,videoUrl:first.videoUrl,shotCount:first.shotCount,readyShotCount:first.readyShotCount},
+    {jobId:job.id,status:'rendering',stage:'render',message:'正在渲染',updatedAt:job.updatedAt,sourceId:373,videoUrl:'/static/current.mp4',shotCount:1,readyShotCount:1})
+  assert.deepEqual(factory.list().items.find(item=>item.episodeId===f.ep.id),first)
+  job.status='failed';job.stage='validation';job.message='等待处理';job.plan=null;job.requested.shots=[];f.production.write(job)
+  const failed=factory.list().items.find(item=>item.episodeId===f.ep.id)!
+  assert.equal(failed.status,'failed');assert.equal(failed.stage,'validation');assert.equal(failed.message,'等待处理')
+  assert.equal(failed.videoUrl,'/static/old.mp4');assert.equal(failed.shotCount,1);assert.equal(failed.readyShotCount,0)
+  const replacement=f.production.create(-f.ep.id,f.script,'新版',hashText('replacement version'),'16:9')
+  db.update(schema.episodes).set({metadata:JSON.stringify({historyFactory:{jobId:replacement.id}})}).where(eq(schema.episodes.id,f.ep.id)).run()
+  assert.equal(factory.list().items.find(item=>item.episodeId===f.ep.id)?.jobId,replacement.id,'Episode metadata selects the current job, not the most recently updated old job')
+  db.update(schema.episodes).set({metadata:JSON.stringify({historyFactory:{jobId:'missing-job'}})}).where(eq(schema.episodes.id,f.ep.id)).run()
+  const missing=factory.list().items.find(item=>item.episodeId===f.ep.id)!
+  assert.equal(missing.jobId,null);assert.equal(missing.status,'completed');assert.equal(missing.shotCount,1)
+})
+
 test('native Episode is executable, reuses narration and fixed shots, and registers an accessible render',async t=>{
   const f=setup(t),started=await f.factory.startEpisode(f.ep.id)
   assert.equal(started.url,`/remotion/episode/${f.ep.id}`)
@@ -194,6 +219,26 @@ test('recovery resumes an interrupted durable job without remaking narration or 
   assert.equal(f.production.find(job.id)?.status,'completed')
   assert.equal(f.factory.detail(f.ep.id).job?.id,job.id)
   assert.deepEqual(f.production.find(job.id)?.plan?.visuals,visuals)
+  assert.deepEqual(f.counts(),{...before,renderCalls:before.renderCalls+1})
+})
+
+test('scoped recovery preserves excluded jobs byte for byte and resumes only the original selected task',async t=>{
+  const f=setup(t),original=source(f.script)
+  const result=await f.factory.startFromSource(original,{profile:'16:9'})
+  await f.factory.runner.idle()
+  const job=f.production.find(result.job!.id)!,before=f.counts()
+  job.status='failed';job.error='服务重启中断制作，配音和已完成画面已保留'
+  job.outputPath=null;job.stage='rendering';f.production.write(job)
+  const snapshot=JSON.stringify(f.production.find(job.id))
+  f.factory.recoverPending([])
+  f.factory.recoverPending([original.id+1])
+  await f.factory.runner.idle()
+  assert.equal(JSON.stringify(f.production.find(job.id)),snapshot)
+  assert.deepEqual(f.counts(),before)
+  f.factory.recoverPending([original.id])
+  await f.factory.runner.idle()
+  assert.equal(f.production.find(job.id)?.status,'completed')
+  assert.equal(f.production.list(original.id).length,1)
   assert.deepEqual(f.counts(),{...before,renderCalls:before.renderCalls+1})
 })
 

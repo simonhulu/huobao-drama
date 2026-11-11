@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { getHistorySourceArtifactState, type HistoryArtifactSource, type HistoryArtifactState } from './history-script-artifacts.js'
+import { HISTORY_STATUS_SCHEMA_VERSION } from './history-status-storage.js'
 
 export type HistoryProductionProducer = 'huasheng' | 'motion' | 'manual' | 'legacy'
 export type HistoryProductionVersionState = 'pending' | 'producing' | 'exporting' | 'packaging' | 'ready'
@@ -31,6 +32,7 @@ export interface HistoryProductionVersion {
   confirmedAt: string | null
   revisionOfVideoId: number | null
   previousJobId: string | null
+  observedAt?: string | null
 }
 export interface HistoryProductionSource {
   id: number
@@ -39,6 +41,14 @@ export interface HistoryProductionSource {
   artifactState?: HistoryArtifactState
   deletedAt?: string | null
   provenance?: HistoryArtifactSource
+  statusSummary?: {
+    scriptSha256: string | null
+    scriptTextSha256: string | null
+    scriptType: string
+    artifactState: HistoryArtifactState
+    fresh: boolean
+    observedAt: string | null
+  }
 }
 export interface HistoryProductionState {
   scriptId: number
@@ -49,7 +59,7 @@ export interface HistoryProductionState {
   /** Production can remain complete after a submitted edition's local bytes are released. */
   productionComplete: boolean
 }
-interface Options { root?: string }
+interface Options { root?: string; summary?: boolean; inventory?: HistoryProductionInventory }
 export interface HistoryPublicationRevision { videoId: number; jobId: string; blocked: boolean }
 type Row = Record<string, any>
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -76,41 +86,71 @@ export function isHistorySubmissionReceipt(value: unknown): value is Row {
   } catch { return false }
 }
 
-function inventory(database: Database.Database, ids: number[]) {
+export function readHistoryProductionInventory(database: Database.Database, ids: number[], summary = false) {
   const tables = new Set((database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>).map(row => row.name))
-  const read = (table: string, owner: string, columns = '*') => {
-    if (!tables.has(table) || !(database.pragma(`table_info(${table})`) as Array<{name:string}>).some(column => column.name === owner)) return []
+  const indexes = summary ? new Set((database.prepare("SELECT name FROM sqlite_master WHERE type='index'").all() as Array<{name:string}>).map(row => row.name)) : new Set<string>()
+  const read = (table: string, owner: string, columns: string[], expression?: string) => {
+    if (!tables.has(table)) return []
+    const available = new Set((database.pragma(`table_info(${table})`) as Array<{name:string}>).map(column => column.name))
+    if (!available.has(owner)) return []
+    const selected = columns.filter(column => available.has(column))
     const rows: Row[] = []
     // Stay below SQLite builds with the conservative 999 bound-parameter limit.
     for (let offset = 0; offset < ids.length; offset += 500) {
       const batch = ids.slice(offset, offset + 500)
-      rows.push(...database.prepare(`SELECT ${columns} FROM ${table} WHERE ${owner} IN (${batch.map(() => '?').join(',')})`).all(...batch) as Row[])
+      const index = `${table}_status_cover`
+      const covered = summary && indexes.has(index) ? ` INDEXED BY ${index}` : ''
+      rows.push(...database.prepare(`SELECT ${[...selected, ...(expression ? [expression] : [])].join(',')} FROM ${table}${covered} WHERE ${owner} IN (${batch.map(() => '?').join(',')})`).all(...batch) as Row[])
     }
     return rows.sort((a, b) => typeof a.id === 'number' && typeof b.id === 'number' ? b.id - a.id
       : String(b.updated_at || '').localeCompare(String(a.updated_at || '')))
   }
-  return {
-    productions: read('history_dual_production', 'source_id'),
-    videos: read('history_video_deliveries', 'script_id'),
-    huasheng: read('history_huasheng_jobs', 'source_id'),
-    exports: read('history_huasheng_export_jobs', 'source_id'),
-    // Keep large candidates and visual plans inside SQLite. Type tags preserve
-    // missing versus explicit null when matching legacy manuscript identities.
-    motion: read('history_motion_productions', 'script_id', `id,script_id,status,updated_at,
-      CASE WHEN json_valid(snapshot) THEN json_array(
+  const motion = summary ? (() => {
+    const summaries = new Map(read('history_motion_status', 'script_id', ['job_id', 'script_id', 'script_type', 'script_text_sha256',
+      'factory_hash_type', 'factory_script_hash', 'message', 'error', 'updated_at', 'input_revision', 'projected_revision',
+      'schema_version', 'deleted']).map(row => [row.job_id, row]))
+    return read('history_motion_productions', 'script_id', ['id', 'script_id', 'status', 'updated_at']).map((row): Row => {
+      const status = summaries.get(row.id)
+      return {...row, summary: status, summaryFresh: !!status && !status.deleted
+        && status.input_revision === status.projected_revision && status.schema_version === HISTORY_STATUS_SCHEMA_VERSION,
+      data: {message: status?.message, error: status?.error}}
+    })
+  })() : read('history_motion_productions', 'script_id', ['id', 'script_id', 'status', 'updated_at'], `CASE WHEN json_valid(snapshot) THEN json_array(
         json_type(snapshot,'$.script'),json_type(snapshot,'$.factory.scriptHash'),
         json_extract(snapshot,'$.script','$.factory.scriptHash','$.message','$.error'))
         ELSE '[]' END AS metadata`).map((row): Row => {
       const [scriptType,hashType,fields] = JSON.parse(row.metadata)
       const [script,scriptHash,message,error] = fields || []
       return {...row,data:{script:scriptType?script:undefined,factory:hashType?{scriptHash}:undefined,message,error}}
-    }),
-    packaging: read('history_video_packaging', 'script_id'),
-    publications: read('history_social_upload_jobs', 'source_id'),
-    intents: read('history_video_publication_intents', 'source_id'),
-    designs: read('history_video_design_intents', 'script_id'),
-    legacy: read('history_script_deliveries', 'script_id'),
+    })
+  return {
+    productions: read('history_dual_production', 'source_id', ['source_id', 'script_sha256', 'production_mode', 'huasheng_state',
+      'motion_state', 'huasheng_error', 'motion_error', 'updated_at']),
+    videos: read('history_video_deliveries', 'script_id', ['id', 'script_id', 'script_sha256', 'producer', 'producer_job_id', 'video_path', 'updated_at']),
+    huasheng: read('history_huasheng_jobs', 'source_id', ['id', 'source_id', 'script_sha256', 'status', 'production_status',
+      'production_message', 'message', 'error', 'updated_at']),
+    exports: read('history_huasheng_export_jobs', 'source_id', ['id', 'source_id', 'script_sha256', 'huasheng_job_id', 'status',
+      'design_status', 'cover_status', 'message', 'error', 'updated_at']),
+    motion,
+    packaging: read('history_video_packaging', 'script_id', ['id', 'script_id', 'video_id', 'script_sha256', 'cover_script_sha256',
+      'baijiahao_title', 'design_status', 'cover_status', 'covers_json', 'design_error', 'error', 'updated_at']),
+    publications: read('history_social_upload_jobs', 'source_id', ['id', 'source_id', 'video_id', 'target', 'publication_mode',
+      'status', 'result_json', 'payload_json', 'message', 'error', 'updated_at', 'upload_dispatched', 'operation']),
+    intents: read('history_video_publication_intents', 'source_id', ['id', 'source_id', 'video_id', 'script_sha256', 'status', 'error', 'updated_at']),
+    designs: read('history_video_design_intents', 'script_id', ['id', 'script_id', 'video_id', 'phase', 'message', 'updated_at']),
+    legacy: read('history_script_deliveries', 'script_id', ['script_id', 'video_path', 'updated_at']),
   }
+}
+export type HistoryProductionInventory = ReturnType<typeof readHistoryProductionInventory>
+
+function groupBySource(rows: Row[], owner: string) {
+  const grouped = new Map<number, Row[]>()
+  for (const row of rows) {
+    const values = grouped.get(row[owner])
+    if (values) values.push(row)
+    else grouped.set(row[owner], [row])
+  }
+  return grouped
 }
 
 function files(root: string) {
@@ -184,25 +224,47 @@ export function historyProductionAssetAvailable(scriptId: number, url: unknown, 
 
 export function getHistoryProductionStates(database: Database.Database, sources: HistoryProductionSource[], options: Options = {}): HistoryProductionState[] {
   if (!sources.length) return []
-  const rows = inventory(database, [...new Set(sources.map(source => source.id))])
+  const inventory = options.inventory || readHistoryProductionInventory(database, [...new Set(sources.map(source => source.id))], options.summary)
+  const grouped = {
+    productions: groupBySource(inventory.productions, 'source_id'), videos: groupBySource(inventory.videos, 'script_id'),
+    huasheng: groupBySource(inventory.huasheng, 'source_id'), exports: groupBySource(inventory.exports, 'source_id'),
+    motion: groupBySource(inventory.motion, 'script_id'), packaging: groupBySource(inventory.packaging, 'script_id'),
+    publications: groupBySource(inventory.publications, 'source_id'), intents: groupBySource(inventory.intents, 'source_id'),
+    designs: groupBySource(inventory.designs, 'script_id'), legacy: groupBySource(inventory.legacy, 'script_id'),
+  }
   const root = path.resolve(options.root || process.env.STORAGE_PATH || fileURLToPath(new URL('../../../data/static', import.meta.url)))
   const assets = files(root)
   return sources.map(source => {
-    const scriptSha256 = source.rewrittenScript?.trim() ? hash(source.rewrittenScript) : null
-    const current = !source.deletedAt && !!scriptSha256 && (source.artifactState
-      || (source.provenance ? getHistorySourceArtifactState(source.provenance).rewritten : 'current')) === 'current'
+    const rows = Object.fromEntries(Object.entries(grouped).map(([key, values]) => [key, values.get(source.id) || []])) as HistoryProductionInventory
+    const summaryPending = !!options.summary && (!source.statusSummary?.fresh || rows.motion.some(row => !row.summaryFresh))
+    const scriptSha256 = options.summary ? source.statusSummary?.scriptSha256 ?? null
+      : source.rewrittenScript?.trim() ? hash(source.rewrittenScript) : null
+    const current = !summaryPending && !source.deletedAt && !!scriptSha256 && (options.summary ? source.statusSummary?.artifactState
+      : source.artifactState || (source.provenance ? getHistorySourceArtifactState(source.provenance).rewritten : 'current')) === 'current'
     const production = rows.productions.find(row => row.source_id === source.id && row.script_sha256 === scriptSha256)
     const productionMode = production ? production.production_mode === 'motion_backfill' ? 'motion_backfill' : 'dual' : null
     const videos = rows.videos.filter(row => row.script_id === source.id && row.script_sha256 === scriptSha256)
       .filter((video, index, all) => all.findIndex(other => other.producer === video.producer) === index)
     const legacy = rows.legacy.find(row => row.script_id === source.id)
     const huasheng = rows.huasheng.find(row => row.source_id === source.id && row.script_sha256 === scriptSha256 && row.status !== 'canceled')
-    const motion = rows.motion.find(row => row.script_id === source.id
-      && (row.data.factory?.scriptHash === scriptSha256 || row.data.script === source.rewrittenScript))
+    const motion = rows.motion.find(row => {
+      if (!options.summary) return row.data.factory?.scriptHash === scriptSha256 || row.data.script === source.rewrittenScript
+      const status = row.summary, sourceStatus = source.statusSummary
+      return status && ((status.factory_hash_type === 'null' && scriptSha256 === null)
+        || (status.factory_hash_type === 'text' && status.factory_script_hash === scriptSha256)
+        || (status.script_type === 'null' && sourceStatus?.scriptType === 'null')
+        || (status.script_type === 'text' && sourceStatus?.scriptType === 'text' && status.script_text_sha256 === sourceStatus.scriptTextSha256))
+    })
     const producers: HistoryProductionProducer[] = productionMode === 'dual' ? ['huasheng', 'motion']
       : productionMode === 'motion_backfill' ? ['motion']
         : [...new Set<HistoryProductionProducer>([...videos.map(video => video.producer as HistoryProductionProducer),
           ...(huasheng ? ['huasheng' as const] : []), ...(motion ? ['motion' as const] : [])])]
+    if (!producers.length && summaryPending) {
+      const accepted = rows.productions[0]
+      if (accepted) producers.push(...(accepted.production_mode === 'motion_backfill' ? ['motion' as const] : ['huasheng' as const, 'motion' as const]))
+      else if (rows.motion.length) producers.push('motion')
+      else if (rows.huasheng.length) producers.push('huasheng')
+    }
     if (!producers.length && (legacy?.video_path || rows.videos.some(row => row.script_id === source.id))) producers.push('legacy')
     const versions = producers.map(producer => {
       const video = videos.find(row => row.producer === producer)
@@ -221,6 +283,11 @@ export function getHistoryProductionStates(database: Database.Database, sources:
       }
       const set = (state: HistoryProductionVersionState, stage: HistoryProductionVersion['stage'], message: string,
         action: HistoryProductionAction = 'none', error: string | null = null) => Object.assign(version, {state, stage, message, action, error})
+      if (producer === 'legacy' && summaryPending) {
+        version.automatic = false
+        version.observedAt = source.statusSummary?.observedAt || null
+        return set('pending', 'production', '状态同步中，等待已保存任务信息更新')
+      }
       if (producer === 'legacy') return set('stale', 'production', '历史交付尚未登记为当前稿件的独立视频版本，请核对原成片', 'review_legacy')
       const jobs = video ? rows.publications.filter(job => job.source_id === source.id && job.target === 'baijiahao-video'
         && job.publication_mode === 'publish' && (job.video_id === video.id || (job.video_id == null
@@ -233,7 +300,7 @@ export function getHistoryProductionStates(database: Database.Database, sources:
         const published = object(receipt.result_json).published === true
         return set(published ? 'published' : 'submitted', 'publication', published ? '已发表到百家号' : '已提交百家号，等待审核')
       }
-      if (!current) return set('stale', 'production', '稿件版本已变化或来源检查点不完整，请核对当前稿件', 'continue_production')
+      if (!current && !summaryPending) return set('stale', 'production', '稿件版本已变化或来源检查点不完整，请核对当前稿件', 'continue_production')
       const job = jobs.find(row => row.status !== 'canceled' || row.upload_dispatched || row.result_json || row.operation==='recover')
       if (job) {
         version.jobId = String(job.id)
@@ -244,6 +311,11 @@ export function getHistoryProductionStates(database: Database.Database, sources:
           job.status === 'completed' ? 'reconcile' : 'retry_upload', job.error || '原任务没有有效的发表提交回执')
       }
       if (revision?.blocked) return set('attention', 'publication', `原成片发表任务 #${revision.jobId} 尚未结束或结果待核对，请先处理原任务；本次修订成片尚未提交`)
+      if (summaryPending) {
+        version.automatic = false
+        version.observedAt = source.statusSummary?.observedAt || motion?.summary?.updated_at || null
+        return set('pending', 'production', '状态同步中，等待已保存任务信息更新')
+      }
       if (!video) {
         if (producer === 'huasheng') {
           if (exported) {

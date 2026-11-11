@@ -3,8 +3,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {fork} from 'node:child_process'
 import { z } from 'zod'
 import { HuashengMaterialLibrary } from './huasheng-material-library.mjs'
+import { ensureHistoryStatusSchema, historyStatusReadsEnabled, HISTORY_STATUS_SCHEMA_VERSION, projectHistoryMotionStatus } from './history-status-storage.js'
 
 export const MOTION_ROOT = fileURLToPath(new URL('../../../data/storage/history-motion', import.meta.url))
 const DEFAULT_DB = fileURLToPath(new URL('../../../data/huobao_drama.db', import.meta.url))
@@ -118,11 +120,52 @@ export type MotionJob = {
     fallbackImages?: Record<string,{imagePath:string;imageSha256:string}>;
   };
 }
+export type MotionJobSummary = Pick<MotionJob, 'id' | 'status' | 'stage' | 'message' | 'updatedAt'> & {
+  videoUrl: string | null; shotCount: number; readyShotCount: number;
+  statusFresh?: boolean;
+}
 type SearchLibrary = { search: (input: any) => any[]; close?: () => void;
   findFiles?: (assetId: string) => {filePath: string; sha256: string; media?: Record<string,unknown>}[] }
+type MaterialSearchRows = {rows:any[];filesByAsset:Record<string,ReturnType<NonNullable<SearchLibrary['findFiles']>>>}
 export interface HistoryMotionProductionOptions {
   databasePath?: string; materialRoot?: string; root?: string; library?: SearchLibrary;
   database?: Database.Database; now?: () => string; reviewConfidence?: number;
+  searchWorkerPath?:URL;
+}
+export function resolveMotionSearchTimeoutMs(env:NodeJS.ProcessEnv=process.env) {
+  const value=Number(env.HISTORY_MOTION_SEARCH_TIMEOUT_MS)
+  return Number.isFinite(value)&&value>0?Math.min(30000,Math.max(100,value)):5000
+}
+export function runMotionMaterialSearchWorker(input:{databasePath:string;queries:Record<string,unknown>[]},
+  options:{timeoutMs:number;workerPath?:URL;signal?:AbortSignal}):Promise<MaterialSearchRows> {
+  if(options.signal?.aborted)return Promise.reject(Error('Material search was cancelled'))
+  return new Promise((resolve,reject)=>{
+    // A subprocess can stop native synchronous SQLite, which a JS timer cannot interrupt.
+    const child=fork(options.workerPath||new URL('./history-motion-search-worker.mjs',import.meta.url),[],{execArgv:[],stdio:['ignore','ignore','ignore','ipc']})
+    let result:any,failure:Error|undefined,workerStarted=false,settled=false
+    const kill=()=>{child.kill('SIGKILL')}
+    const stop=(code:string,message:string)=>{
+      failure ||= Object.assign(Error(message),{code,workerPid:child.pid,workerStarted});kill()
+    }
+    const abort=()=>stop('MATERIAL_SEARCH_CANCELLED','Material search was cancelled')
+    const timer=setTimeout(()=>stop('MATERIAL_SEARCH_TIMEOUT',`Material search exceeded its ${options.timeoutMs} ms read budget`),options.timeoutMs)
+    process.once('exit',kill);options.signal?.addEventListener('abort',abort,{once:true})
+    const finish=(error?:Error)=>{
+      if(settled)return
+      settled=true;clearTimeout(timer);process.removeListener('exit',kill);options.signal?.removeEventListener('abort',abort)
+      if(error)reject(error)
+      else resolve({rows:result.rows,filesByAsset:result.filesByAsset})
+    }
+    child.on('message',(message:any)=>{if(message?.type==='started')workerStarted=true;else result=message})
+    child.on('error',error=>{failure ||= error;if(child.pid)kill();else finish(error)})
+    child.once('close',(code,signal)=>{
+      if(failure)return finish(failure)
+      if(code!==0||signal||result?.ok!==true||!Array.isArray(result.rows)||!result.filesByAsset)return finish(Error(result?.error||`Material search worker exited (${code ?? signal})`))
+      finish()
+    })
+    try {child.send(input,error=>{if(error){failure ||= error;kill()}})}
+    catch(error){failure ||= error as Error;kill()}
+  })
 }
 export const hashText = (value: string) => createHash('sha256').update(value).digest('hex')
 export const sourceRevision = (value: unknown) => hashText(JSON.stringify(value))
@@ -149,6 +192,7 @@ export function createHistoryMotionProduction(options: HistoryMotionProductionOp
   const library: SearchLibrary = options.library || new HuashengMaterialLibrary({databasePath: filename})
   const root = path.resolve(options.root || MOTION_ROOT)
   const materialRoot = path.resolve(options.materialRoot || process.env.HUASHENG_MATERIAL_ROOT || DEFAULT_MATERIAL_ROOT)
+  const searchController=new AbortController()
   // macOS may expose the same directory as /var and /private/var. Compare
   // canonical paths after resolving symlinks; the final real path must still
   // remain inside the configured root.
@@ -158,16 +202,61 @@ export function createHistoryMotionProduction(options: HistoryMotionProductionOp
   database.exec(`CREATE TABLE IF NOT EXISTS history_motion_productions (
     id TEXT PRIMARY KEY, script_id INTEGER NOT NULL, status TEXT NOT NULL, updated_at TEXT NOT NULL, snapshot TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS history_motion_productions_source ON history_motion_productions(script_id,updated_at);`)
+  ensureHistoryStatusSchema(database)
   function write(job: MotionJob) {
-    job.updatedAt = clock()
-    database.prepare(`INSERT INTO history_motion_productions VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-      status=excluded.status,updated_at=excluded.updated_at,snapshot=excluded.snapshot`)
-      .run(job.id, job.scriptId, job.status, job.updatedAt, JSON.stringify(job))
-    return job
+    return database.transaction(() => {
+      job.updatedAt = clock()
+      database.prepare(`INSERT INTO history_motion_productions VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+        status=excluded.status,updated_at=excluded.updated_at,snapshot=excluded.snapshot`)
+        .run(job.id, job.scriptId, job.status, job.updatedAt, JSON.stringify(job))
+      projectHistoryMotionStatus(database,job.id,job)
+      return job
+    })()
   }
   function find(id: string): MotionJob | null {
     const row = database.prepare('SELECT snapshot FROM history_motion_productions WHERE id=?').get(id) as {snapshot: string} | undefined
     return row ? JSON.parse(row.snapshot) : null
+  }
+  const summaryQuery = database.prepare(`SELECT
+    json_extract(snapshot,'$.id','$.status','$.stage','$.message','$.updatedAt','$.plan.deliveryAssociation.videoUrl') AS fields,
+    json_array_length(snapshot,'$.requested.shots') AS shotCount,
+    (SELECT COUNT(*) FROM json_each(snapshot,'$.plan.visuals') WHERE key IS NOT NULL) AS readyShotCount
+    FROM history_motion_productions WHERE id=?`)
+  const summaryVersionQuery = database.prepare('SELECT data_version AS dataVersion,total_changes() AS totalChanges FROM pragma_data_version')
+  const summaryCache = new Map<string, MotionJobSummary | null>()
+  let summaryVersion: {dataVersion:number; totalChanges:number} | undefined
+  function readSummary(id: string): MotionJobSummary | null {
+    const row = summaryQuery.get(id) as {fields: string; shotCount: number; readyShotCount: number} | undefined
+    if (!row) return null
+    // Keep large candidates, visuals and plans inside SQLite when polling the list.
+    const [jobId,status,stage,message,updatedAt,videoUrl] = JSON.parse(row.fields)
+    return {id:jobId,status,stage,message,updatedAt,videoUrl,shotCount:row.shotCount,readyShotCount:row.readyShotCount}
+  }
+  function findSummary(id: string): MotionJobSummary | null {
+    if (historyStatusReadsEnabled()) {
+      const row=database.prepare(`SELECT p.id,p.status,p.updated_at,s.status AS observed_status,s.updated_at AS observed_updated_at,
+        s.stage,s.message,s.video_url,s.shot_count,s.ready_shot_count,
+        s.input_revision,s.projected_revision,s.schema_version,s.deleted FROM history_motion_productions p
+        LEFT JOIN history_motion_status s ON s.job_id=p.id WHERE p.id=?`).get(id) as Record<string,any> | undefined
+      if (!row) return null
+      const fresh=row.input_revision===row.projected_revision && row.schema_version===HISTORY_STATUS_SCHEMA_VERSION && !row.deleted
+      return {id:row.id,status:row.observed_status ?? row.status,updatedAt:row.observed_updated_at ?? row.updated_at,stage:fresh?row.stage:'status_sync',
+        message:fresh?row.message:'任务状态正在同步',videoUrl:fresh?row.video_url:null,
+        shotCount:row.shot_count ?? 0,readyShotCount:row.ready_shot_count ?? 0,statusFresh:fresh}
+    }
+    // data_version tracks other connections; total_changes tracks this one.
+    // Transaction-local results cannot be cached because a rollback keeps total_changes.
+    if (database.inTransaction) {
+      summaryCache.clear();summaryVersion=undefined
+      return readSummary(id)
+    }
+    const version=summaryVersionQuery.get() as {dataVersion:number; totalChanges:number}
+    if (!summaryVersion || version.dataVersion!==summaryVersion.dataVersion || version.totalChanges!==summaryVersion.totalChanges) {
+      summaryCache.clear();summaryVersion=version
+    }
+    if (!summaryCache.has(id)) summaryCache.set(id,readSummary(id))
+    const summary=summaryCache.get(id)!
+    return summary?{...summary}:null
   }
   function list(scriptId?: number) {
     const rows = scriptId === undefined
@@ -175,8 +264,11 @@ export function createHistoryMotionProduction(options: HistoryMotionProductionOp
       : database.prepare('SELECT snapshot FROM history_motion_productions WHERE script_id=? ORDER BY updated_at DESC LIMIT 100').all(scriptId)
     return (rows as {snapshot: string}[]).map(row => JSON.parse(row.snapshot) as MotionJob)
   }
-  function listRecoverable() {
-    return (database.prepare("SELECT snapshot FROM history_motion_productions WHERE status NOT IN ('completed','needs_review') ORDER BY updated_at").all() as {snapshot:string}[])
+  function listRecoverable(sourceIds?:readonly number[]) {
+    const ids=sourceIds===undefined ? undefined : [...new Set(z.array(z.number().int().positive()).max(1000).parse(sourceIds))]
+    if(ids?.length===0)return []
+    const scope=ids ? ` AND script_id IN (${ids.map(()=>'?').join(',')})` : ''
+    return (database.prepare(`SELECT snapshot FROM history_motion_productions WHERE status NOT IN ('completed','needs_review')${scope} ORDER BY updated_at`).all(...(ids || [])) as {snapshot:string}[])
       .map(row=>JSON.parse(row.snapshot) as MotionJob)
   }
   function safeMaterial(filename: string) {
@@ -184,15 +276,18 @@ export function createHistoryMotionProduction(options: HistoryMotionProductionOp
     if (!inside(materialRealRoot, real) || !fs.statSync(real).isFile()) throw Error('素材不在已配置的素材目录中')
     return real
   }
-  function search(input: MaterialSearchInput, options: {usedAssets?: ReadonlySet<string>} = {}): MotionCandidate[] {
+  function searchRequest(input:MaterialSearchInput,options:{usedAssets?:ReadonlySet<string>}) {
     const parsed = materialSearchSchema.parse(input)
     const usedAssets = options.usedAssets || new Set<string>()
     const excludeAssetIds = [...usedAssets].filter(key => key.startsWith('video-id:')).map(key => key.slice('video-id:'.length))
     const excludeSha256 = [...usedAssets].filter(key => key.startsWith('media:')).map(key => key.slice('media:'.length))
     // Limit unique assets after ranking, so repeated recommendation rows cannot consume the search budget.
     const terms = [...new Set(parsed.query.split(/[\s，,；;]+/).filter(Boolean))].slice(0, 5)
-    const rows = terms.flatMap(query => library.search({projectId: parsed.projectId, clipId: parsed.clipId, query,
+    const queries=terms.map(query=>({projectId: parsed.projectId, clipId: parsed.clipId, query,
       downloadedOnly: true, topOnly: true, distinctAssets: true, excludeAssetIds, excludeSha256, limit: 80}))
+    return {parsed,usedAssets,terms,queries}
+  }
+  function rankCandidates({parsed,usedAssets,terms}:ReturnType<typeof searchRequest>,rows:any[],findFiles?:SearchLibrary['findFiles']):MotionCandidate[] {
     const unique = new Map<string, MotionCandidate & {score: number}>()
     const registeredFiles = new Map<string, ReturnType<NonNullable<SearchLibrary['findFiles']>>>()
     const readableFile = (candidate: {localPath?: string; sha256?: string; media?: Record<string,unknown>; duration?: unknown; width?: unknown; height?: unknown}) => {
@@ -207,8 +302,8 @@ export function createHistoryMotionProduction(options: HistoryMotionProductionOp
     for (const row of rows) {
       if (row.status !== 'done' || row.rank > 3 || usedAssets.has(`video-id:${row.assetId}`)) continue
       let file = readableFile(row)
-      if (!file && library.findFiles) {
-        if (!registeredFiles.has(String(row.assetId))) registeredFiles.set(String(row.assetId), library.findFiles(String(row.assetId)))
+      if (!file && findFiles) {
+        if (!registeredFiles.has(String(row.assetId))) registeredFiles.set(String(row.assetId), findFiles(String(row.assetId)))
         for (const alternative of registeredFiles.get(String(row.assetId))!) {
           file = readableFile({localPath:alternative.filePath,sha256:alternative.sha256,media:alternative.media})
           if (file) break
@@ -245,6 +340,17 @@ export function createHistoryMotionProduction(options: HistoryMotionProductionOp
       return true
     }).slice(0,parsed.limit).map(({score, ...candidate}) => candidate)
   }
+  function search(input:MaterialSearchInput,searchOptions:{usedAssets?:ReadonlySet<string>}={}):MotionCandidate[] {
+    const request=searchRequest(input,searchOptions)
+    return rankCandidates(request,request.queries.flatMap(query=>library.search(query)),library.findFiles?.bind(library))
+  }
+  async function searchAsync(input:MaterialSearchInput,searchOptions:{usedAssets?:ReadonlySet<string>}={}):Promise<MotionCandidate[]> {
+    if(options.library&&!options.searchWorkerPath)return search(input,searchOptions)
+    const request=searchRequest(input,searchOptions)
+    const result=await runMotionMaterialSearchWorker({databasePath:database.name,queries:request.queries},
+      {timeoutMs:resolveMotionSearchTimeoutMs(),workerPath:options.searchWorkerPath,signal:searchController.signal})
+    return rankCandidates(request,result.rows,assetId=>result.filesByAsset[assetId]||[])
+  }
   function validateSelection(shot: MotionShot, candidates: MotionCandidate[], selection: MotionSelection, _human = false) {
     const selected = motionSelectionSchema.parse(selection)
     const candidate = candidates.find(c => c.assetId === selected.assetId)
@@ -260,12 +366,13 @@ export function createHistoryMotionProduction(options: HistoryMotionProductionOp
     return write({id: randomUUID(), scriptId, title, scriptRevision: revision, script, profile, status: 'queued', stage: 'planning', message: '等待分镜设计',
       requested: {scriptRevision: revision,profile,shots:[]}, candidates: {}, plan: null, outputPath: null, error: null, createdAt: clock(), updatedAt: clock()})
   }
-  function createPlan(scriptId: number, input: MotionPlanInput, script: string, title: string) {
+  function parsePlan(input:MotionPlanInput,script:string) {
     const parsed = motionPlanSchema.parse(input)
     if (textContent(parsed.shots.map(s => s.narration).join('')) !== textContent(script)) throw Error('分镜必须按顺序完整覆盖保存的旁白')
-    const candidates: Record<string,MotionCandidate[]> = {}
+    return parsed
+  }
+  function savePlan(scriptId:number,parsed:MotionPlanInput,script:string,title:string,candidates:Record<string,MotionCandidate[]>) {
     for (const shot of parsed.shots) {
-      candidates[shot.shotId] = search(shot.search)
       if (shot.selection) validateSelection(shot, candidates[shot.shotId], shot.selection)
     }
     const job = create(scriptId, script, title, parsed.scriptRevision, parsed.profile)
@@ -274,8 +381,18 @@ export function createHistoryMotionProduction(options: HistoryMotionProductionOp
     job.candidates = candidates
     return write(job)
   }
-  return {root, materialRoot, find, list, listRecoverable, write, search, safeMaterial, validateSelection, create, createPlan,
-    close() {if (!options.database && database.open) database.close(); if (!options.library) library.close?.()},
+  function createPlan(scriptId:number,input:MotionPlanInput,script:string,title:string) {
+    const parsed=parsePlan(input,script)
+    const candidates=Object.fromEntries(parsed.shots.map(shot=>[shot.shotId,search(shot.search)]))
+    return savePlan(scriptId,parsed,script,title,candidates)
+  }
+  async function createPlanAsync(scriptId:number,input:MotionPlanInput,script:string,title:string) {
+    const parsed=parsePlan(input,script),candidates:Record<string,MotionCandidate[]>={}
+    for(const shot of parsed.shots)candidates[shot.shotId]=await searchAsync(shot.search)
+    return savePlan(scriptId,parsed,script,title,candidates)
+  }
+  return {root, materialRoot, find, findSummary, list, listRecoverable, write, search, searchAsync, safeMaterial, validateSelection, create, createPlan, createPlanAsync,
+    close() {searchController.abort();if (!options.database && database.open) database.close(); if (!options.library) library.close?.()},
   }
 }
 export type HistoryMotionProduction = ReturnType<typeof createHistoryMotionProduction>

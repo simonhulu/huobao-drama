@@ -13,6 +13,8 @@ import {getHistorySource,requireCurrentHistoryScript,type HistorySource} from '.
 import {listProjectRenderArtifacts} from './render-artifacts.js'
 import {condenseHistoryScript} from './history-script-recreation.js'
 import {historyScriptCondensationRecord,needsHistoryScriptCondensation,prepareHistorySourceScript} from './history-script-preparation.js'
+import {historyPresenterPolicyFromEnv} from './history-presenter-intro.js'
+import {historyAutomationSourceIds,historyExecutionScope} from './history-video-publication-scope.js'
 
 const exec=promisify(execFile)
 const repoRoot=fileURLToPath(new URL('../../../',import.meta.url))
@@ -104,10 +106,15 @@ export function createHistoryFactory(options:HistoryFactoryOptions={}) {
       if((!ep.preTtsAudioUrl || requestedVoice && voice.audioSettings?.voiceId===requestedVoice) && voice.script===job.script && voice.audioPath && fs.existsSync(voice.audioPath)) {
         const sha=createHash('sha256').update(fs.readFileSync(voice.audioPath)).digest('hex')
         const name=`history-${job.id}-${sha.slice(0,12)}${path.extname(voice.audioPath) || '.m4a'}`,target=path.join(storageRoot,'audio',name)
-        fs.mkdirSync(path.dirname(target),{recursive:true});fs.copyFileSync(voice.audioPath,target)
+        fs.mkdirSync(path.dirname(target),{recursive:true});if(!fs.existsSync(target))fs.copyFileSync(voice.audioPath,target)
         db.update(schema.episodes).set({preTtsAudioUrl:`/static/audio/${name}`,preTtsTitlesJson:voice.titles?.length?JSON.stringify(voice.titles):null,
           ...(voice.audioSettings?.voiceId?{narrationVoiceId:voice.audioSettings.voiceId}:{}),duration:Math.round(voice.duration),updatedAt:ts}).where(eq(schema.episodes.id,ep.id)).run()
       }
+    }
+    const finalDuration=Number(job.plan?.delivery?.duration)
+    if(job.status==='completed' && job.stage==='rendered' && record(ep.metadata).historyFactory?.jobId===job.id
+      && job.plan?.delivery?.qa?.technical==='passed' && Number.isFinite(finalDuration) && finalDuration>0) {
+      db.update(schema.episodes).set({duration:Math.round(finalDuration),updatedAt:ts}).where(eq(schema.episodes.id,ep.id)).run()
     }
     if(!shots.length)return
     const digest=hashText(JSON.stringify(shots))
@@ -146,8 +153,10 @@ export function createHistoryFactory(options:HistoryFactoryOptions={}) {
     // Register the new render without deleting or overwriting earlier editions.
     const existing=db.select().from(schema.remotionRenders).where(and(eq(schema.remotionRenders.projectId,link.projectId),eq(schema.remotionRenders.inputHash,output.sha256))).get()
     if(!existing)db.insert(schema.remotionRenders).values({projectId:link.projectId,renderKind:'episode',status:'succeeded',inputHash:output.sha256,
-      outputPath:target,outputUrl:url,width:job.plan?.width,height:job.plan?.height,fps:job.plan?.fps,durationMs:Math.round((job.plan?.durationInFrames || 0)/30*1000),
-      qaJson:JSON.stringify(job.plan?.delivery || {}),propsJson:JSON.stringify({jobId:job.id}),createdAt:ts,updatedAt:ts,completedAt:ts}).run()
+      outputPath:target,outputUrl:url,width:job.plan?.delivery?.width || job.plan?.width,height:job.plan?.delivery?.height || job.plan?.height,fps:job.plan?.delivery?.fps || job.plan?.fps,
+      durationMs:Math.round((Number(job.plan?.delivery?.duration)>0?Number(job.plan?.delivery?.duration):(job.plan?.durationInFrames || 0)/30)*1000),
+      qaJson:JSON.stringify(job.plan?.delivery || {}),propsJson:JSON.stringify({jobId:job.id,...(job.plan?.delivery?.presenterIntro?{presenter:{character:'history',identity:'xiaoba',
+        fingerprint:job.plan.delivery.presenterIntro.fingerprint,avatarId:job.plan.delivery.presenterIntro.avatarId,referenceSha256:job.plan.delivery.presenterIntro.referenceSha256}}:{})}),createdAt:ts,updatedAt:ts,completedAt:ts}).run()
     let previewUrl:string|null=null
     const preview=job.plan?.delivery?.preview
     if(typeof preview==='string' && fs.existsSync(preview)) {
@@ -171,8 +180,11 @@ export function createHistoryFactory(options:HistoryFactoryOptions={}) {
       message:history?.message || (ep.videoUrl && ep.videoUrl!==url?'新成片已登记，已保留本集原成片':'成片已登记到本集与 Remotion')}
   }
   const runner=(options.runnerFactory || createMotionRunner)(production,{...options.pipeline,assertCurrent,deliver:options.pipeline?.deliver || deliver})
-  function recoverPending() {
-    for(const job of base.listRecoverable()) {
+  function recoverPending(sourceIds?:readonly number[]) {
+    if(sourceIds!==undefined)historyExecutionScope({sourceIds})
+    const allowed=sourceIds===undefined ? undefined : new Set(sourceIds)
+    for(const job of base.listRecoverable(sourceIds)) {
+      if(allowed && !allowed.has(job.scriptId))continue
       if(runner.isRunning(job.id) || job.status==='failed' && !isTransientMotionError(job.error))continue
       if(job.retry && Date.parse(job.retry.nextAttemptAt)>Date.now())continue
       try {
@@ -365,6 +377,7 @@ export function createHistoryFactory(options:HistoryFactoryOptions={}) {
   }
   function detail(id:number) {
     const ep=episode(id),meta=record(ep.metadata).historyFactory || {},job=meta.jobId?base.find(meta.jobId):null
+    const presenterPolicy=historyPresenterPolicyFromEnv()
     const projects=db.select().from(schema.remotionProjects).where(and(eq(schema.remotionProjects.sourceEpisodeId,id),isNull(schema.remotionProjects.deletedAt))).all()
     const outputs:{id:string;url:string;createdAt:string;kind:string;filename:string}[]=[]
     const add=(value:typeof outputs[number])=>{if(value.url && !outputs.some(o=>o.url===value.url))outputs.push(value)}
@@ -382,7 +395,7 @@ export function createHistoryFactory(options:HistoryFactoryOptions={}) {
       fallbackReason:shot.fallbackReason,candidatesCount:job?.candidates[shot.shotId]?.length || 0,titles:shot.titles || [],mapEvidence:shot.map?.provenance})):
       job?[]:boards(id).map(s=>({shotId:`storyboard-${s.id}`,number:s.storyboardNumber,narration:s.narration,duration:s.duration,purpose:s.description,visualType:s.videoUrl?'video':s.composedImage || s.firstFrameImage?'image':'auto',status:s.videoUrl || s.composedImage || s.firstFrameImage?'ready':'pending',candidatesCount:0}))
     return {deletionSupported:true,episode:{id:ep.id,title:ep.title,script:ep.scriptContent || ep.content || '',profile:job?.profile || (ep.aspectRatio==='9:16'?'9:16':'16:9'),dramaId:ep.dramaId,episodeNumber:ep.episodeNumber,videoUrl:ep.videoUrl,audioUrl:ep.preTtsAudioUrl,updatedAt:ep.updatedAt},
-      job:job?visible(job):null,shots,outputs,sourceId:meta.sourceId || null,links:{episode:`/drama/${ep.dramaId}/episode/${ep.episodeNumber}`,source:meta.sourceId?sourceUrl(meta.sourceId):null},url:`/remotion/episode/${id}`}
+      job:job?visible(job):null,jobRunning:job?runner.isRunning(job.id):false,presenterRuntimePolicy:presenterPolicy?{enabled:true,...presenterPolicy}:{enabled:false},shots,outputs,sourceId:meta.sourceId || null,links:{episode:`/drama/${ep.dramaId}/episode/${ep.episodeNumber}`,source:meta.sourceId?sourceUrl(meta.sourceId):null},url:`/remotion/episode/${id}`}
   }
   function list() {
     const dramas=new Map(db.select().from(schema.dramas).where(isNull(schema.dramas.deletedAt)).all().map(d=>[d.id,d]))
@@ -398,12 +411,12 @@ export function createHistoryFactory(options:HistoryFactoryOptions={}) {
     }
     for(const [id,artifacts] of legacyArtifacts())if(!videos.has(id))videos.set(id,artifacts[0].url)
     return {deletionSupported:true,items:episodes.filter(ep=>dramas.has(ep.dramaId) && !record(ep.metadata).historyFactory?.deletedAt).map(ep=>{
-      const meta=record(ep.metadata).historyFactory || {},job=meta.jobId?base.find(meta.jobId):null,drama=dramas.get(ep.dramaId)!
-      const videoUrl=job?.plan?.deliveryAssociation?.videoUrl || ep.videoUrl || videos.get(ep.id) || null
+      const meta=record(ep.metadata).historyFactory || {},job=meta.jobId?base.findSummary(meta.jobId):null,drama=dramas.get(ep.dramaId)!
+      const videoUrl=job?.videoUrl || ep.videoUrl || videos.get(ep.id) || null
       return {episodeId:ep.id,dramaId:ep.dramaId,episodeNumber:ep.episodeNumber,title:ep.title,dramaTitle:drama.title,accountName:drama.mediaAccountId?accounts.get(drama.mediaAccountId) || null:null,
         status:job?.status || (videoUrl?'completed':'draft'),stage:job?.stage || (videoUrl?'rendered':'source'),message:job?.message || (videoUrl?'已有成片':'等待开始制作'),
         updatedAt:job?.updatedAt || ep.updatedAt,jobId:job?.id || null,sourceId:meta.sourceId || null,videoUrl,
-        shotCount:job?.requested.shots.length || countMap.get(ep.id) || 0,readyShotCount:Object.keys(job?.plan?.visuals || {}).length}
+        shotCount:job?.shotCount || countMap.get(ep.id) || 0,readyShotCount:job?.readyShotCount || 0}
     })}
   }
   return {production,runner,startFromSource,startEpisode,detail,list,remove,assertCurrent,visible,recoverPending}
@@ -411,9 +424,11 @@ export function createHistoryFactory(options:HistoryFactoryOptions={}) {
 let singleton:ReturnType<typeof createHistoryFactory>|undefined
 export function getHistoryFactory(){return singleton ||= createHistoryFactory()}
 export function startHistoryFactoryWorker() {
-  if(process.env.TASK_WORKER_DISABLED==='1')return {stop:async(_timeoutMs?:number)=>{}}
+  const independent=process.env.HISTORY_MOTION_AUTOMATION_ENABLED==='1'
+  if(process.env.TASK_WORKER_DISABLED==='1' && !independent)return {stop:async(_timeoutMs?:number)=>{}}
+  const sourceIds=independent ? historyAutomationSourceIds() : undefined
   const factory=getHistoryFactory()
-  const tick=()=>{try {factory.recoverPending()}catch(error){console.error('[history-factory-recovery]',error)}}
+  const tick=()=>{try {factory.recoverPending(sourceIds)}catch(error){console.error('[history-factory-recovery]',error)}}
   const timer=setInterval(tick,5000);timer.unref();tick()
   return {stop:async(timeoutMs?:number)=>{clearInterval(timer);await factory.runner.stop(timeoutMs)}}
 }

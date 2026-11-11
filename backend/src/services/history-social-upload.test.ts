@@ -75,6 +75,34 @@ async function failedDraft(h: Awaited<ReturnType<typeof fixture>>, target: Socia
   return job
 }
 
+test('a scoped drain claims only the selected original job and does not recover unrelated interrupted work', async t => {
+  const h=await fixture(t)
+  const receipt=await h.service.enqueue({sourceIds:[71],targets:['baijiahao-video','tencent-video'],mode:'draft'})
+  const selected=receipt.jobs.find(job=>job.target==='tencent-video')!
+  const sql=new Database(h.options.databasePath)
+  t.after(()=>sql.close())
+  sql.prepare(`INSERT INTO history_social_upload_jobs
+    (source_id,source_title,target,mode,status,message,blockers_json,fingerprint,engine,created_at,updated_at,host,pid,lease_until)
+    VALUES(999,'outside','baijiahao-video','draft','running','untouched','[]','outside','test','before','before','dead-host',1,1)`).run()
+  const outside=sql.prepare('SELECT * FROM history_social_upload_jobs WHERE source_id=999').get()
+  const restarted=new HistorySocialUploadService({...h.options,scope:{sourceIds:[71],jobIds:[selected.id]}})
+  try {assert.deepEqual(sql.prepare('SELECT * FROM history_social_upload_jobs WHERE source_id=999').get(),outside)}
+  finally {await restarted.close()}
+  // A running task outside the scope still owns the global upload mutex.
+  await h.service.runPending({sourceIds:[71],jobIds:[selected.id]})
+  assert.equal(h.calls.length,0)
+  assert.deepEqual(sql.prepare('SELECT * FROM history_social_upload_jobs WHERE source_id=999').get(),outside)
+  sql.prepare("UPDATE history_social_upload_jobs SET status='uncertain' WHERE source_id=999").run()
+  const uncertain=sql.prepare('SELECT * FROM history_social_upload_jobs WHERE source_id=999').get()
+  await h.service.runPending({sourceIds:[71],jobIds:[selected.id]})
+  assert.equal(h.service.getJob(selected.id).status,'completed')
+  assert.equal(h.service.getJob(receipt.jobs.find(job=>job.id!==selected.id)!.id).status,'queued')
+  assert.deepEqual(sql.prepare('SELECT * FROM history_social_upload_jobs WHERE source_id=999').get(),uncertain)
+  assert.deepEqual(h.calls.map(call=>call.jobId),[selected.id])
+  await h.service.runPending({sourceIds:[]})
+  assert.equal(h.calls.length,1)
+})
+
 test('explicit runtime refresh reaches the bridge instead of reusing its failed check', async t => {
   const h = await fixture(t)
   const inspect = h.runtime.inspectSocialUploadRuntime
@@ -84,6 +112,241 @@ test('explicit runtime refresh reaches the bridge instead of reusing its failed 
   await h.service.inspectRuntime()
   await h.service.inspectRuntime(true)
   assert.deepEqual(calls, [false, true])
+})
+
+function automaticPreflightClock(h: Awaited<ReturnType<typeof fixture>>) {
+  let now = Date.parse('2026-11-12T00:00:00Z')
+  Object.assign(h.options, {automaticPreflightRetry: true, now: () => now})
+  return {advance: (ms: number) => { now += ms }, now: () => now}
+}
+
+test('automatic preflight retry preserves the original request, payload and deadline through restart and submits once', async t => {
+  const h = await fixture(t), clock = automaticPreflightClock(h), video = addVideo(h, 'motion')
+  const receipt = await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video'], videoIds: [video.id], requestId: 'same-preflight-request'})
+  const id = receipt.jobs[0]!.id, sql = new Database(h.options.databasePath)
+  t.after(() => sql.close())
+  const originalPayload = (sql.prepare('SELECT payload_json FROM history_social_upload_jobs WHERE id=?').get(id) as any).payload_json
+  h.runtime.inspectHistorySocialUploadRuntime = async () => { throw Error('browserType.connectOverCDP: Timeout 30000ms exceeded') }
+  await h.service.runPending()
+  const pending = h.service.getJob(id)
+  assert.equal(pending.status, 'queued')
+  assert.deepEqual(pending.recovery, {attempts: 1, maxAttempts: 3, nextAttemptAt: new Date(clock.now() + 30_000).toISOString(), action: 'preflight-runtime'})
+  assert.equal(pending.publicationAttempted, false)
+  assert.equal((sql.prepare('SELECT payload_json FROM history_social_upload_jobs WHERE id=?').get(id) as any).payload_json, originalPayload)
+  const ready = h.runtime.inspectSocialUploadRuntime
+  h.runtime.inspectHistorySocialUploadRuntime = ready
+  let submissions = 0
+  h.runtime.confirmSocialUpload = async (_payload, previous) => { submissions++; return publishedResult(previous) }
+  const restarted = new HistorySocialUploadService(h.options)
+  try {
+    assert.deepEqual(restarted.getJob(id).recovery, pending.recovery)
+    assert.equal(restarted.receipt('same-preflight-request').jobs[0]!.id, id)
+    clock.advance(29_999)
+    await restarted.runPending({jobIds: [id]})
+    assert.equal(h.calls.length, 0)
+    clock.advance(1)
+    await restarted.runPending({jobIds: [id]})
+    await restarted.runPending({jobIds: [id]})
+    assert.equal(restarted.getJob(id).status, 'completed')
+    assert.equal(h.calls.length, 1)
+    assert.equal(submissions, 1)
+    assert.equal(h.calls[0]!.jobId, id)
+    assert.equal(JSON.stringify(h.calls[0]), originalPayload)
+    assert.equal((sql.prepare('SELECT count(*) AS n FROM history_social_upload_jobs').get() as any).n, 1)
+    assert.equal((sql.prepare('SELECT count(*) AS n FROM history_social_upload_requests').get() as any).n, 1)
+  } finally { await restarted.close() }
+})
+
+test('automatic preflight retry uses persisted 30, 60 and 120 second delays then stops after three retries', async t => {
+  const h = await fixture(t), clock = automaticPreflightClock(h)
+  const id = (await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video'], mode: 'draft'})).jobs[0]!.id
+  let checks = 0
+  h.runtime.inspectHistorySocialUploadRuntime = async () => { checks++; throw Error('connect ECONNREFUSED 127.0.0.1:9243') }
+  for (const [index, delay] of [30_000, 60_000, 120_000].entries()) {
+    await h.service.runPending()
+    assert.equal(h.service.getJob(id).status, 'queued')
+    assert.equal(h.service.getJob(id).recovery.attempts, index + 1)
+    assert.equal(h.service.getJob(id).recovery.nextAttemptAt, new Date(clock.now() + delay).toISOString())
+    await h.service.runPending()
+    assert.equal(checks, index + 1, 'polling must not claim work before its persisted deadline')
+    clock.advance(delay)
+  }
+  await h.service.runPending()
+  assert.equal(checks, 4)
+  const failed = h.service.getJob(id)
+  assert.equal(failed.status, 'failed')
+  assert.deepEqual(failed.recovery, {attempts: 3, maxAttempts: 3, nextAttemptAt: null, action: 'preflight-runtime'})
+  const restarted = new HistorySocialUploadService(h.options)
+  try {
+    assert.deepEqual(restarted.getJob(id).recovery, failed.recovery)
+    clock.advance(1_000_000)
+    await restarted.runPending()
+    assert.equal(checks, 4)
+    assert.equal(h.calls.length, 0)
+  } finally { await restarted.close() }
+})
+
+test('automatic preflight retry also schedules a runtime-only timeout in the initial preflight', async t => {
+  const h = await fixture(t), clock = automaticPreflightClock(h)
+  const inspect = h.runtime.inspectSocialUploadRuntime
+  h.runtime.inspectHistorySocialUploadRuntime = async () => { throw Error('百家号上传前账号检查超时，尚未开始上传；原登录和上传检查点已保留，请重试连接') }
+  const receipt = await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video'], mode: 'draft', requestId: 'initial-timeout'})
+  assert.equal(receipt.jobs[0]!.status, 'queued')
+  assert.equal(receipt.jobs[0]!.recovery.attempts, 1)
+  await h.service.runPending()
+  assert.equal(h.calls.length, 0)
+  h.runtime.inspectHistorySocialUploadRuntime = inspect
+  clock.advance(30_000)
+  await h.service.runPending()
+  assert.equal(h.service.receipt('initial-timeout').jobs[0]!.status, 'completed')
+  assert.equal(h.calls.length, 1)
+})
+
+test('automatic preflight backoff does not block another ready job in the same drain', async t => {
+  const h = await fixture(t)
+  automaticPreflightClock(h)
+  await enableBackground(h)
+  const receipt = await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video', 'tencent-video'], mode: 'draft'})
+  const inspect = h.runtime.inspectHistorySocialUploadRuntime!
+  h.runtime.inspectHistorySocialUploadRuntime = async refresh => {
+    const runtime = await inspect(refresh)
+    runtime.platforms.baijiahao = {...runtime.platforms.baijiahao, ready: false, issue: 'connection_failed', message: 'connect ECONNREFUSED 127.0.0.1:9243'}
+    return runtime
+  }
+  await h.service.runPending()
+  assert.equal(h.service.getJob(receipt.jobs[0]!.id).status, 'queued')
+  assert.equal(h.service.getJob(receipt.jobs[1]!.id).status, 'completed')
+  assert.deepEqual(h.calls.map(call => call.target), ['tencent-video'])
+})
+
+test('automatic preflight retry requires opt-in and never retries login, verification, material or snapshot failures', async t => {
+  for (const scenario of ['disabled', 'login', 'verification', 'material', 'snapshot'] as const) await t.test(scenario, async child => {
+    const h = await fixture(child)
+    if (scenario !== 'disabled') automaticPreflightClock(h)
+    await enableBackground(h)
+    const id = (await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video'], mode: 'draft'})).jobs[0]!.id
+    const inspect = h.runtime.inspectHistorySocialUploadRuntime!
+    if (scenario === 'snapshot') h.source.delivery!.baijiahaoTitle = 'Changed title must not replace original metadata'
+    else {
+      if (scenario === 'material') fs.rmSync(path.join(h.root, 'history-deliveries/71/finished.mp4'))
+      h.runtime.inspectHistorySocialUploadRuntime = async refresh => {
+        const value = await inspect(refresh)
+        value.platforms.baijiahao = {...value.platforms.baijiahao, ready: false,
+          issue: scenario === 'login' ? 'login_required' : scenario === 'verification' ? 'verification_required' : 'connection_failed',
+          message: 'Timeout 30000ms exceeded'}
+        return value
+      }
+    }
+    await h.service.runPending()
+    assert.equal(h.service.getJob(id).status, 'failed')
+    assert.equal(h.service.getJob(id).recovery.nextAttemptAt, null)
+    assert.equal(h.service.getJob(id).recovery.attempts, 0)
+    assert.equal(h.calls.length, 0)
+  })
+})
+
+test('automatic preflight retry never resets or retries a dispatched or uncertain publication', async t => {
+  for (const failureAt of ['upload', 'publish'] as const) await t.test(failureAt, async child => {
+    const h = await fixture(child), clock = automaticPreflightClock(h), video = addVideo(h, 'motion')
+    let submissions = 0
+    if (failureAt === 'upload') h.runtime.runSocialUpload = async payload => { h.calls.push(payload); throw Error('connect ETIMEDOUT during upload') }
+    h.runtime.confirmSocialUpload = async () => { submissions++; throw Error('publication response timeout') }
+    h.runtime.resetSocialUploadAttempt = async () => assert.fail('must preserve dispatched attempt')
+    const id = (await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video'], videoIds: [video.id]})).jobs[0]!.id
+    await h.service.runPending()
+    const uncertain = h.service.getJob(id)
+    assert.equal(uncertain.status, 'uncertain')
+    assert.equal(uncertain.publicationAttempted, true)
+    assert.equal(uncertain.recovery.nextAttemptAt, null)
+    const restarted = new HistorySocialUploadService(h.options)
+    try {
+      clock.advance(1_000_000)
+      await restarted.runPending()
+      assert.equal(h.calls.length, 1)
+      assert.equal(submissions, failureAt === 'publish' ? 1 : 0)
+      assert.equal(restarted.getJob(id).status, 'uncertain')
+    } finally { await restarted.close() }
+  })
+})
+
+test('automatic preflight retry budget cannot be reset by another automatic enqueue request', async t => {
+  const h = await fixture(t), clock = automaticPreflightClock(h)
+  const input = {sourceIds: [71], targets: ['baijiahao-video'] as SocialTarget[], mode: 'draft' as const}
+  const id = (await h.service.enqueue({...input, requestId: 'original-budget'})).jobs[0]!.id
+  const ready = h.runtime.inspectSocialUploadRuntime
+  h.runtime.inspectHistorySocialUploadRuntime = async () => { throw Error('connect ECONNREFUSED 127.0.0.1:9243') }
+  for (const delay of [30_000, 60_000, 120_000, 0]) {
+    await h.service.runPending()
+    clock.advance(delay)
+  }
+  h.runtime.inspectHistorySocialUploadRuntime = ready
+  const again = await h.service.enqueue({...input, requestId: 'later-automatic-request'}, {automatic: true})
+  assert.equal(again.jobs[0]!.id, id)
+  assert.equal(again.jobs[0]!.status, 'failed')
+  assert.equal(again.jobs[0]!.recovery.attempts, 3)
+  await h.service.runPending()
+  assert.equal(h.calls.length, 0)
+  h.service.retry(id)
+  await h.service.runPending()
+  assert.equal(h.calls.length, 1, 'an explicit user retry can start a new budget')
+})
+
+test('automatic preflight retry clears its marker once writing starts and a draft write failure stays terminal', async t => {
+  const h = await fixture(t), clock = automaticPreflightClock(h)
+  const id = (await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video'], mode: 'draft'})).jobs[0]!.id
+  const ready = h.runtime.inspectSocialUploadRuntime
+  h.runtime.inspectHistorySocialUploadRuntime = async () => { throw Error('connect ETIMEDOUT') }
+  await h.service.runPending()
+  h.runtime.inspectHistorySocialUploadRuntime = ready
+  h.runtime.runSocialUpload = async payload => { h.calls.push(payload); throw Error('upload timeout') }
+  clock.advance(30_000)
+  await h.service.runPending()
+  assert.equal(h.service.getJob(id).status, 'failed')
+  assert.deepEqual(h.service.getJob(id).recovery, {attempts: 0, maxAttempts: 0, nextAttemptAt: null, action: null})
+  clock.advance(1_000_000)
+  await h.service.runPending()
+  assert.equal(h.calls.length, 1)
+})
+
+test('automatic preflight retry recovers a dead checking worker within the existing persisted budget', async t => {
+  for (const attempts of [1, 3]) await t.test(`attempt ${attempts}`, async child => {
+    const h = await fixture(child), clock = automaticPreflightClock(h)
+    const id = (await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video'], mode: 'draft'})).jobs[0]!.id
+    h.runtime.inspectHistorySocialUploadRuntime = async () => { throw Error('connect ECONNREFUSED 127.0.0.1:9243') }
+    await h.service.runPending()
+    const sql = new Database(h.options.databasePath)
+    child.after(() => sql.close())
+    sql.prepare(`UPDATE history_social_upload_jobs SET status='running',owner='dead-worker',host='dead-host',pid=1,
+      lease_until=0,recovery_attempts=?,next_attempt_at=NULL WHERE id=?`).run(attempts, id)
+    const restarted = new HistorySocialUploadService(h.options)
+    try {
+      const recovered = restarted.getJob(id)
+      assert.equal(recovered.status, attempts === 3 ? 'failed' : 'queued')
+      assert.equal(recovered.recovery.attempts, attempts === 3 ? 3 : 2)
+      assert.equal(recovered.recovery.nextAttemptAt, attempts === 3 ? null : new Date(clock.now() + 60_000).toISOString())
+      await restarted.runPending()
+      assert.equal(h.calls.length, 0)
+    } finally { await restarted.close() }
+  })
+})
+
+test('automatic preflight retry rejects changed materials while waiting and does not replace the original payload', async t => {
+  const h = await fixture(t), clock = automaticPreflightClock(h)
+  const id = (await h.service.enqueue({sourceIds: [71], targets: ['baijiahao-video'], mode: 'draft'})).jobs[0]!.id
+  const sql = new Database(h.options.databasePath)
+  t.after(() => sql.close())
+  const original = sql.prepare('SELECT payload_json,fingerprint FROM history_social_upload_jobs WHERE id=?').get(id)
+  const ready = h.runtime.inspectSocialUploadRuntime
+  h.runtime.inspectHistorySocialUploadRuntime = async () => { throw Error('connect ETIMEDOUT') }
+  await h.service.runPending()
+  h.source.delivery!.baijiahaoTitle = 'New title cannot replace the original snapshot'
+  h.runtime.inspectHistorySocialUploadRuntime = ready
+  clock.advance(30_000)
+  await h.service.runPending()
+  assert.equal(h.service.getJob(id).status, 'failed')
+  assert.equal(h.service.getJob(id).blockers[0]!.code, 'snapshot_changed')
+  assert.deepEqual(sql.prepare('SELECT payload_json,fingerprint FROM history_social_upload_jobs WHERE id=?').get(id), original)
+  assert.equal(h.calls.length, 0)
 })
 
 function saveArticleCoverSelection(h: Awaited<ReturnType<typeof fixture>>) {
@@ -1903,7 +2166,7 @@ test('publication timeout retains original payload and retries only read-only re
   const sql = new Database(h.options.databasePath)
   try { sql.prepare('DELETE FROM history_video_packaging WHERE video_id=?').run(version.id) } finally { sql.close() }
   h.service.retry(id)
-  await h.service.runPending()
+  await h.service.runPending({sourceIds:[71],videoIds:[version.id],jobIds:[id]})
   assert.equal(h.service.getJob(id).status,'completed')
   assert.equal(reconciles,1)
   assert.equal(confirms,1)
@@ -2250,6 +2513,74 @@ test('publication candidates limit manuscript loading to requested source IDs', 
   assert.deepEqual(h.service.candidates().map(item => item.scriptId), [72, 71])
   assert.deepEqual(h.calls, [])
   assert.deepEqual(h.service.listJobs(), [])
+})
+
+test('summary candidates keep full results without reading manuscript checkpoints or snapshot JSON', async t => {
+  const {ensureHistoryStatusSchema,ensureHistoryStatusReadIndexes,projectHistoryMotionStatus,projectHistorySourceStatus} = await import('./history-status-storage.js')
+  const h = await fixture(t), sql = new Database(h.options.databasePath)
+  t.after(() => sql.close())
+  sql.exec(`CREATE TABLE history_script_sources(id INTEGER PRIMARY KEY,title TEXT,rewritten_script TEXT,deleted_at TEXT,
+    platform TEXT,source_video_id TEXT,source_url TEXT,raw_transcript TEXT,corrected_transcript TEXT,media_json TEXT,asr_json TEXT,review_json TEXT);
+    CREATE TABLE history_motion_productions(id TEXT PRIMARY KEY,script_id INTEGER,status TEXT,updated_at TEXT,snapshot TEXT);`)
+  const sourceUrl = 'https://baijiahao.baidu.com/s?id=12345', padding = 'x'.repeat(1024*1024)
+  sql.prepare('INSERT INTO history_script_sources VALUES(?,?,?,NULL,?,?,?,?,?,?,?,?)').run(71,h.source.title,h.source.rewrittenScript,
+    'baijiahao','12345',sourceUrl,'原文','校对稿',
+    JSON.stringify({kind:'article',articleId:'12345',sourceUrl,textSha256:hash('原文')}),JSON.stringify({padding}),
+    JSON.stringify({factCheckStatus:'needs_sources',rawTranscriptSha256:hash('原文'),correctedTranscriptSha256:hash('校对稿'),
+      rewriteInputSha256:hash('校对稿'),padding}))
+  sql.prepare('INSERT INTO history_motion_productions VALUES(?,?,?,?,?)').run('motion',71,'selecting','after',
+    JSON.stringify({script:h.source.rewrittenScript,message:'正在制作',plan:{padding}}))
+  addVideo(h,'motion')
+  const originalFlag = process.env.HISTORY_STATUS_READS
+  delete process.env.HISTORY_STATUS_READS
+  const expected = h.service.candidates()
+  assert.equal(expected.length, 1)
+  ensureHistoryStatusSchema(sql)
+  projectHistoryMotionStatus(sql, 'motion')
+  projectHistorySourceStatus(sql, 71)
+  ensureHistoryStatusReadIndexes(sql)
+  const reader = (h.service as unknown as {database:Database.Database}).database
+  const prepare = reader.prepare, statements: string[] = []
+  t.mock.method(reader,'prepare',(statement: string) => {
+    statements.push(statement)
+    return prepare.call(reader,statement)
+  })
+  const stat = fs.statSync
+  t.mock.method(fs,'statSync',((...args: Parameters<typeof fs.statSync>) => {
+    assert.equal(reader.inTransaction, false, 'file inspection must follow the short database read transaction')
+    return stat(...args)
+  }) as typeof fs.statSync)
+  process.env.HISTORY_STATUS_READS = '1'
+  t.after(() => {if (originalFlag === undefined) delete process.env.HISTORY_STATUS_READS; else process.env.HISTORY_STATUS_READS = originalFlag})
+  reader.pragma('query_only=ON')
+  assert.deepEqual(h.service.candidates(), expected)
+  assert.deepEqual(h.service.candidates([71]), expected)
+  assert.ok(statements.length > 0)
+  assert.ok(statements.every(statement => !/\b(snapshot|rewritten_script|raw_transcript|corrected_transcript|media_json|asr_json|review_json)\b/i.test(statement)),
+    'summary list SQL must not depend on original large fields')
+  const sourceQueries = statements.filter(statement => /FROM history_script_sources s INDEXED BY/.test(statement))
+  assert.equal(sourceQueries.length, 2)
+  assert.ok(sourceQueries.some(statement => /s\.id IN \(\?\)/.test(statement)), 'the scoped source query must use its covering index')
+  assert.ok(sourceQueries.some(statement => !/s\.id IN/.test(statement)), 'the full source query must use its covering index')
+  const indexedQueries = statements.filter(statement => /INDEXED BY/.test(statement))
+  assert.ok(indexedQueries.some(statement => /FROM history_motion_productions INDEXED BY/.test(statement)))
+  for (const statement of indexedQueries) {
+    const parameters = Array.from({length: (statement.match(/\?/g) || []).length}, () => 71)
+    const plan = reader.prepare<number[], {detail:string}>(`EXPLAIN QUERY PLAN ${statement}`).all(...parameters)
+    for (const [, index] of statement.matchAll(/INDEXED BY (\w+)/g)) {
+      assert.ok(plan.some(row => row.detail.includes(`COVERING INDEX ${index}`)), JSON.stringify({statement, plan}))
+    }
+  }
+  sql.prepare('UPDATE history_script_sources SET rewritten_script=? WHERE id=71').run('外部进程修改了当前稿件。')
+  const pending = h.service.candidates()[0]!.versions[0]!
+  assert.equal(pending.canPublish,false)
+  assert.equal(pending.action,'none')
+  assert.match(pending.message,/同步/)
+  sql.prepare('DELETE FROM history_source_status WHERE source_id=71').run()
+  const missing = h.service.candidates()[0]!.versions[0]!
+  assert.equal(missing.canPublish,false)
+  assert.match(missing.message,/同步/)
+  assert.deepEqual(h.calls, [])
 })
 
 test('publication inventory includes both accepted editions before a legacy delivery exists', async t => {
