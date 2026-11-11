@@ -18,7 +18,7 @@ export interface SciencePresenterPolicy {version:1;character:'science';presenter
 export type SciencePresenterIntroSelection=z.infer<typeof selectionSchema>
 export interface SciencePresenterIntroInput {jobId:string;sourceSha256:string;libraryPath:string;directory:string}
 
-/** Only newly created jobs snapshot this opt-in; existing jobs never adopt it on resume. */
+/** Snapshot for new jobs or untouched legacy drafts; started jobs retain their policy. */
 export function sciencePresenterPolicyFromEnv(env:NodeJS.ProcessEnv=process.env):SciencePresenterPolicy|undefined {
   const enabled=env.SCIENCE_PRESENTER_LIBRARY_ENABLED?.trim()
   if(!enabled||['0','false'].includes(enabled))return undefined

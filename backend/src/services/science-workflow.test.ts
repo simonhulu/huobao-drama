@@ -149,7 +149,7 @@ async function scienceIntroLibrary(root:string) {
   return {libraryPath,clip}
 }
 
-test('only new science jobs snapshot the opt-in library; enabling it cannot retrofit an old job or expose local policy paths',async t=>{
+test('new science jobs snapshot the opt-in library while read-only access preserves old jobs and hides local policy paths',async t=>{
   scienceLibraryEnv(t,undefined)
   const h=fixture(t),old=h.service.create({sourceUrl},{defer:true})
   const oldFile=path.join(h.root,'jobs',old.id,'job.json'),oldStored=JSON.parse(fs.readFileSync(oldFile,'utf8'))
@@ -164,6 +164,95 @@ test('only new science jobs snapshot the opt-in library; enabling it cannot retr
   h.service.detail(old.id)
   assert.equal(JSON.parse(fs.readFileSync(oldFile,'utf8')).introPolicy,undefined)
   assert.deepEqual(JSON.parse(fs.readFileSync(file,'utf8')).introPolicy,stored.introPolicy)
+})
+
+test('a pristine legacy firefly draft snapshots its library before work and retains the same job and policy after restart', async t => {
+  scienceLibraryEnv(t, undefined)
+  const h = fixture(t, { presenterMode: 'musetalk' }), library = await scienceIntroLibrary(h.root)
+  const job = h.service.create({ sourceUrl: 'https://www.youtube.com/watch?v=_QUAzSBdxQs' }, { defer: true })
+  const file = path.join(h.root, 'jobs', job.id, 'job.json'), original = JSON.parse(fs.readFileSync(file, 'utf8'))
+  delete original.introPolicy
+  fs.writeFileSync(file, JSON.stringify(original))
+  assert.equal(original.status, 'draft'); assert.equal(original.stage, 'download')
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['job.json'])
+  process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED = '1'; process.env.SCIENCE_PRESENTER_LIBRARY_PATH = library.libraryPath
+  const expected = { version: 1, character: 'science', presenter: 'xiaolu', libraryPath: library.libraryPath }
+  const download = h.options.download!, snapshots: unknown[] = []
+  h.options.download = async () => {
+    snapshots.push(JSON.parse(fs.readFileSync(file, 'utf8')).introPolicy)
+    throw new Error('fixture download interrupted before production')
+  }
+  const accepted = await h.route.request(`/jobs/${job.id}/produce`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ upload: false }),
+  })
+  assert.equal(accepted.status, 202); await h.service.waitForIdle()
+  assert.deepEqual(snapshots, [expected], 'the policy is durable before even the first source download')
+  assert.equal(h.calls.produce, 0)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).introPolicy, expected)
+  await h.service.stop()
+  process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED = '0'; delete process.env.SCIENCE_PRESENTER_LIBRARY_PATH
+  h.options.download = download
+  const avatars: string[] = [], intros: string[] = []
+  h.options.prepareMusetalkPresenter = async (input, options) => {
+    avatars.push(options.avatarId!); assert.equal(options.referenceSha256, library.clip.referenceSha256)
+    return { presenterPath: input.videoPath, sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+  }
+  h.options.prepareVideo = async (input, options) => {
+    intros.push(options.introPath!)
+    return { videoPath: input.videoPath, introSha256: library.clip.videoSha256, sourceSha256: createHash('sha256').update(fs.readFileSync(input.videoPath)).digest('hex') }
+  }
+  const restarted = new ScienceWorkflowService(h.options); t.after(() => restarted.stop())
+  restarted.produce(job.id, false); await restarted.waitForIdle()
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(restarted.detail(job.id).status, 'ready')
+  assert.equal(stored.id, original.id); assert.equal(stored.sourceUrl, original.sourceUrl)
+  assert.deepEqual(stored.introPolicy, expected)
+  assert.deepEqual(avatars, [library.clip.avatarId]); assert.deepEqual(intros, [library.clip.videoPath])
+  assert.equal(fs.readdirSync(path.join(h.root, 'jobs')).filter(name => name.startsWith('science-')).length, 1)
+  assert.ok(fs.existsSync(path.join(path.dirname(file), 'intro', 'science-presenter-selection.json')))
+})
+
+test('legacy draft adoption preserves explicit policies and existing production or generated-asset checkpoints', async t => {
+  scienceLibraryEnv(t, undefined)
+  const cases: Array<{ name: string; patch?: Record<string, unknown>; artifact?: string }> = [
+    { name: 'explicit-legacy', patch: { introPolicy: null } },
+    { name: 'existing-library', patch: { introPolicy: { version: 1, character: 'science', presenter: 'xiaolu', libraryPath: '/original/library.json' } } },
+    { name: 'project', patch: { projectUrl: 'https://www.huasheng.cn/video/12345' } },
+    { name: 'opening', patch: { checkpoint: 'opening' } },
+    { name: 'production-hash', patch: { productionScriptHash: createHash('sha256').update('').digest('hex') } },
+    { name: 'production-completed', patch: { productionCompleted: true } },
+    { name: 'export-dispatched', patch: { exportDispatched: true } },
+    { name: 'export-task', patch: { exportTask: { taskId: 'original-export', projectHash: 'a'.repeat(64) } } },
+    { name: 'export-recovery', patch: { exportRecovery: { taskId: 'original-export', projectHash: 'a'.repeat(64) } } },
+    { name: 'main-video', patch: { mainVideoPath: '/original/main.mp4' } },
+    { name: 'presenter-video', patch: { presenterPath: '/original/presenter.mp4' } },
+    { name: 'video', patch: { videoPath: '/original/video.mp4' } },
+    { name: 'legacy-intro-mode', patch: { separateIntro: false } },
+    { name: 'intro-mode', patch: { separateIntro: true } },
+    { name: 'composition', patch: { videoCompositionPending: true } },
+    { name: 'presenter-step', patch: { exportStep: 'presenter' } },
+    { name: 'upload', patch: { uploadAttempt: { id: 'original', status: 'uncertain', dispatched: true } } },
+    { name: 'upload-history', patch: { uploadHistory: [{ attempt: { id: 'original' }, archivedAt: '2026-11-01T00:00:00.000Z' }] } },
+    { name: 'cover-request', patch: { coverRequest: { revision: 1, inputDigest: 'a'.repeat(64), instruction: '' } } },
+    { name: 'paused', patch: { status: 'paused' } },
+    { name: 'export-stage', patch: { stage: 'export' } },
+    ...['intro', 'presenter', 'presenter-musetalk', 'exports', 'covers'].map(artifact => ({ name: artifact, artifact })),
+  ]
+  for (const item of cases) {
+    process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED = '0'; delete process.env.SCIENCE_PRESENTER_LIBRARY_PATH
+    const h = fixture(t), job = h.service.create({ sourceUrl }, { defer: true })
+    const file = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+    delete stored.introPolicy
+    Object.assign(stored, item.patch)
+    if (stored.productionScriptHash) stored.productionAccountName = stored.huashengAccountName
+    fs.writeFileSync(file, JSON.stringify(stored))
+    if (item.artifact) fs.mkdirSync(path.join(path.dirname(file), item.artifact))
+    process.env.SCIENCE_PRESENTER_LIBRARY_ENABLED = '1'; process.env.SCIENCE_PRESENTER_LIBRARY_PATH = path.join(h.root, 'new-library.json')
+    h.options.download = async () => { throw new Error('fixture stop before external production') }
+    h.service.produce(job.id, false); await h.service.waitForIdle()
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).introPolicy, stored.introPolicy, item.name)
+    assert.equal(h.calls.produce, 0, item.name)
+  }
 })
 
 test('an opt-in science job resumes its chosen intro and matching MuseTalk avatar after a failure and backend restart',async t=>{
@@ -1030,6 +1119,56 @@ test('a scheduled connection retry resumes the original upload checkpoint after 
   assert.equal(restarted.detail(job.id).status, 'completed'); assert.equal(h.calls.upload, 1)
   assert.equal(h.payloads[0]?.jobId, stored.uploadAttempt.id)
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).uploadHistory, undefined)
+})
+
+for (const phase of [undefined, '子进程响应超时', '清理结果校验', '清理进程启动', '浏览器连接', '页面清单读取', '上传检查点读取', '旧页面关闭'])
+test(`stale-page cleanup ${phase || 'legacy'} failures preserve a retryable upload across service restart`, { timeout: 5000 }, async t => {
+  const h = fixture(t, { retryDelayMs: 0 }), job = await prepared(h)
+  h.service.produce(job.id); await h.service.waitForIdle()
+  const runtime = h.options.uploadRuntime!, ready = runtime.inspectSocialUploadAccountRuntime!
+  let checks = 0
+  runtime.inspectSocialUploadAccountRuntime = async () => {
+    checks++
+    return { ready: false, message: `百家号旧页面清理未完成${phase ? `（${phase}）` : ''}，请重试连接；原登录和上传检查点已保留` }
+  }
+  runtime.resetSocialUploadAttempt = async () => assert.fail('Cleanup recovery must retain the existing upload identity')
+  h.service.upload(job.id); await h.service.waitForIdle()
+  const file = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(stored.status, 'retry_wait')
+  assert.equal(stored.failureKind, 'temporary')
+  assert.equal(stored.uploadRetry.attempt, 1)
+  assert.equal(stored.uploadAttempt.id, `${job.id}-baijiahao`)
+  assert.equal(stored.uploadAttempt.dispatched, false)
+  assert.equal(checks, 4); assert.equal(h.calls.upload, 0)
+  assert.deepEqual(h.service.runAutomaticExports(), [], 'Cleanup retries retain the saved backoff')
+  await h.service.stop()
+  stored.uploadRetry.nextRetryAt = new Date(0).toISOString()
+  fs.writeFileSync(file, JSON.stringify(stored))
+  runtime.inspectSocialUploadAccountRuntime = ready
+  const restarted = new ScienceWorkflowService(h.options)
+  t.after(() => restarted.stop())
+  assert.deepEqual(restarted.runAutomaticExports(), [job.id]); await restarted.waitForIdle()
+  assert.equal(restarted.detail(job.id).uploadStatus, 'submitted')
+  assert.equal(h.calls.upload, 1); assert.equal(h.calls.save, 1)
+  assert.equal(h.payloads[0]?.jobId, stored.uploadAttempt.id)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).uploadHistory, undefined)
+})
+
+test('stale-page cleanup diagnostics do not make login requests or unknown phases retryable', async t => {
+  for (const message of [
+    '百家号旧页面清理未完成（请登录并验证），请重试连接；原登录和上传检查点已保留',
+    '百家号旧页面清理未完成（上传检查点读取），请重试连接；原登录和上传检查点已保留；请登录并完成安全验证',
+    '百家号旧页面清理未完成（未知状态），请重试连接；原登录和上传检查点已保留',
+  ]) {
+    const h = fixture(t), job = await prepared(h)
+    h.service.produce(job.id); await h.service.waitForIdle()
+    h.options.uploadRuntime!.inspectSocialUploadAccountRuntime = async () => ({ ready: false, message })
+    h.service.upload(job.id); await h.service.waitForIdle()
+    assert.equal(h.service.detail(job.id).status, 'needs_attention', message)
+    assert.equal(h.service.detail(job.id).uploadRetry, undefined)
+    assert.deepEqual(h.service.runAutomaticExports(), [])
+    assert.equal(h.calls.upload, 0)
+  }
 })
 
 test('upload reattempts stop for actual platform blockers and mismatched receipt accounts', async t => {

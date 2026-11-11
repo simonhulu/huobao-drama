@@ -147,6 +147,7 @@ function processAlive(pid: number | undefined) {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 function uploadConnectionFailure(message: string) {
+  if (/^百家号旧页面清理未完成(?:（(?:子进程响应超时|清理结果校验|清理进程启动|浏览器连接|页面清单读取|上传检查点读取|旧页面关闭)）)?，请重试连接；原登录和上传检查点已保留$/.test(message)) return true
   return /连接失败|响应超时|连接中断|连接超时|账号后台连接或检查失败|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|network|socket|timed.out|timeout/i.test(message)
     && !/要求.*验证|请.*登录|请.*登陆|验证码|人机验证|captcha|原编辑页.*变化|版本已变化|指纹不一致/i.test(message)
 }
@@ -551,6 +552,15 @@ export class ScienceWorkflowService {
     job = await this.releaseSourceMedia(job)
     return { ...job.media.cleanup }
   }
+  private canSnapshotPresenterPolicy(job: StoredJob) {
+    if (job.introPolicy !== undefined || !['download', 'transcribe', 'rewrite', 'produce'].includes(job.stage)
+      || !unsubmittedProduction(job) || job.checkpoint || job.productionScriptHash || job.productionAccountName
+      || job.separateIntro !== undefined || job.videoCompositionPending !== undefined
+      || job.mainVideoPath || job.presenterPath || job.exportRecovery || job.exportStep || job.compositionProgress
+      || job.presenterWait || job.uploadHistory || job.uploadProgress || job.coverAssets || job.coverRequest || job.coverRevision || job.coverSequence) return false
+    return !['intro', 'presenter', 'presenter-musetalk', 'exports', 'covers']
+      .some(directory => fs.existsSync(path.join(this.directory(job.id), directory)))
+  }
   produce(id: string, upload?: boolean, options: { automatic?: boolean; waitForPresenter?: boolean } = {}) {
     const job = this.read(id)
     upload ??= job.autoUpload === true
@@ -570,12 +580,15 @@ export class ScienceWorkflowService {
     if (job.baijiahaoAccountName) this.bjh.get(job.baijiahaoAccountName)
     const hash = digest(job.script)
     if (job.productionScriptHash && (job.productionScriptHash !== hash || job.productionAccountName !== job.huashengAccountName)) throw new ScienceWorkflowError('制作文稿或账号与原检查点不一致')
+    const introPolicy = job.status === 'draft' && this.canSnapshotPresenterPolicy(job) ? sciencePresenterPolicyFromEnv() : undefined
     this.modify(id, { autoUpload: upload, automaticProduction: !job.collectionId, automaticDelivery: true,
       ...(waitForPresenter ? { status: 'waiting_remote' as const, stage: 'export' as const, exportStep: 'presenter' as const,
         presenterWait: job.presenterWait || { requestedAt: new Date().toISOString(), nextCheckAt: new Date(Date.now() + 60_000).toISOString() } } : {}),
       ...(!options.automatic ? { automaticRetry: undefined } : {}) })
     return this.launch(id, async signal => {
       signal.throwIfAborted()
+      // Recheck under the original job lock before the first external operation.
+      if (introPolicy && this.canSnapshotPresenterPolicy(this.read(id))) this.modify(id, { introPolicy })
       if (waitForPresenter) {
         this.modify(id, { stage: 'export', exportStep: 'presenter', automaticRetry: undefined })
         try {
