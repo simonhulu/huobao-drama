@@ -9,6 +9,15 @@ import type { callTextModel } from './ai.js'
 
 export const SCIENCE_WRITING_MODEL = 'Qwen3.5-9B-Writing-DPO-i1-Q4_K_M'
 
+export class ScienceWriterUnavailableError extends Error {
+  readonly code = 'science_writer_unavailable'
+  readonly retryable = true
+  constructor() {
+    super('科普本地写作模型尚未就绪，已保留原任务，等待服务恢复')
+    this.name = 'ScienceWriterUnavailableError'
+  }
+}
+
 export function getScienceWritingModel(): string {
   return process.env.SCIENCE_WRITER_MODEL?.trim() || SCIENCE_WRITING_MODEL
 }
@@ -147,6 +156,36 @@ const scriptSchema = {
   required: ['title', 'script'], additionalProperties: false,
 }
 
+async function requireScienceWriterReady(api: ScienceWritingApi, signal: AbortSignal): Promise<void> {
+  const healthSignal = AbortSignal.any([signal, AbortSignal.timeout(3000)])
+  let response: Response
+  try {
+    response = await fetch(`${api.apiUrl}/health`, { redirect: 'error', signal: healthSignal })
+  } catch (error) {
+    signal.throwIfAborted()
+    const cause = (error as { cause?: { code?: string } })?.cause?.code
+    if (healthSignal.aborted || cause && /^(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|UND_ERR_(?:CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|SOCKET))$/.test(cause)) {
+      throw new ScienceWriterUnavailableError()
+    }
+    throw error
+  }
+  if (!response.ok) {
+    await response.body?.cancel()
+    if (response.status === 503) throw new ScienceWriterUnavailableError()
+    throw Object.assign(new Error(`科普写作模型健康检查返回 HTTP ${response.status}`), { status: response.status })
+  }
+  let health: unknown
+  try { health = await response.json() }
+  catch {
+    signal.throwIfAborted()
+    if (healthSignal.aborted) throw new ScienceWriterUnavailableError()
+    throw new Error('科普写作模型健康检查不是有效 JSON')
+  }
+  if (!health || typeof health !== 'object' || (health as { status?: unknown }).status !== 'ok') {
+    throw new Error('科普写作模型健康检查未返回就绪状态')
+  }
+}
+
 function outputTokenLimit(history: boolean): number {
   const name = history ? 'HISTORY_WRITER_MAX_TOKENS' : 'SCIENCE_WRITER_MAX_TOKENS'
   const raw = process.env[name]?.trim()
@@ -217,6 +256,7 @@ async function callWritingModel(
   }
   const api = await openScienceWritingApi(signal)
   try {
+    if (structured) await requireScienceWriterReady(api, signal)
     const response = await fetch(`${api.apiUrl}/v1/chat/completions`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'error', signal,
       body: JSON.stringify({ model: getScienceWritingModel(), messages: prompt, temperature: options?.temperature ?? .65,

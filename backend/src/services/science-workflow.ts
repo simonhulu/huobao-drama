@@ -15,6 +15,7 @@ import { runHuashengJob } from './history-huasheng-api.js'
 import * as exporter from './history-huasheng-export-api.js'
 import { recoverCbaUpload, checkCbaUploadResult, rebindCbaUploadCovers, validateCbaUploadReceipt, type CbaUploadRecoveryCurrent, type CbaUploadRecoveryOptions } from './cba-upload-recovery.js'
 import { recreateScienceScript, stripScienceNarrationIntroduction, type SciencePlan, type ScienceWritingCheckpoint } from './science-script.js'
+import { ScienceWriterUnavailableError } from './science-writing-model.js'
 import type { SocialUploadProgress, SocialUploadResult, SocialUploadReviewInput } from './social-auto-upload.js'
 import type { ScienceVideoIntroProgress } from './science-video-intro.js'
 import type * as mediaTools from './science-workflow-media.js'
@@ -75,7 +76,7 @@ export interface ScienceJob {
   collectionId?: string; sourceChannel?: string
   failureKind?: 'temporary' | 'action_required'
   retry?: { operation: string; attempt: number; maxAttempts: number; nextRetryAt: string }
-  automaticRetry?: { attempt: number; maxAttempts: number; nextRetryAt: string }
+  automaticRetry?: { attempt: number; maxAttempts: number; nextRetryAt: string; writerWait?: { since: string } }
   presenterWait?: { requestedAt: string; nextCheckAt: string }
   uploadRetry?: { attempt: number; nextRetryAt: string }
   huashengSync?: { checkedAt: string; status: huasheng.HuashengProductionObservation['status'] | 'error'; message: string; exportProgress?: number; error?: string }
@@ -391,7 +392,14 @@ export class ScienceWorkflowService {
       const canResume = !controller.signal.aborted && temporary && resumableProject
         && (current.automaticProduction || current.automaticDelivery) && current.automaticDelivery !== false
         && (resumableWriting || ['produce', 'export'].includes(current.stage)) && !(current.exportDispatched && !current.exportTask)
-      if (!controller.signal.aborted && temporary && current.stage === 'upload' && current.automaticDelivery !== false) {
+      if (error instanceof ScienceWriterUnavailableError && !controller.signal.aborted && current.stage === 'rewrite'
+        && unsubmittedProduction(current) && (current.automaticProduction || current.automaticDelivery) && current.automaticDelivery !== false) {
+        const automaticRetry = { attempt, maxAttempts: current.automaticRetry?.maxAttempts ?? 3,
+          nextRetryAt: new Date(Date.now() + 60_000).toISOString(),
+          writerWait: current.automaticRetry?.writerWait ?? { since: new Date().toISOString() } }
+        this.modify(id, { status: 'retry_wait', retry: undefined, automaticRetry, failureKind: 'temporary' })
+        this.report(id, '本地写作模型尚未就绪，已保存原稿和分析；一分钟后自动检查，不消耗任务重试次数')
+      } else if (!controller.signal.aborted && temporary && current.stage === 'upload' && current.automaticDelivery !== false) {
         this.scheduleUploadRetry(id, safeMessage(error))
       } else if (canResume && attempt < 3) {
         const automaticRetry = { attempt: attempt + 1, maxAttempts: 3, nextRetryAt: new Date(Date.now() + (qualityRevision ? 5000 : Math.min(300_000, 30_000 * 2 ** attempt))).toISOString() }
@@ -1405,6 +1413,8 @@ export class ScienceWorkflowService {
       }
       if (job.status === 'retry_wait') {
         if (!job.automaticRetry || job.automaticDelivery === false) continue
+        if (job.automaticRetry.writerWait && (job.stage !== 'rewrite' || !unsubmittedProduction(job)
+          || !(job.automaticProduction || job.automaticDelivery))) continue
         try {
           if (job.videoPath) this.produce(job.id, job.autoUpload === true, { automatic: true })
           else if (job.projectUrl) this.sync(job.id, { automatic: true })

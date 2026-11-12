@@ -8,6 +8,8 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import Database from 'better-sqlite3'
+import http from 'node:http'
+import {once} from 'node:events'
 import sharp from 'sharp'
 import { ScienceWorkflowService, type ScienceWorkflowOptions } from './science-workflow.js'
 import { SocialUploadAccountsService } from './social-upload-accounts.js'
@@ -20,6 +22,7 @@ import { createScienceAccountsRoute } from '../routes/science-accounts.js'
 import { ScienceCollectionService, type ScienceCollectionOptions } from './science-collection.js'
 import { SCIENCE_WRITING_VERSION, type ScienceWritingCheckpoint } from './science-script.js'
 import { createStorageRegistry } from './storage-artifacts.js'
+import {callScienceWritingModel, ScienceWriterUnavailableError} from './science-writing-model.js'
 
 const sourceVideoHash = createHash('sha256').update('source-video').digest('hex')
 
@@ -3768,6 +3771,114 @@ test('exhausted transient writing or review requests automatically resume their 
     assert.equal(h.service.detail(job.id).status, 'ready')
     assert.equal(writes, 2)
     assert.equal(h.calls.download, 1); assert.equal(h.calls.transcribe, 1); assert.equal(h.calls.produce, 1)
+  }
+})
+
+test('a local writer outage survives more than three due scans and service recreation without spending retry budget', async t => {
+  const h = fixture(t), priorUrl = process.env.SCIENCE_WRITER_API_URL
+  let ready = false, probes = 0, posts = 0
+  const server = http.createServer(async (request, response) => {
+    if (request.url === '/health') {
+      probes++; response.writeHead(ready ? 200 : 503, {'Content-Type': 'application/json'})
+      response.end(JSON.stringify(ready ? {status: 'ok'} : {error: {type: 'unavailable_error', message: 'Loading model'}})); return
+    }
+    posts++; assert.equal(request.url, '/v1/chat/completions')
+    for await (const _chunk of request) { /* Drain the real writer request. */ }
+    response.writeHead(200, {'Content-Type': 'application/json'})
+    response.end(JSON.stringify({choices: [{finish_reason: 'stop', message: {content: JSON.stringify({title: '冰', script: '冰的密度更低，所以浮起来。'})}}]}))
+  })
+  server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  const address = server.address(); assert.ok(address && typeof address === 'object')
+  process.env.SCIENCE_WRITER_API_URL = `http://127.0.0.1:${address.port}`
+  t.after(async () => {server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()))
+    if (priorUrl === undefined) delete process.env.SCIENCE_WRITER_API_URL; else process.env.SCIENCE_WRITER_API_URL = priorUrl})
+  const rewrite = h.options.rewrite!
+  h.options.rewrite = async (input, options) => {
+    if (!input.plan) {
+      options.onPlan?.({sourceHash: createHash('sha256').update(input.transcript).digest('hex'),
+        sourceSummary: '水冻结后密度降低', angle: '冰为什么浮起来', factChecks: []})
+      options.onCheckpoint?.(pendingWritingCheckpoint(input.transcript))
+    }
+    await callScienceWritingModel([{role: 'user', content: input.transcript}], {signal: options.signal})
+    return rewrite(input, options)
+  }
+  const created = h.service.create({sourceUrl}, {defer: true, collectionId: `science-batch-${randomUUID()}`})
+  const file = path.join(h.root, 'jobs', created.id, 'job.json')
+  h.service.produce(created.id, false); await h.service.waitForIdle()
+  const original = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(original.status, 'retry_wait'); assert.equal(original.automaticRetry.attempt, 0)
+  assert.ok(original.automaticRetry.writerWait)
+  assert.equal(posts, 0); assert.equal(h.calls.produce, 0)
+  let service = h.service
+  for (let scan = 0; scan < 5; scan++) {
+    const waiting = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.deepEqual(service.runAutomaticExports(), [], 'the persisted probe backoff must be respected')
+    if (scan === 2) waiting.automaticRetry.attempt = 2
+    waiting.automaticRetry.nextRetryAt = '2020-01-01T00:00:00Z'
+    fs.writeFileSync(file, JSON.stringify(waiting))
+    if (scan === 2) {await service.stop(); service = new ScienceWorkflowService(h.options); t.after(() => service.stop())}
+    assert.deepEqual(service.runAutomaticExports(), [created.id]); await service.waitForIdle()
+    const current = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(current.status, 'retry_wait'); assert.equal(current.automaticRetry.attempt, waiting.automaticRetry.attempt)
+    assert.deepEqual(current.automaticRetry.writerWait, original.automaticRetry.writerWait)
+    for (const key of ['transcript', 'transcriptCheckpoint', 'writingCheckpoint', 'plan', 'collectionId', 'sourceUrl']) assert.deepEqual(current[key], original[key])
+  }
+  assert.equal(probes, 6); assert.equal(posts, 0)
+  assert.equal(h.calls.download, 1); assert.equal(h.calls.transcribe, 1); assert.equal(h.calls.produce + h.calls.upload, 0)
+  ready = true
+  const waiting = JSON.parse(fs.readFileSync(file, 'utf8')); waiting.automaticRetry.nextRetryAt = '2020-01-01T00:00:00Z'
+  fs.writeFileSync(file, JSON.stringify(waiting))
+  assert.deepEqual(service.runAutomaticExports(), [created.id]); await service.waitForIdle()
+  assert.equal(service.detail(created.id).status, 'ready'); assert.equal(posts, 1)
+  assert.equal(h.calls.produce, 1); assert.equal(h.calls.upload, 0)
+  assert.deepEqual(service.runAutomaticExports(), [])
+})
+
+test('stopping a writer wait prevents automatic recovery even after service recreation', async t => {
+  const h = fixture(t)
+  let writes = 0
+  h.options.rewrite = async () => { writes++; throw new ScienceWriterUnavailableError() }
+  const job = h.service.create({sourceUrl})
+  await h.service.waitForIdle()
+  assert.equal(h.service.detail(job.id).status, 'retry_wait')
+  h.service.cancel(job.id)
+  await h.service.stop()
+  const restarted = new ScienceWorkflowService(h.options)
+  t.after(() => restarted.stop())
+  assert.deepEqual(restarted.runAutomaticExports(), [])
+  const stopped = restarted.detail(job.id)
+  assert.equal(stopped.status, 'paused'); assert.equal(stopped.automaticRetry, undefined)
+  assert.equal(writes, 1); assert.equal(h.calls.produce + h.calls.upload, 0)
+})
+
+test('writer waits do not authorize project or upload recovery and ordinary exhaustion keeps its existing budget', async t => {
+  for (const guard of ['project', 'upload', 'stopped', 'exhausted'] as const) {
+    const h = fixture(t)
+    let writes = 0
+    h.options.rewrite = async () => {
+      writes++
+      if (guard === 'exhausted' && writes > 1) throw Object.assign(new Error('review unavailable'), {
+        code: 'science_model_retry_exhausted', phase: 'review', retryable: true,
+      })
+      throw new ScienceWriterUnavailableError()
+    }
+    const job = h.service.create({sourceUrl})
+    await h.service.waitForIdle()
+    const file = path.join(h.root, 'jobs', job.id, 'job.json'), stored = JSON.parse(fs.readFileSync(file, 'utf8'))
+    stored.automaticRetry.nextRetryAt = '2020-01-01T00:00:00Z'
+    if (guard === 'project') { stored.projectUrl = 'https://www.huasheng.cn/video/12345'; stored.checkpoint = 'submitted' }
+    if (guard === 'upload') stored.uploadAttempt = {status: 'uncertain'}
+    if (guard === 'stopped') { stored.automaticDelivery = false; stored.automaticProduction = false }
+    if (guard === 'exhausted') stored.automaticRetry.attempt = 3
+    fs.writeFileSync(file, JSON.stringify(stored))
+    assert.deepEqual(h.service.runAutomaticExports(), guard === 'exhausted' ? [job.id] : [], guard)
+    await h.service.waitForIdle()
+    assert.equal(writes, guard === 'exhausted' ? 2 : 1)
+    assert.equal(h.calls.produce + h.calls.productionInspect + h.calls.upload, 0)
+    if (guard === 'exhausted') {
+      assert.equal(h.service.detail(job.id).status, 'needs_attention')
+      assert.equal(h.service.detail(job.id).automaticRetry, undefined)
+    }
   }
 })
 

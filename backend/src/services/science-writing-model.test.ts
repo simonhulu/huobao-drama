@@ -10,12 +10,18 @@ const tool = { type: 'function' as const, function: { name: 'submit_science_scri
   type: 'object', properties: { title: { type: 'string' }, script: { type: 'string' } }, required: ['title', 'script'], additionalProperties: false,
 } } }
 
-async function fixture(t: test.TestContext, handle: (request: http.IncomingMessage, response: http.ServerResponse, body: any) => void) {
+async function fixture(t: test.TestContext, handle: (request: http.IncomingMessage, response: http.ServerResponse, body: any) => void,
+  health?: (request: http.IncomingMessage, response: http.ServerResponse) => void) {
   const previousUrl = process.env.SCIENCE_WRITER_API_URL, previousModel = process.env.SCIENCE_WRITER_MODEL
   const previousLimit = process.env.SCIENCE_WRITER_MAX_TOKENS
   const thinkingEnvironment = Object.fromEntries(['SCIENCE_WRITER_ENABLE_THINKING', 'SCIENCE_WRITER_THINKING_BUDGET_TOKENS']
     .map(name => [name, process.env[name]]))
   const server = http.createServer(async (request, response) => {
+    if (request.url === '/health') {
+      if (health) health(request, response)
+      else { response.writeHead(200, {'Content-Type': 'application/json'}); response.end(JSON.stringify({status: 'ok'})) }
+      return
+    }
     let body = ''
     for await (const chunk of request) body += chunk
     handle(request, response, body ? JSON.parse(body) : undefined)
@@ -79,6 +85,53 @@ test('the remote writer requests the exact configured model and converts the scr
   await callScienceWritingModel(messages)
   assert.equal(sent[1].model, 'configured-writing-model')
   assert.equal(getScienceWritingModel(), 'configured-writing-model')
+})
+
+test('an unavailable local writer is checked before any source is sent and becomes a distinct wait error', async t => {
+  let posts = 0, probes = 0
+  const server = await fixture(t, (_request, response) => { posts++; respond(response) }, (request, response) => {
+    probes++; assert.equal(request.method, 'GET')
+    response.writeHead(503, {'Content-Type': 'application/json'})
+    response.end(JSON.stringify({error: {type: 'unavailable_error', message: 'Loading model'}}))
+  })
+  await assert.rejects(callScienceWritingModel(messages), {code: 'science_writer_unavailable', retryable: true})
+  assert.equal(probes, 1); assert.equal(posts, 0)
+  server.closeAllConnections()
+  await new Promise<void>(resolve => server.close(() => resolve()))
+  await assert.rejects(callScienceWritingModel(messages), {code: 'science_writer_unavailable', retryable: true})
+  assert.equal(posts, 0)
+})
+
+test('health authentication failures and an invalid configured model never become indefinite writer waits', async t => {
+  let healthStatus = 401, posts = 0
+  await fixture(t, (_request, response) => { posts++; response.writeHead(404); response.end('private upstream detail') }, (_request, response) => {
+    response.writeHead(healthStatus, {'Content-Type': 'application/json'}); response.end(JSON.stringify({status: 'ok'}))
+  })
+  await assert.rejects(callScienceWritingModel(messages), error => {
+    assert.equal((error as any).status, 401); assert.notEqual((error as any).code, 'science_writer_unavailable'); return true
+  })
+  assert.equal(posts, 0)
+  healthStatus = 200
+  process.env.SCIENCE_WRITER_MODEL = 'nonexistent-model'
+  await assert.rejects(callScienceWritingModel(messages), error => {
+    assert.equal((error as any).status, 404); assert.notEqual((error as any).code, 'science_writer_unavailable'); return true
+  })
+  assert.equal(posts, 1)
+})
+
+test('a stalled real writer health check has a bounded timeout without sending generation', {timeout: 6000}, async t => {
+  let posts = 0
+  await fixture(t, (_request, response) => { posts++; respond(response) }, () => {})
+  await assert.rejects(callScienceWritingModel(messages), {code: 'science_writer_unavailable', retryable: true})
+  assert.equal(posts, 0)
+})
+
+test('cancelling a real writer health check preserves the stop reason and sends no generation', async t => {
+  const controller = new AbortController(), reason = new Error('user stopped')
+  let posts = 0
+  await fixture(t, (_request, response) => { posts++; respond(response) }, () => controller.abort(reason))
+  await assert.rejects(callScienceWritingModel(messages, {signal: controller.signal}), error => error === reason)
+  assert.equal(posts, 0)
 })
 
 test('optional bounded thinking keeps science JSON in content and reasoning out of the returned draft', async t => {

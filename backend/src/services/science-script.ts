@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { callTextModel, TextModelTool } from './ai.js'
-import { callScienceWritingModel, getScienceWritingModel } from './science-writing-model.js'
+import { callScienceWritingModel, getScienceWritingModel, ScienceWriterUnavailableError } from './science-writing-model.js'
 
 export const SCIENCE_RECREATION_MODEL = 'gpt-6.1-terra'
 export const SCIENCE_WRITING_VERSION = 'source-paraphrase-v8'
@@ -269,6 +269,7 @@ export async function recreateScienceScript(input: { transcript: string; title: 
         return response
       } catch (error) {
         signal.throwIfAborted()
+        if (phase === 'writing' && error instanceof ScienceWriterUnavailableError) throw error
         const failure = temporaryModelFailure(error)
         if (!failure) throw error
         if (attempt >= maxAttempts) throw new ScienceModelRetryExhaustedError(phase, attempt, failure.status, failure.reason, error)

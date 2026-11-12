@@ -6,6 +6,7 @@ import { transcribeHistoryAudio } from './history-script-processing.js'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { ScienceWriterUnavailableError } from './science-writing-model.js'
 
 const storyFields = {
   sourceTheme: '认识一件熟悉事物身上容易忽略的本领',
@@ -833,6 +834,31 @@ test('a condensed long source below 1000 characters is accepted without padding 
 })
 const httpFailure = (status: number, retryAfterMs?: number) => Object.assign(new Error(`Text model request failed: ${status} upstream unavailable`), { status, retryAfterMs })
 
+test('local writer availability waits propagate immediately without spending model attempts', async () => {
+  const outage = new ScienceWriterUnavailableError()
+  let writes = 0
+  await assert.rejects(recreateScienceScript({ ...retrySource, plan: retryPlan }, {
+    signal: new AbortController().signal,
+    call: async () => assert.fail('The saved source plan must be reused'),
+    write: async () => { writes++; throw outage },
+    onRetry: () => assert.fail('Availability waiting must not spend a model attempt'),
+    sleep: async () => assert.fail('Availability waiting belongs to the durable workflow'),
+  }), error => error === outage)
+  assert.equal(writes, 1)
+})
+
+test('cloud analysis and review network outages still exhaust their finite model retries', async () => {
+  for (const phase of ['analysis', 'review'] as const) {
+    let requests = 0
+    const unavailable = async () => { requests++; throw Object.assign(new Error('connection reset'), {code: 'ECONNRESET'}) }
+    await assert.rejects(recreateScienceScript({ ...retrySource, ...(phase === 'review' ? {plan: retryPlan} : {}) }, {
+      signal: new AbortController().signal, call: unavailable,
+      write: async () => JSON.stringify(retryDraft), review: unavailable, sleep: async () => {},
+    }), {code: 'science_model_retry_exhausted', phase, attempts: 4})
+    assert.equal(requests, 4)
+  }
+})
+
 test('temporary analysis and writing failures retry their own phase with bounded backoff and the same model', async () => {
   let analyses = 0, writings = 0, saved = 0
   const retries: ScienceModelRetry[] = [], waits: number[] = []
@@ -1038,6 +1064,7 @@ test('science uses the general analysis transport and remote structured writer w
     for (const value of Object.values(node)) assertStrictSchema(value)
   }
   t.mock.method(globalThis, 'fetch', async (url: unknown, init: RequestInit) => {
+    if (String(url) === 'http://127.0.0.1:8788/health') return Response.json({status: 'ok'})
     const body = JSON.parse(String(init.body)); bodies.push(body)
     const name = bodies.length === 1 ? SCIENCE_PLAN_TOOL_NAME : 'review_science_script'
     if (bodies.length === 1) {
