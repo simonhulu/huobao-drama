@@ -172,10 +172,10 @@ export class ScienceCollectionService {
     return fs.readdirSync(directory).filter(name => /^science-batch-[a-f0-9-]{36}\.json$/.test(name))
       .map(name => this.read(name.slice(0, -5))).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
-  private publicRun(run: StoredRun): ScienceCollectionRun {
+  private publicRun(run: StoredRun, jobs?: ScienceJob[]): ScienceCollectionRun {
     const { version: _version, requestId: _request, inputHash: _hash, ownerPid: _pid, stopRequested: _stop,
       collectionOwnerPid: _collectionPid, collectionStopRequested: _collectionStop,
-      pendingRetryJobIds: _pendingRetry, pendingProcessingRequest: _pendingProcessing, ...result } = this.synchronize(structuredClone(run))
+      pendingRetryJobIds: _pendingRetry, pendingProcessingRequest: _pendingProcessing, ...result } = this.synchronize(structuredClone(run), jobs)
     return result
   }
   private update(id: string, change: (run: StoredRun) => void) { const run = this.read(id); change(run); this.write(run); return run }
@@ -194,7 +194,9 @@ export class ScienceCollectionService {
     return settings
   }
   overview() {
-    const runs = this.all().map(run => this.publicRun(run))
+    const stored = this.all()
+    const jobs = this.workflow.jobsForCollections(stored.map(run => run.id))
+    const runs = stored.map(run => this.publicRun(run, jobs.get(run.id) ?? []))
     return { settings: this.settings(), runs, activeRun: runs.find(run => isActive(run.status)) || null,
       activeCollection: runs.find(run => run.collection && isActive(run.collection.status)) || null }
   }
@@ -427,8 +429,8 @@ export class ScienceCollectionService {
       return []
     }
   }
-  private synchronize(run: StoredRun) {
-    for (const job of this.workflow.jobsForCollection(run.id)) {
+  private synchronize(run: StoredRun, jobs = this.workflow.jobsForCollection(run.id)) {
+    for (const job of jobs) {
       let item = run.items.find(item => item.jobId === job.id)
       if (!item) {
         const source = parseHistoryYoutubeUrl(job.sourceUrl)

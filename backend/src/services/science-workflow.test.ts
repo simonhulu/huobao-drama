@@ -6,6 +6,7 @@ import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import Database from 'better-sqlite3'
 import sharp from 'sharp'
 import { ScienceWorkflowService, type ScienceWorkflowOptions } from './science-workflow.js'
@@ -18,6 +19,7 @@ import { createScienceWorkflowRoute } from '../routes/science-workflow.js'
 import { createScienceAccountsRoute } from '../routes/science-accounts.js'
 import { ScienceCollectionService, type ScienceCollectionOptions } from './science-collection.js'
 import { SCIENCE_WRITING_VERSION, type ScienceWritingCheckpoint } from './science-script.js'
+import { createStorageRegistry } from './storage-artifacts.js'
 
 const sourceVideoHash = createHash('sha256').update('source-video').digest('hex')
 
@@ -91,6 +93,46 @@ function fixture(t: any, overrides: Partial<ScienceWorkflowOptions> = {}) {
   return { service, route, hs, bjh, h, b, calls, root, payloads, options }
 }
 const sourceUrl = 'https://youtu.be/abcdefghijk'
+
+async function defaultRootFixture(t: test.TestContext, options: ScienceWorkflowOptions) {
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'science-default-root-')))
+  const services = path.join(directory, 'backend/src/services')
+  fs.mkdirSync(services, {recursive: true})
+  fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({type: 'module'}))
+  fs.symlinkSync(fileURLToPath(new URL('../../node_modules', import.meta.url)), path.join(directory, 'backend/node_modules'))
+  const original = fileURLToPath(new URL('.', import.meta.url))
+  // Relocate only modules with repository-relative defaults; use their real code and dependencies.
+  for (const name of fs.readdirSync(original)) {
+    const source = path.join(original, name), destination = path.join(services, name)
+    if (['science-workflow.ts', 'storage-archive.ts'].includes(name)) fs.copyFileSync(source, destination)
+    else fs.symlinkSync(source, destination)
+  }
+  const {ScienceWorkflowService: DefaultWorkflow} = await import(pathToFileURL(path.join(services, 'science-workflow.ts')).href)
+  const {root: _root, ...defaults} = options
+  const service: ScienceWorkflowService = new DefaultWorkflow(defaults)
+  assert.equal(service.root, path.join(directory, 'data/science-pop/jobs'))
+  const priorDb = process.env.DB_PATH
+  process.env.DB_PATH = path.join(directory, 'archive.db')
+  const database = new Database(process.env.DB_PATH), registry = createStorageRegistry(database)
+  t.after(async () => {
+    await service.stop(); database.close()
+    if (priorDb === undefined) delete process.env.DB_PATH; else process.env.DB_PATH = priorDb
+    fs.rmSync(directory, {recursive: true, force: true})
+  })
+  function archived(id: string, present = false) {
+    const filename = path.join(service.root, id, 'archived-extra.mp4'), bytes = 'archived fixture media'
+    fs.mkdirSync(path.dirname(filename), {recursive: true})
+    if (present) fs.writeFileSync(filename, bytes)
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
+    registry.track([{path: filename, role: 'source', bytes: bytes.length, sha256,
+      owners: [{ownerType: 'science', ownerId: id, state: 'completed'}]}])
+    database.prepare("UPDATE storage_artifacts SET state='archived',review_json=? WHERE path=?").run(JSON.stringify({archive: {
+      version: 1, status: 'archived', backupPath: path.join(directory, 'missing-backup.mp4'), sha256, bytes: bytes.length,
+    }}), filename)
+    return () => registry.byPath(filename)!
+  }
+  return {service, archived}
+}
 
 test('collection snapshots scan each job once and preserve ordering, deleted jobs and fresh external state', t => {
   const h = fixture(t), one = `science-batch-${randomUUID()}`, two = `science-batch-${randomUUID()}`
@@ -1440,6 +1482,54 @@ test('read-only upload checks accept only verified submission receipts and rejec
   const result = h.service.detail(job.id)
   assert.equal(result.uploadCheck?.status, 'complete'); assert.equal(result.status, 'completed'); assert.equal(result.uploadStatus, 'submitted')
   assert.equal(h.calls.upload, 0); assert.equal(h.calls.save, 0)
+})
+
+test('default-root receipt checks do not restore archived media for submitted or published uploads', async t => {
+  const h = fixture(t), job = await prepared(h)
+  h.service.produce(job.id); await h.service.waitForIdle()
+  h.service.upload(job.id); await h.service.waitForIdle()
+  const receipt = h.service.detail(job.id).upload!
+  const f = await defaultRootFixture(t, h.options)
+  fs.cpSync(path.join(h.root, 'jobs', job.id), path.join(f.service.root, job.id), {recursive: true})
+  const archived = f.archived(job.id), beforeArchive = structuredClone(archived())
+  const beforeCalls = {...h.calls}
+  let inspections = 0
+  for (const published of [false, true]) {
+    h.options.uploadRuntime!.inspectSocialUploadCheckpoint = async payload => {
+      inspections++
+      assert.equal(payload.jobId, `${job.id}-baijiahao`)
+      return {action: 'complete', phase: published ? 'published' : 'submitted', message: 'Verified receipt',
+        result: {...receipt, published, publicationStatus: published ? 'published' : 'submitted'}}
+    }
+    f.service.checkUpload(job.id); await f.service.waitForIdle()
+    const result = f.service.detail(job.id)
+    assert.equal(result.uploadCheck?.status, 'complete')
+    assert.equal(result.status, 'completed')
+    assert.equal(result.uploadStatus, published ? 'published' : 'submitted')
+    assert.equal(result.executionActive, false)
+    assert.deepEqual(archived(), beforeArchive)
+  }
+  assert.equal(inspections, 2)
+  assert.deepEqual(h.calls, beforeCalls)
+})
+
+test('default-root media work still restores its archived records before preparation', async t => {
+  const h = fixture(t)
+  let archived!: () => Record<string, any>
+  const download = h.options.download!
+  h.options.download = async (input, options) => {
+    assert.equal(archived().state, 'present')
+    assert.equal(JSON.parse(archived().review_json).archive.status, 'restored')
+    return download(input, options)
+  }
+  const f = await defaultRootFixture(t, h.options)
+  const job = f.service.create({sourceUrl}, {defer: true})
+  archived = f.archived(job.id, true)
+  f.service.prepare(job.id); await f.service.waitForIdle()
+  assert.equal(archived().state, 'present')
+  assert.equal(f.service.detail(job.id).status, 'draft')
+  assert.equal(h.calls.download, 1)
+  assert.equal(h.calls.transcribe, 1)
 })
 
 test('review endpoints require a bound inactive attempt and validate every input before the account session', async t => {

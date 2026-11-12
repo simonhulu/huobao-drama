@@ -364,7 +364,7 @@ export class ScienceWorkflowService {
     this.write(job)
     return this.publicJob(job)
   }
-  private launch(id: string, work: (signal: AbortSignal) => Promise<void>) {
+  private launch(id: string, work: (signal: AbortSignal) => Promise<void>, options: { restoreMedia?: boolean } = {}) {
     const job = this.read(id)
     if (this.isExecuting(job)) return this.publicJob(job)
     const release = this.tryExecutionLock(`job:${id}`, id)
@@ -374,7 +374,7 @@ export class ScienceWorkflowService {
     try { this.modify(id, { status: 'running', ownerPid: process.pid, failureKind: undefined, retry: undefined }) }
     catch (error) { liveRuns.delete(this.filename(id)); release(); throw error }
     const done = Promise.resolve().then(async () => {
-      if (this.root===path.resolve(root)) {
+      if (options.restoreMedia !== false && this.root===path.resolve(root)) {
         const {restoreTaskArchivedMedia}=await import('./storage-archive.js')
         await restoreTaskArchivedMedia('science',id)
         controller.signal.throwIfAborted()
@@ -1117,7 +1117,7 @@ export class ScienceWorkflowService {
         this.modify(id, { status: job.status, stage: job.stage, message: job.message,
           uploadCheck: { checkedAt: new Date().toISOString(), status: 'error', message: safeMessage(error) } })
       }
-    })
+    }, { restoreMedia: false })
   }
   async reviewUpload(id: string, input: { view?: 'original' | 'content'; input?: SocialUploadReviewInput } = {}) {
     const { attempt } = this.uploadAttemptForReview(id)
